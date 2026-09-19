@@ -1,0 +1,11 @@
+# torch is NOT listed here: install.sh picks the right ROCm wheel index.
+transformers>=4.45
+accelerate>=0.34
+safetensors
+scikit-learn>=1.4
+numpy
+pandas
+pyarrow
+openai>=1.40
+gguf              # only needed for export_lora.py --gguf
+tqdm

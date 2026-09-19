@@ -1,0 +1,62 @@
+{
+  "clinical": {
+    "cmap": "gray",
+    "bg": "white",
+    "active": "#185FA5",
+    "halluc": "#A32D2D",
+    "size": [
+      2.0,
+      5.0
+    ],
+    "alpha": [
+      0.25,
+      1.0
+    ],
+    "note": "high contrast, print-safe, no colour used decoratively"
+  },
+  "ember": {
+    "cmap": "magma",
+    "bg": "black",
+    "active": "#EF9F27",
+    "halluc": "#F09595",
+    "size": [
+      2.5,
+      7.0
+    ],
+    "alpha": [
+      0.15,
+      1.0
+    ],
+    "note": "dark field, warm ramp; hallucinating neurons read as flare"
+  },
+  "cool": {
+    "cmap": "viridis",
+    "bg": "#0b1015",
+    "active": "#5DCAA5",
+    "halluc": "#ED93B1",
+    "size": [
+      2.0,
+      6.0
+    ],
+    "alpha": [
+      0.2,
+      0.95
+    ],
+    "note": "low eye strain for long sessions"
+  },
+  "mono": {
+    "cmap": "gray",
+    "bg": "black",
+    "active": "#FFFFFF",
+    "halluc": "#E24B4A",
+    "size": [
+      1.5,
+      4.0
+    ],
+    "alpha": [
+      0.3,
+      1.0
+    ],
+    "note": "only the hallucinating population carries colour"
+  }
+}

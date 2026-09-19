@@ -1,0 +1,54 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1"]
+
+[sub_resource type="Environment" id="Env"]
+; BG_COLOR = 1. BG_CANVAS (3) would show the 2D canvas, not a colour.
+background_mode = 1
+background_color = Color(0.02, 0.02, 0.039, 1)
+ambient_light_source = 0
+glow_enabled = true
+glow_intensity = 1.1
+glow_strength = 1.0
+glow_bloom = 0.25
+; Additive = 0. Screen (1) mutes the effect on a dark field.
+glow_blend_mode = 0
+; Cells above this luminance bloom; main.gd pushes flagged cells past it.
+glow_hdr_threshold = 0.85
+fog_enabled = true
+fog_density = 0.0015
+fog_light_color = Color(0.02, 0.02, 0.039, 1)
+
+[sub_resource type="StandardMaterial3D" id="Mat"]
+shading_mode = 0
+transparency = 1
+blend_mode = 1
+; BILLBOARD_ENABLED = 1. PARTICLES (3) is for GPUParticles and adds
+; per-instance rotation these static cells do not want.
+billboard_mode = 1
+vertex_color_use_as_albedo = true
+disable_receive_shadows = true
+no_depth_test = false
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 340, 210, 430)
+far = 6000.0
+
+[node name="Cells" type="MultiMeshInstance3D" parent="."]
+material_override = SubResource("Mat")
+
+; A Control needs a CanvasLayer, not a Node3D parent, or it inherits no
+; canvas transform and lands unpredictably.
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="HUD" type="Label" parent="UI"]
+offset_left = 14.0
+offset_top = 12.0
+offset_right = 620.0
+offset_bottom = 96.0

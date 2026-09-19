@@ -1,0 +1,12 @@
+venv/
+data/activations*/
+data/*.json
+data/*.jsonl
+data/*.parquet
+models/
+*.gguf
+report.html
+preflight.json
+__pycache__/
+.env
+data/TriviaQA/rc.nocontext/*.parquet
