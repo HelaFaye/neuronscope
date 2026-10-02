@@ -42,9 +42,13 @@ from records import Recorder  # noqa: E402
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--binary", required=True)
-    p.add_argument("--gguf", required=True)
-    p.add_argument("--tokenizer", required=True)
+    p.add_argument("--binary", default=None,
+                   help="llama-cett-dump; defaults to $NS_CETT")
+    p.add_argument("--gguf", default=None,
+                   help="model file; defaults to $NS_GGUF")
+    p.add_argument("--tokenizer",
+                   help="Optional: without it the tokenizer and "
+                        "chat template come from the GGUF.")
     p.add_argument("--input_path", required=True)
     p.add_argument("--qid", help="which sample; default the first")
     p.add_argument("--out", required=True, help="session directory")
@@ -73,14 +77,79 @@ def bin_axis(a, bins):
     return out
 
 
+
+def _require_paths(args):
+    """Fall back to the environment, then fail with a sentence, not a
+    numpy traceback. An empty --gguf used to surface as
+    `FileNotFoundError: ''` four frames deep inside np.memmap."""
+    import os as _os
+    args.gguf = args.gguf or _os.environ.get("NS_GGUF", "")
+    args.binary = args.binary or _os.environ.get("NS_CETT", "")
+    problems = []
+    if not args.gguf:
+        problems.append("--gguf is empty and $NS_GGUF is not set")
+    elif not _os.path.isfile(args.gguf):
+        problems.append(f"--gguf does not exist: {args.gguf}")
+    if not args.binary:
+        problems.append("--binary is empty and $NS_CETT is not set")
+    elif not _os.access(args.binary, _os.X_OK):
+        problems.append(f"--binary is not executable: {args.binary}")
+    if problems:
+        raise SystemExit("\n".join(problems) +
+                         "\n\nRun `source env.sh` in this shell first, or pass "
+                         "the paths explicitly.")
+
+
 def main():
     args = parse_args()
-    from transformers import AutoConfig, AutoTokenizer
-    trc = not args.no_trust_remote_code
-    tok = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=trc)
-    cfg = AutoConfig.from_pretrained(args.tokenizer, trust_remote_code=trc)
-    tcfg = getattr(cfg, "text_config", cfg)
-    n_layers = tcfg.num_hidden_layers
+    _require_paths(args)
+    if args.tokenizer:
+        from transformers import AutoConfig, AutoTokenizer
+        trc = not args.no_trust_remote_code
+        tok = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=trc)
+        cfg = AutoConfig.from_pretrained(args.tokenizer, trust_remote_code=trc)
+        tcfg = getattr(cfg, "text_config", cfg)
+        n_layers = tcfg.num_hidden_layers
+        _gguf_tok = None
+    else:
+        # The GGUF carries the vocab, the chat template and the layer count,
+        # so nothing here needs transformers or torch.
+        import gguf_tokenizer
+        _gguf_tok = gguf_tokenizer.load(args.gguf)
+        if not _gguf_tok.has_template:
+            raise SystemExit("this GGUF has no chat template; pass --tokenizer")
+
+        class _Adapter:
+            def __init__(self, t):
+                self.t = t
+
+            def apply_chat_template(self, messages, add_generation_prompt=True,
+                                    tokenize=False):
+                return self.t.render_chat(messages, add_generation_prompt)
+
+            def decode(self, ids):
+                return self.t.decode(ids)
+
+        tok = _Adapter(_gguf_tok)
+        import gguf as _g
+        _r = _g.GGUFReader(args.gguf)
+
+        def _kv(k):
+            f = _r.fields.get(k)
+            if f is None:
+                return None
+            try:
+                v = f.contents()
+                return v.decode("utf-8") if isinstance(v, bytes) else v
+            except Exception:
+                return None
+
+        _arch = _kv("general.architecture")
+        n_layers = int(_kv(f"{_arch}.block_count") or 0)
+        if not n_layers:
+            raise SystemExit(f"could not read block_count from {args.gguf}")
+        print(f"tokenizer from GGUF: {len(_gguf_tok.tokens):,} tokens, "
+              f"{n_layers} layers")
 
     rec = None
     with open(args.input_path, encoding="utf-8") as f:
@@ -111,7 +180,10 @@ def main():
         f.write(json.dumps({"id": args.qid, "text": text},
                            ensure_ascii=False) + "\n")
     base = [args.binary, "-m", args.gguf]
-    subprocess.run(base + ["--tokenize-only", "-ngl", "0",
+    # -c is required even here: without it llama.cpp reserves the model's full
+    # trained context as KV cache (8 GB on this model) for a pass that only
+    # tokenizes, and the OOM killer takes it.
+    subprocess.run(base + ["--tokenize-only", "-ngl", "0", "-c", "4096",
                            "--manifest", m1, "--outdir", work], check=True)
     ids = read_tokens(os.path.join(work, f"{args.qid}.toks"))
     n_tok = len(ids)
@@ -159,7 +231,8 @@ def main():
     binned = bin_axis(trace, args.bin_neurons)
     print(f"binned  {binned.shape} ({binned.nbytes / 1e6:.1f} MB)")
 
-    pieces = [tok.decode([int(i)]) for i in ids]
+    pieces = (_gguf_tok.pieces(ids) if _gguf_tok is not None
+              else [tok.decode([int(i)]) for i in ids])
     meta = {"model": os.path.basename(args.gguf),
             "quant": None, "fingerprint": None,
             "n_layers": n_layers, "n_neurons": binned.shape[-1],

@@ -1,7 +1,10 @@
-import stub, json, os, sys, types, tempfile
-sys.path.insert(0, "/home/claude/neuronscope/scripts")
+import stub, json, os, sys, types, tempfile, pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 import torch
 from profiles import Profile, SuppressionHandle, fingerprint
+from gguf_utils import field_value
 
 FAIL=[]
 def check(name, fn):
@@ -72,27 +75,61 @@ def hooks():
     assert all(not mod._pre for mod in m._m.values())
 check("hooks only text layers, vision untouched", hooks)
 def bounds():
-    bad = Profile.create(fp, geom, "fake/model", {"0":[999]}, 0.1, 4, 64)
     try:
-        SuppressionHandle(FakeModel(cfg), bad)
+        Profile.create(fp, geom, "fake/model", {"0":[999]}, 0.1, 4, 64)
         raise AssertionError("accepted out-of-range neuron")
     except ValueError as e:
         assert "references neuron 999" in str(e), e
 check("rejects out-of-range neuron index", bounds)
-def missing_layer():
-    bad = Profile.create(fp, geom, "fake/model", {"9":[1]}, 0.1, 4, 64)
+def negative_index():
     try:
-        SuppressionHandle(FakeModel(cfg), bad)
+        Profile.create(fp, geom, "fake/model", {"0":[-1]}, 0.1, 4, 64)
+        raise AssertionError("accepted negative neuron index")
+    except ValueError as e:
+        assert "references neuron -1" in str(e), e
+check("rejects negative neuron index", negative_index)
+def duplicate_index():
+    try:
+        Profile.create(fp, geom, "fake/model", {"0":[1,1]}, 0.1, 4, 64)
+        raise AssertionError("accepted duplicate neuron index")
+    except ValueError as e:
+        assert "duplicate neuron 1" in str(e), e
+check("rejects duplicate neuron index", duplicate_index)
+def bad_profile_dims():
+    try:
+        Profile.create(fp, geom, "fake/model", {"4":[1]}, 0.1, 4, 64)
+        raise AssertionError("accepted out-of-range layer")
+    except ValueError as e:
+        assert "layer 4 is outside" in str(e), e
+check("rejects out-of-range layer", bad_profile_dims)
+def missing_layer():
+    try:
+        Profile.create(fp, geom, "fake/model", {"9":[1]}, 0.1, 4, 64)
         raise AssertionError("accepted a layer that does not exist")
     except ValueError as e:
-        assert "never matched" in str(e), e
+        assert "layer 9 is outside" in str(e), e
 check("rejects nonexistent layer", missing_layer)
 
-print("\n[5] Single source of truth for the layer regex")
+print("\n[5] GGUF scalar/string field compatibility")
+class FakeField:
+    def __init__(self, value):
+        self._value = value
+        self.parts = {0: [value]}
+        self.data = [0]
+    def contents(self):
+        return self._value
+check("GGUF string field", lambda: (_ for _ in ()).throw(AssertionError())
+      if field_value(FakeField(b"chat-template")) != "chat-template" else None)
+check("GGUF numeric field", lambda: (_ for _ in ()).throw(AssertionError())
+      if field_value(FakeField(32)) != 32 else None)
+
+print("\n[6] Single source of truth for the layer regex")
 def one_regex():
     import subprocess
-    out = subprocess.run(["grep","-rn","TEXT_LAYER_RE = ",
-        "/home/claude/neuronscope/scripts/"],capture_output=True,text=True).stdout
+    out = subprocess.run(
+        ["grep", "-rn", "TEXT_LAYER_RE = ", str(ROOT / "scripts")],
+        capture_output=True, text=True
+    ).stdout
     assert out.count("\n")==1, out
 check("TEXT_LAYER_RE defined once", one_regex)
 

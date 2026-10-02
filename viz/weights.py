@@ -32,6 +32,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import gguf_utils
+
 import numpy as np
 
 
@@ -46,16 +49,7 @@ def load_down_proj(path, n_layers=None):
     by_name = {t.name: t for t in r.tensors}
 
     def kv(key):
-        f = r.fields.get(key)
-        if f is None:
-            return None
-        try:
-            return f.parts[f.data[0]][0].item()
-        except Exception:
-            try:
-                return bytes(f.parts[f.data[0]]).decode()
-            except Exception:
-                return None
+        return gguf_utils.read_kv(r, key)
 
     arch = kv("general.architecture")
     n_layers = n_layers or (kv(f"{arch}.block_count") if arch else None)

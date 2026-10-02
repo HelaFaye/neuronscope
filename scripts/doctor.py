@@ -14,6 +14,7 @@ Exit status is 0 if the core path is usable, 1 if something required is missing.
 """
 
 import argparse
+import gguf_utils
 import importlib
 import json
 import os
@@ -197,16 +198,7 @@ def check_model(gguf):
         r = g.GGUFReader(gguf)
 
         def kv(k):
-            f = r.fields.get(k)
-            if f is None:
-                return None
-            try:
-                return f.parts[f.data[0]][0].item()
-            except Exception:
-                try:
-                    return bytes(f.parts[f.data[0]]).decode()
-                except Exception:
-                    return None
+            return gguf_utils.read_kv(r, k)
 
         arch = kv("general.architecture")
         n_layers = kv(f"{arch}.block_count") if arch else None

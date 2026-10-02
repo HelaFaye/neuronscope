@@ -22,8 +22,6 @@ direction only, which is all the pipeline needs.
 """
 
 import argparse
-import json
-import sys
 
 # SentencePiece marks a word boundary with U+2581; byte-level BPE uses the
 # GPT-2 byte map, where U+0120 is a leading space.
@@ -72,8 +70,10 @@ class GGufTokenizer:
         if i < 0 or i >= len(self.tokens):
             return ""
         t = self.tokens[i]
-        if t.startswith("<") and t.endswith(">") and len(t) > 2:
-            return ""            # control token, contributes no text
+        if (t.startswith("<") and t.endswith(">") and len(t) > 2
+                and t not in ("<think>", "</think>")
+                and not t.startswith("<|")):
+            return ""
         if self._bpe:
             return _decode_gpt2_bytes(t)
         if self._sp:
@@ -126,13 +126,22 @@ def load(path):
         f = r.fields.get(key)
         if f is None:
             return None
+        # contents() is the correct accessor. Reading parts[data[0]][0] treats a
+        # string field as a numeric array and returns its first *byte*, which is
+        # how chat_template came back as the integer 123 (the '{' character).
         try:
-            return f.parts[f.data[0]][0].item()
+            v = f.contents()
+            return v.decode("utf-8") if isinstance(v, bytes) else v
         except Exception:
-            try:
-                return bytes(f.parts[f.data[0]]).decode("utf-8")
-            except Exception:
-                return None
+            pass
+        try:
+            import gguf as _g
+            if f.types and int(f.types[0]) == int(_g.GGUFValueType.STRING):
+                return str(bytes(f.parts[f.data[0]]), "utf-8")
+            value = f.parts[f.data[0]][0]
+            return value.item() if hasattr(value, "item") else value
+        except Exception:
+            return None
 
     f = r.fields.get("tokenizer.ggml.tokens")
     if f is None:

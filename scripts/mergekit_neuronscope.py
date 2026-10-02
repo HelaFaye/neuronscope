@@ -74,9 +74,33 @@ def _load_masks(path):
         return _CACHE[path]
     with open(path) as f:
         h = json.load(f)
-    masks = {int(k): torch.tensor(sorted(set(v)), dtype=torch.long)
-             for k, v in h["by_layer"].items() if v}
-    _CACHE[path] = (masks, h["n_layers"], h["n_neurons"])
+    n_layers, n_neurons = int(h["n_layers"]), int(h["n_neurons"])
+    if n_layers <= 0 or n_neurons <= 0:
+        raise SystemExit(f"{os.path.basename(path)} has invalid geometry "
+                         f"{n_layers}x{n_neurons}")
+    masks = {}
+    for raw_layer, raw_cols in h["by_layer"].items():
+        layer = int(raw_layer)
+        if layer < 0 or layer >= n_layers:
+            raise SystemExit(
+                f"{os.path.basename(path)}: layer {layer} outside 0..{n_layers - 1}")
+        seen = set()
+        cols = []
+        for raw_col in raw_cols:
+            col = int(raw_col)
+            if col < 0 or col >= n_neurons:
+                raise SystemExit(
+                    f"{os.path.basename(path)}: layer {layer} references neuron "
+                    f"{col}, valid range is 0..{n_neurons - 1}")
+            if col in seen:
+                raise SystemExit(
+                    f"{os.path.basename(path)}: layer {layer} contains duplicate "
+                    f"neuron {col}")
+            seen.add(col)
+            cols.append(col)
+        if cols:
+            masks[layer] = torch.tensor(sorted(cols), dtype=torch.long)
+    _CACHE[path] = (masks, n_layers, n_neurons)
     return _CACHE[path]
 
 

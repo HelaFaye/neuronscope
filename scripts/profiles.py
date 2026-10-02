@@ -34,6 +34,53 @@ from ns_common import TEXT_LAYER_RE, text_config
 PROFILE_VERSION = 1
 
 
+def validate_selection(by_layer, n_layers, n_neurons, *, label="profile"):
+    """Validate a layer -> neuron selection before PyTorch indexing."""
+    try:
+        n_layers = int(n_layers)
+        n_neurons = int(n_neurons)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}: n_layers and n_neurons must be integers") from exc
+    if n_layers <= 0 or n_neurons <= 0:
+        raise ValueError(
+            f"{label}: n_layers and n_neurons must be positive "
+            f"(got {n_layers} x {n_neurons})"
+        )
+
+    normalized = {}
+    for raw_layer, raw_cols in by_layer.items():
+        try:
+            layer = int(raw_layer)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}: invalid layer index {raw_layer!r}") from exc
+        if layer < 0 or layer >= n_layers:
+            raise ValueError(
+                f"{label}: layer {layer} is outside 0..{n_layers - 1}"
+            )
+        cols = []
+        seen = set()
+        for raw_col in raw_cols:
+            try:
+                col = int(raw_col)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{label}: invalid neuron index {raw_col!r} in layer {layer}"
+                ) from exc
+            if col < 0 or col >= n_neurons:
+                raise ValueError(
+                    f"{label}: layer {layer} references neuron {col}, "
+                    f"but valid indices are 0..{n_neurons - 1}"
+                )
+            if col in seen:
+                raise ValueError(
+                    f"{label}: layer {layer} contains duplicate neuron {col}"
+                )
+            seen.add(col)
+            cols.append(col)
+        normalized[layer] = sorted(cols)
+    return normalized
+
+
 def fingerprint(config):
     """Stable id for a model's architecture.
 
@@ -66,6 +113,7 @@ class Profile:
                n_layers, n_neurons, config_name="default", provenance=None):
         by_layer = {str(k): sorted(int(n) for n in v)
                     for k, v in by_layer.items() if v}
+        validate_selection(by_layer, n_layers, n_neurons, label="profile")
         total = sum(len(v) for v in by_layer.values())
         return cls({
             "version": PROFILE_VERSION,
@@ -91,6 +139,14 @@ class Profile:
             data = json.load(f)
         if data.get("version") != PROFILE_VERSION:
             raise ValueError(f"profile version {data.get('version')} not supported")
+        required = ("fingerprint", "geometry", "scale", "n_layers",
+                    "n_neurons", "by_layer")
+        missing = [key for key in required if key not in data]
+        if missing:
+            raise ValueError(f"profile missing required fields: {', '.join(missing)}")
+        validate_selection(
+            data["by_layer"], data["n_layers"], data["n_neurons"], label="profile"
+        )
         return cls(data)
 
     def save(self, root="profiles"):
@@ -129,6 +185,23 @@ class Profile:
                 f"  model   : {geom}\n"
                 "Neuron indices are model-specific and do not transfer."
             )
+        t = text_config(model.config)
+        model_layers = int(t.num_hidden_layers)
+        model_neurons = int(t.intermediate_size)
+        if int(self.data.get("n_layers", -1)) != model_layers:
+            raise ValueError(
+                f"profile declares {self.data.get('n_layers')} layers but the model "
+                f"has {model_layers}"
+            )
+        if int(self.data.get("n_neurons", -1)) != model_neurons:
+            raise ValueError(
+                f"profile declares {self.data.get('n_neurons')} neurons per layer "
+                f"but the model has {model_neurons}"
+            )
+        validate_selection(
+            self.data["by_layer"], model_layers, model_neurons, label="profile"
+        )
+
         name = getattr(model.config, "_name_or_path", None)
         if name and self.data.get("model_name") and \
                 name != self.data["model_name"]:
@@ -158,6 +231,10 @@ class SuppressionHandle:
         self._targets = []
 
         by_layer = profile.by_layer
+        validate_selection(
+            by_layer, profile.data["n_layers"], profile.data["n_neurons"],
+            label="profile"
+        )
         for name, module in model.named_modules():
             if "down_proj" not in name or not isinstance(module, torch.nn.Linear):
                 continue
@@ -168,10 +245,10 @@ class SuppressionHandle:
             if layer not in by_layer:
                 continue
             cols = by_layer[layer]
-            if max(cols) >= module.in_features:
+            if module.in_features != profile.data["n_neurons"]:
                 raise ValueError(
                     f"{name} has {module.in_features} inputs but the profile "
-                    f"references neuron {max(cols)}"
+                    f"declares {profile.data['n_neurons']} neurons"
                 )
             # Device is resolved inside the hook: with device_map offload the
             # activation may not arrive on the device the weight was on at

@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scripts"))
+import gguf_utils
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -81,16 +82,7 @@ def _gguf_meta(path):
         r = gguf.GGUFReader(path)
 
         def kv(key):
-            f = r.fields.get(key)
-            if f is None:
-                return None
-            try:
-                return f.parts[f.data[0]][0].item()
-            except Exception:
-                try:
-                    return bytes(f.parts[f.data[0]]).decode()
-                except Exception:
-                    return None
+            return gguf_utils.read_kv(r, key)
 
         arch = kv("general.architecture")
         out["arch"] = arch
@@ -536,7 +528,8 @@ def start_server(model, settings, port):
     if settings.get("parallel", 1) > 1:
         cmd += ["-np", str(settings["parallel"])]
     if settings.get("flash_attn"):
-        cmd += ["-fa"]
+        # llama.cpp now requires a value: -fa on|off|auto
+        cmd += ["-fa", "on"]
     if settings.get("cache_type"):
         cmd += ["--cache-type-k", settings["cache_type"]]
         cmd += ["--cache-type-v", settings.get("cache_type_v")

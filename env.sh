@@ -8,7 +8,8 @@
 
 # Resolve by filesystem UUID so a different mount point still works.
 NS_VOLUME_UUID="19c7eeb5-52f1-4c37-8483-e37745655fc7"
-NS_MODEL_REL=".models/lmstudio-community/Ornith-1.0-9B-GGUF/Ornith-1.0-9B-Q6_K.gguf"
+# Override without editing:  NS_MODEL_REL=... source env.sh
+: "${NS_MODEL_REL:=.models/mradermacher/Huihui-Ornith-1.5-9B-abliterated-GGUF/Huihui-Ornith-1.5-9B-abliterated.Q6_K.gguf}"
 
 if [[ -e "/dev/disk/by-uuid/${NS_VOLUME_UUID}" ]]; then
     _dev=$(readlink -f "/dev/disk/by-uuid/${NS_VOLUME_UUID}")
@@ -20,11 +21,13 @@ fi
 : "${_mnt:=/run/media/hela/${NS_VOLUME_UUID}}"
 
 export NS_GGUF="${_mnt}/${NS_MODEL_REL}"
-export NS_TOKENIZER="ornith-ai/Ornith-1.0-9B"
+# The tokenizer and chat template are read from the GGUF itself, so no
+# HF repo is needed. Set NS_TOKENIZER only to force the transformers path.
+export NS_TOKENIZER="${NS_TOKENIZER:-}"
 export NS_LLAMA="${HOME}/llama.cpp"
 export NS_CETT="${NS_LLAMA}/build/bin/llama-cett-dump"
 
-# Ornith is 32 decoder layers; confirm with preflight.py before a real run.
+# Ornith-1.5-9B: 32 blocks (8 attention, 24 SSM). Confirmed by cett-dump.
 # AMDVLK Pro is installed and failing to initialise (-3) on this box. RADV
 # handles it fine, but llama.cpp and wgpu enumerate ICDs themselves and may not
 # skip as gracefully, so pin RADV explicitly.

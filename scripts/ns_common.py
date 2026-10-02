@@ -12,14 +12,10 @@ the upstream repo does not:
     because chat templates for reasoning models strip <think> from prior turns
 """
 
-import re
-
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Decoder layers: model.layers.N or language_model.model.layers.N
-TEXT_LAYER_RE = re.compile(r"(?:^|\.)(?:language_model\.)?model\.layers\.(\d+)\.")
-THINK_CLOSE = "</think>"
+from ns_constants import TEXT_LAYER_RE, THINK_CLOSE, normalise_piece
 
 
 def text_config(cfg):
@@ -140,9 +136,6 @@ def build_sequence(tokenizer, question, response):
     )["input_ids"][0]
     return torch.cat([prompt_ids, resp_ids]), len(prompt_ids)
 
-
-def normalise_piece(tok):
-    return tok.replace("\u2581", " ").replace("\u0120", " ")
 
 
 def find_think_end(pieces, start, end):

@@ -1,0 +1,10 @@
+{
+  "id": "eval",
+  "label": "Eval",
+  "glyph": "\u2713",
+  "summary": "Paired evaluation of two endpoints on held-out tasks.",
+  "surfaces": ["control"],
+  "route": "/#eval",
+  "author": "example",
+  "grants": ["read:profiles", "run:merge_eval"]
+}

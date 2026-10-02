@@ -41,6 +41,10 @@ def main():
             if answer:
                 ids = tok(answer, add_special_tokens=False)["input_ids"]
                 pieces = [tok.decode([i]) for i in ids]
+            # Count what was produced, not what was attempted: a tokenizer
+            # missing its vocab returns nothing for every string, and counting
+            # attempts reported that as total success.
+            if pieces:
                 tagged += 1
             else:
                 untagged += 1
@@ -55,6 +59,12 @@ def main():
                 "task": d.get("task"),
             }}, ensure_ascii=False) + "\n")
     print(f"tagged {tagged}, left empty {untagged}")
+    if tagged == 0 and untagged:
+        raise SystemExit(
+            "\nno answer produced any tokens -- the tokenizer is not loading. "
+            "Check the --model_path directory has tokenizer.json or "
+            "tokenizer.model, not just config.json. Or skip this stage: "
+            "extract_activations_gguf.py finds spans from the answer string.")
 
 if __name__ == "__main__":
     main()

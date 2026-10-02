@@ -46,6 +46,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ns_common import TEXT_LAYER_RE, load_model, text_config  # noqa: E402
+from profiles import validate_selection  # noqa: E402
 from profiles import fingerprint  # noqa: E402
 
 TRIPLE = ("gate_proj", "up_proj", "down_proj")
@@ -150,7 +151,10 @@ def main():
             raise SystemExit(
                 f"h_neurons.json is {h.get('n_layers')}x{h.get('n_neurons')}, "
                 f"models are {n_layers}x{n_ff}")
-        selection = {int(k): sorted(set(v)) for k, v in h["by_layer"].items()
+        validate_selection(
+            h["by_layer"], n_layers, n_ff, label=os.path.basename(args.h_neurons)
+        )
+        selection = {int(k): list(v) for k, v in h["by_layer"].items()
                      if int(k) in layers}
         if not selection:
             raise SystemExit("no H-Neurons fall inside --layers")

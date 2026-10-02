@@ -61,6 +61,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <climits>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -98,6 +99,54 @@ struct dump_ctx {
     // Counts are tracked per (span, layer, expert) because a token only reaches
     // the experts it was routed to: dividing by the span length would be wrong.
     std::vector<int32_t> counts;
+
+    // llama_decode splits a batch into ubatches (-ub, default 512) and the
+    // callback fires once per layer PER UBATCH, with token indices local to
+    // that ubatch. Spans are in sequence positions, so the ubatch offset has
+    // to be tracked here. Without it, every token past the first ubatch was
+    // dropped and early spans were overwritten with later tokens.
+    int32_t n_total    = 0;          // tokens in the sequence
+    int32_t next_off   = 0;          // start of the next ubatch
+    int32_t ub_off     = 0;          // start of the current ubatch
+    int32_t ub_size    = 0;          // tokens in the current ubatch
+    int32_t last_layer = INT32_MAX;  // sentinel: first callback opens ubatch 0
+    int32_t pruned     = -1;         // layer that only computed output rows
+
+    // Called before a layer is accumulated. Returns false if the layer's rows
+    // are not one-per-token (llama.cpp computes the final layer's FFN only for
+    // tokens that produce logits, usually just the last one) and must be
+    // skipped rather than misattributed to the start of the sequence.
+    bool begin_layer(int32_t layer, int32_t n_tok) {
+        if (layer < last_layer) {            // layer index wrapped: new ubatch
+            ub_off   = next_off;
+            ub_size  = n_tok;
+            next_off += n_tok;
+        }
+        last_layer = layer;
+        if (n_tok != ub_size) {
+            if (pruned != layer) {
+                fprintf(stderr, "cett-dump: layer %d has %d rows for a "
+                        "%d-token ubatch (output-only); left unseen\n",
+                        layer, n_tok, ub_size);
+                pruned = layer;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // Intersection of span si with the current ubatch, in ubatch-local rows.
+    bool local_range(size_t si, int32_t & a, int32_t & b) const {
+        const int32_t s0 = spans[si].start;
+        const int32_t s1 = spans[si].end < 0 ? n_total : spans[si].end;
+        if (s0 < 0 || s1 > n_total || s1 <= s0) return false;
+        const int32_t lo = s0 > ub_off ? s0 : ub_off;
+        const int32_t hi = s1 < ub_off + ub_size ? s1 : ub_off + ub_size;
+        if (hi <= lo) return false;
+        a = lo - ub_off;
+        b = hi - ub_off;
+        return true;
+    }
 
     void init(int32_t nl, int32_t nff, int32_t ne) {
         n_layers = nl; n_ff = nff; n_experts = ne;
@@ -328,6 +377,7 @@ static void moe_accumulate(dump_ctx * d, ggml_tensor * t, int layer) {
     const int32_t n_embd   = (int32_t) t->ne[0];
     const int32_t n_expert = (int32_t) w->ne[2];
 
+    if (!d->begin_layer(layer, n_tok)) return;
     if (d->agg.empty()) {
         d->init(d->n_layers, n_ff_exp, n_expert);
     }
@@ -348,9 +398,8 @@ static void moe_accumulate(dump_ctx * d, ggml_tensor * t, int layer) {
     const int32_t * eid = (const int32_t *) idbuf.data();
 
     for (size_t si = 0; si < d->spans.size(); ++si) {
-        const int32_t s0 = d->spans[si].start;
-        const int32_t s1 = d->spans[si].end < 0 ? n_tok : d->spans[si].end;
-        if (s0 < 0 || s1 > n_tok || s1 <= s0) continue;
+        int32_t s0, s1;
+        if (!d->local_range(si, s0, s1)) continue;
 
         for (int32_t j = s0; j < s1; ++j) {
             for (int32_t u = 0; u < n_used; ++u) {
@@ -448,6 +497,7 @@ static bool eval_callback(ggml_tensor * t, bool ask, void * user_data) {
         norms[j] = (float) sqrt(acc);
     }
 
+    if (!d->begin_layer(layer, n_tok)) return true;
     if (d->agg.empty()) {
         d->init(d->n_layers, n_ff, 1);
     }
@@ -465,10 +515,9 @@ static bool eval_callback(ggml_tensor * t, bool ask, void * user_data) {
     // so the Python side applies w_j once at the end, from the GGUF. This keeps
     // the weights out of this process entirely.
     for (size_t si = 0; si < d->spans.size(); ++si) {
-        const int32_t s0 = d->spans[si].start;
-        const int32_t s1 = d->spans[si].end < 0 ? n_tok : d->spans[si].end;
-        if (s0 < 0 || s1 > n_tok || s1 <= s0) {
-            continue;   // empty or out-of-range span: nothing written for it
+        int32_t s0, s1;
+        if (!d->local_range(si, s0, s1)) {
+            continue;   // span not in this ubatch
         }
         float * dst = d->agg.data() + d->cell(si, layer, 0) * (size_t) n_ff;
         int32_t count = 0;
@@ -489,7 +538,7 @@ static bool eval_callback(ggml_tensor * t, bool ask, void * user_data) {
         }
         // Division happens in write_aggregate, uniformly with the MoE path.
         d->counts[d->cell(si, layer, 0)] += count;
-        d->seen[d->cell(si, layer, 0)] = count > 0 ? 1 : 0;
+        if (count > 0) d->seen[d->cell(si, layer, 0)] = 1;
     }
     d->n_records++;
 
@@ -528,6 +577,7 @@ static bool run_one(llama_context * ctx, const common_params & params,
     // Header. Token ids are emitted so the Python side locates answer spans
     // against the tokenization that actually produced these activations.
     const uint32_t n_tokens = (uint32_t) tokens.size();
+    dump.n_total = (int32_t) n_tokens;
     dump.out.write(MAGIC, 4);
     dump.out.write((const char *) &FORMAT_VERSION, sizeof(uint32_t));
     dump.out.write((const char *) &n_tokens, sizeof(uint32_t));
@@ -551,6 +601,13 @@ static bool run_one(llama_context * ctx, const common_params & params,
     const bool ok = llama_decode(
         ctx, llama_batch_get_one(tokens.data(), (int32_t) tokens.size())) == 0;
     g_active = nullptr;
+
+    if (ok && !dump.failed && dump.next_off != dump.n_total) {
+        fprintf(stderr, "cett-dump: saw %d of %d tokens across ubatches; "
+                        "refusing to write a partial dump\n",
+                dump.next_off, dump.n_total);
+        dump.failed = true;
+    }
 
     dump.out.close();
     if (ok && !dump.failed && !dump.agg.empty()) {

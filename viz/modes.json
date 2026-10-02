@@ -1,0 +1,63 @@
+{
+  "_comment": "The mode registry. Every NeuronScope surface renders its tabs from this file, so a new mode is an entry here rather than a code change in four frontends. `surfaces` lists which frontends implement a mode; one that does not yet implement it shows the tab disabled rather than hiding it, so the navigation is the same everywhere and a missing feature is visible instead of silent.",
+  "version": 1,
+  "modes": [
+    {
+      "id": "run",
+      "label": "Run",
+      "glyph": "\u25b6",
+      "summary": "Pipeline state, stage launching, live logs.",
+      "surfaces": ["control"],
+      "route": "/#run"
+    },
+    {
+      "id": "chat",
+      "label": "Chat",
+      "glyph": "\u25cf",
+      "summary": "Load a model and talk to it; suppression and expert dials.",
+      "surfaces": ["studio"],
+      "route": "/#chat"
+    },
+    {
+      "id": "live",
+      "label": "Live",
+      "glyph": "\u25c9",
+      "summary": "Activation stream during generation.",
+      "surfaces": ["stream", "godot", "bloom"],
+      "route": "/#live"
+    },
+    {
+      "id": "replay",
+      "label": "Replay",
+      "glyph": "\u25d0",
+      "summary": "Token-resolved trace, scrubbable.",
+      "surfaces": ["timeline", "bloom", "godot"],
+      "route": "/#replay"
+    },
+    {
+      "id": "weights",
+      "label": "Weights",
+      "glyph": "\u25a4",
+      "summary": "Magnitude, quantization error, H-Neuron enrichment.",
+      "surfaces": ["weights", "control"],
+      "route": "/#weights"
+    },
+    {
+      "id": "compare",
+      "label": "Compare",
+      "glyph": "\u25eb",
+      "summary": "Two models or two profiles, side by side.",
+      "surfaces": ["compare", "control"],
+      "route": "/#compare"
+    },
+    {
+      "id": "recipes",
+      "label": "Recipes",
+      "glyph": "\u2261",
+      "summary": "Saved multi-stage runs. Declarative, reviewed before they run.",
+      "surfaces": ["control"],
+      "route": "/#recipes",
+      "planned": true
+    }
+  ]
+}

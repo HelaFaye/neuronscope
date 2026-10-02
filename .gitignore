@@ -9,4 +9,9 @@ report.html
 preflight.json
 __pycache__/
 .env
+.env.example
 data/TriviaQA/rc.nocontext/*.parquet
+logs/
+models_1v1*/
+runs/
+data/
