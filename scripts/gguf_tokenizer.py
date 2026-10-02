@@ -72,8 +72,10 @@ class GGufTokenizer:
         if i < 0 or i >= len(self.tokens):
             return ""
         t = self.tokens[i]
-        if t.startswith("<") and t.endswith(">") and len(t) > 2:
-            return ""            # control token, contributes no text
+        if (t.startswith("<") and t.endswith(">") and len(t) > 2
+                and t not in ("<think>", "</think>")
+                and not t.startswith("<|")):
+            return ""
         if self._bpe:
             return _decode_gpt2_bytes(t)
         if self._sp:
@@ -123,6 +125,24 @@ def load(path):
     r = gguf.GGUFReader(path)
 
     def kv(key):
+        f = r.fields.get(key)
+        if f is None:
+            return None
+        # contents() is the correct accessor. Reading parts[data[0]][0] treats a
+        # string field as a numeric array and returns its first *byte*, which is
+        # how chat_template came back as the integer 123 (the '{' character).
+        try:
+            v = f.contents()
+            return v.decode("utf-8") if isinstance(v, bytes) else v
+        except Exception:
+            pass
+        try:
+            import gguf as _g
+            if f.types and int(f.types[0]) == int(_g.GGUFValueType.STRING):
+                return str(bytes(f.parts[f.data[0]]), "utf-8")
+            return f.parts[f.data[0]][0].item()
+        except Exception:
+            return None
         f = r.fields.get(key)
         if f is None:
             return None

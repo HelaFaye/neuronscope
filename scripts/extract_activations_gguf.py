@@ -52,9 +52,9 @@ FORMAT_VERSION = 1
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--binary", required=True, help="path to llama-cett-dump")
-    p.add_argument("--gguf", required=True, help="the model to extract from")
-    p.add_argument("--tokenizer", required=True,
+    p.add_argument("--binary", default=None, help="path to llama-cett-dump (default $NS_CETT)")
+    p.add_argument("--gguf", default=None, help="the model to extract from (default $NS_GGUF)")
+    p.add_argument("--tokenizer", default=None,
                    help="HF repo or path. Optional: without it the tokenizer "
                         "is read from the GGUF, which avoids needing "
                         "transformers (and therefore torch) at all.")
@@ -168,7 +168,8 @@ def expert_col_norms(gguf_path, n_layers, n_experts, n_ff):
     return out
 
 
-def find_regions(pieces, prompt_len, answer_tokens, skip_think):
+def find_regions(pieces, prompt_len, answer_tokens, skip_think,
+                 answer_text=None):
     n = len(pieces)
     search_from = prompt_len
     if skip_think:
@@ -181,11 +182,6 @@ def find_regions(pieces, prompt_len, answer_tokens, skip_think):
     if not answer_tokens and answer_text:
         # No stage 2 output: locate the answer by string, which is what the
         # GGUF path does. Equivalent result, one fewer tool in the chain.
-        import gguf_tokenizer
-        regions["answer_tokens"] = gguf_tokenizer.find_answer_span(
-            pieces, answer_text, start=search_from)
-        return regions
-    if not answer_tokens and answer_text:
         import gguf_tokenizer
         regions["answer_tokens"] = gguf_tokenizer.find_answer_span(
             pieces, answer_text, start=search_from)
@@ -233,7 +229,10 @@ def run_tool(args, manifest, outdir, tokenize_only, n_layers=None):
     cmd = [args.binary, "-m", args.gguf, "--manifest", manifest,
            "--outdir", outdir]
     if tokenize_only:
-        cmd += ["--tokenize-only", "-ngl", "0"]
+        # -c is required even here: without it llama.cpp reserves the
+        # model's full trained context (262k on Ornith, ~8 GB of KV) for a
+        # pass that only tokenizes, and the OOM killer takes it.
+        cmd += ["--tokenize-only", "-ngl", "0", "-c", "4096"]
     else:
         cmd += ["-ngl", str(args.ngl), "-b", str(args.batch),
                 "-c", str(args.batch), "--n-layers", str(n_layers)]
@@ -259,11 +258,42 @@ class _GGufAdapter:
         return self.t.decode(ids)
 
     def pieces(self, ids):
-        return self.t.pieces(ids)
+        # <think> and </think> must survive: the answer is searched for after
+        # </think>, and without it "York" matches inside the reasoning first.
+        out = []
+        for i in ids:
+            raw = self.t.tokens[int(i)] if 0 <= int(i) < len(self.t.tokens) else ""
+            out.append(raw if raw in ("<think>", "</think>")
+                       else self.t.decode_id(i))
+        return out
+
+
+
+def _require_paths(args):
+    """Fall back to the environment, then fail with a sentence, not a
+    numpy traceback. An empty --gguf used to surface as
+    `FileNotFoundError: ''` four frames deep inside np.memmap."""
+    import os as _os
+    args.gguf = args.gguf or _os.environ.get("NS_GGUF", "")
+    args.binary = args.binary or _os.environ.get("NS_CETT", "")
+    problems = []
+    if not args.gguf:
+        problems.append("--gguf is empty and $NS_GGUF is not set")
+    elif not _os.path.isfile(args.gguf):
+        problems.append(f"--gguf does not exist: {args.gguf}")
+    if not args.binary:
+        problems.append("--binary is empty and $NS_CETT is not set")
+    elif not _os.access(args.binary, _os.X_OK):
+        problems.append(f"--binary is not executable: {args.binary}")
+    if problems:
+        raise SystemExit("\n".join(problems) +
+                         "\n\nRun `source env.sh` in this shell first, or pass "
+                         "the paths explicitly.")
 
 
 def main():
     args = parse_args()
+    _require_paths(args)
     if args.tokenizer:
         from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained(
@@ -295,10 +325,12 @@ def main():
     for loc in args.locations:
         os.makedirs(os.path.join(args.output_root, loc), exist_ok=True)
 
-    skipped = {"not_target": 0, "too_long": 0, "no_answer_span": 0, "failed": 0}
+    skipped = {"not_target": 0, "too_long": 0, "no_answer_span": 0, "failed": 0,
+               "span_not_captured": 0, "prompt_mismatch": 0}
 
     # ---- phase 0: render sequences -----------------------------------------
     wanted, m1 = [], os.path.join(args.output_root, "_manifest_toks.jsonl")
+    prompt_lines = []
     with open(m1, "w", encoding="utf-8") as mf:
         for sample in samples:
             qid = next(iter(sample))
@@ -309,7 +341,15 @@ def main():
             prompt = tok.apply_chat_template(
                 [{"role": "user", "content": data["question"]}],
                 add_generation_prompt=True, tokenize=False)
-            prompt_len = len(tok(prompt, add_special_tokens=True)["input_ids"])
+            if use_gguf_tok:
+                # Measured in phase 1 by tokenizing the prompt on its own with
+                # the same binary, so it is in the exact tokenization used.
+                prompt_len = None
+                prompt_lines.append(json.dumps(
+                    {"id": f"{qid}__prompt", "text": prompt},
+                    ensure_ascii=False))
+            else:
+                prompt_len = len(tok(prompt, add_special_tokens=True)["input_ids"])
             mf.write(json.dumps({"id": qid, "text": prompt + data["response"]},
                                 ensure_ascii=False) + "\n")
             wanted.append((qid, data, prompt_len))
@@ -319,6 +359,11 @@ def main():
     # Spans have to be expressed in the tokenization that will produce the
     # activations, so this pass gets the ids with no forward passes.
     print("\nphase 1/2: tokenizing")
+    if prompt_lines:
+        m0 = os.path.join(args.output_root, "_manifest_prompts.jsonl")
+        with open(m0, "w", encoding="utf-8") as pf:
+            pf.write("\n".join(prompt_lines) + "\n")
+        run_tool(args, m0, tok_dir, tokenize_only=True)
     run_tool(args, m1, tok_dir, tokenize_only=True)
 
     # ---- phase 2: spans, then the forward passes ---------------------------
@@ -336,6 +381,14 @@ def main():
                 continue
             pieces = (tok.pieces(token_ids) if use_gguf_tok
                       else [tok.decode([int(i)]) for i in token_ids])
+            if prompt_len is None:
+                ppath = os.path.join(tok_dir, f"{qid}__prompt.toks")
+                if os.path.exists(ppath):
+                    pids = read_tokens(ppath)
+                    if list(token_ids[:len(pids)]) == list(pids):
+                        prompt_len = len(pids)
+                    else:
+                        skipped["prompt_mismatch"] += 1
             if prompt_len is None:
                 # Walk the decoded pieces until the rendered prompt is covered.
                 acc, prompt_len = 0, 0
@@ -361,11 +414,24 @@ def main():
     if not plans:
         raise SystemExit("nothing to extract; check --locations and answer spans")
 
-    from transformers import AutoConfig
-    cfg = AutoConfig.from_pretrained(
-        args.tokenizer, trust_remote_code=not args.no_trust_remote_code)
-    tcfg = getattr(cfg, "text_config", cfg)
-    n_layers = tcfg.num_hidden_layers
+    if args.tokenizer:
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(
+            args.tokenizer, trust_remote_code=not args.no_trust_remote_code)
+        n_layers = getattr(cfg, "text_config", cfg).num_hidden_layers
+    else:
+        # Layer count from the GGUF itself: no transformers, no torch.
+        import gguf
+        _r = gguf.GGUFReader(args.gguf)
+        def _kv(key):
+            fld = _r.fields.get(key)
+            if fld is None:
+                return None
+            v = fld.contents()
+            return v.decode("utf-8") if isinstance(v, bytes) else v
+        n_layers = int(_kv(f"{_kv('general.architecture')}.block_count") or 0)
+        if not n_layers:
+            raise SystemExit(f"could not read block_count from {args.gguf}")
 
     print(f"\nphase 2/2: {len(plans)} forward passes, {n_layers} layers")
     run_tool(args, m2, dump_dir, tokenize_only=False, n_layers=n_layers)
@@ -421,7 +487,12 @@ def main():
             np.save(os.path.join(args.output_root, loc, f"act_{qid}.npy"),
                     (red * col_norms).astype(np.float16))
             wrote = True
-        written += 1 if wrote else 0
+        if wrote:
+            written += 1
+        else:
+            # Dumps from cett-dump builds before the ubatch fix never captured
+            # tokens past position 512, so any answer there landed here.
+            skipped["span_not_captured"] += 1
 
     print(f"\nwrote {written} samples; skipped {skipped}")
     print(f"intermediate dumps in {dump_dir} can be deleted once you are happy")
