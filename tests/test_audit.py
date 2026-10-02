@@ -1,5 +1,6 @@
 import stub, json, os, sys, types, tempfile
-sys.path.insert(0, "/home/claude/neuronscope/scripts")
+_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+sys.path.insert(0, _SCRIPTS)
 import torch
 from profiles import Profile, SuppressionHandle, fingerprint
 
@@ -92,7 +93,7 @@ print("\n[5] Single source of truth for the layer regex")
 def one_regex():
     import subprocess
     out = subprocess.run(["grep","-rn","TEXT_LAYER_RE = ",
-        "/home/claude/neuronscope/scripts/"],capture_output=True,text=True).stdout
+        _SCRIPTS],capture_output=True,text=True).stdout
     assert out.count("\n")==1, out
 check("TEXT_LAYER_RE defined once", one_regex)
 
