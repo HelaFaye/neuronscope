@@ -10,3 +10,8 @@ preflight.json
 __pycache__/
 .env
 data/TriviaQA/rc.nocontext/*.parquet
+logs/
+models_1v1*/
+runs/
+data/
+delegation.json
