@@ -58,5 +58,29 @@
       1.0
     ],
     "note": "only the hallucinating population carries colour"
+  },
+  "_ui": {
+    "neuronscope-dark": {
+      "label": "NeuronScope Dark",
+      "bg": "#07070b",
+      "panel": "#101018",
+      "panel_2": "#16161f",
+      "line": "#22222e",
+      "line_strong": "#32323f",
+      "fg": "#d6d6e0",
+      "fg_dim": "#8a8a98",
+      "fg_faint": "#5c5c68",
+      "accent": "#9D7BE8",
+      "accent_dim": "#6B4FA8",
+      "teal": "#3FBFB0",
+      "teal_dim": "#2A8078",
+      "emerald": "#2FD08A",
+      "emerald_dim": "#1E8A5C",
+      "danger": "#8E1B1B",
+      "danger_fg": "#E8756F",
+      "warn": "#8A4A1E",
+      "warn_fg": "#D99A55",
+      "note": "purple for interactive state, teal for data, emerald for success. Blood red and burnt umber are reserved for errors and warnings and appear nowhere else -- a colour that shows up decoratively stops carrying information."
+    }
   }
 }

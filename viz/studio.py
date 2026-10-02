@@ -536,7 +536,8 @@ def start_server(model, settings, port):
     if settings.get("parallel", 1) > 1:
         cmd += ["-np", str(settings["parallel"])]
     if settings.get("flash_attn"):
-        cmd += ["-fa"]
+        # llama.cpp now requires a value: -fa on|off|auto
+        cmd += ["-fa", "on"]
     if settings.get("cache_type"):
         cmd += ["--cache-type-k", settings["cache_type"]]
         cmd += ["--cache-type-v", settings.get("cache_type_v")

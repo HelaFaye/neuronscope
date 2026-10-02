@@ -55,6 +55,13 @@ def parse_args():
     p.add_argument("--fps", type=float, default=8.0)
     p.add_argument("--play", action="store_true")
     p.add_argument("--dump", metavar="NPZ", help="write frames and exit, no GPU")
+    p.add_argument("--volume", action="store_true",
+                   help="4D: render every frame at once with time as the depth "
+                        "axis, instead of one frame sliding along Z. The whole "
+                        "trace is visible as a solid, so a burst is a shape "
+                        "rather than a flash you have to catch.")
+    p.add_argument("--decay", type=float, default=0.55,
+                   help="--volume: how much older frames fade, 0 = none")
     p.add_argument("--list-themes", action="store_true")
     return p.parse_args()
 
@@ -174,6 +181,46 @@ def main():
 
     lo, hi = theme["size"]
     a_lo, a_hi = theme["alpha"]
+
+    if args.volume:
+        # True 4D. Every (frame, cell) that was ever active becomes its own
+        # point at depth z = frame, so the time axis is geometry rather than
+        # animation state. The cost is one point per active cell per frame
+        # instead of per cell, which is why only active ones are built.
+        fi, li, ni = np.nonzero(active)
+        n_pts = len(fi)
+        print(f"volume: {n_pts:,} points ({T} frames x "
+              f"{active[0].sum():,} avg active)")
+        vmax = float(np.percentile(frames, 99.5)) or 1.0
+        v = np.clip(frames[fi, li, ni] / vmax, 0, 1)
+        hal = halluc[fi, li, ni]
+
+        pos = np.column_stack([
+            ni.astype(np.float32),
+            li.astype(np.float32) * (N / max(L, 1)) * 0.05,
+            fi.astype(np.float32) * 3.0,
+        ])
+        # Older frames recede rather than vanishing: depth does the ordering,
+        # brightness only marks recency so the newest edge stays readable.
+        age = 1.0 - (fi / max(T - 1, 1))
+        fade = 1.0 - args.decay * age
+        colors = np.tile(_rgba(theme["active"], 1.0), (n_pts, 1))
+        colors[hal] = _rgba(theme["halluc"], 1.0)
+        colors[:, 3] = np.clip((a_lo + (a_hi - a_lo) * v) * fade, 0.02, 1.0)
+        sizes = (lo + (hi - lo) * v) * np.where(hal, 1.6, 1.0)
+
+        fig = fpl.Figure(shape=(2, 1), size=(1100, 820), cameras=[["3d"], ["2d"]],
+                         names=[["volume: neuron x layer x time"],
+                                ["score over tokens"]])
+        fig[0, 0].add_scatter(pos.astype(np.float32), colors=colors,
+                              sizes=sizes, name="cells")
+        fig[1, 0].add_line(
+            np.column_stack([np.arange(T, dtype=np.float32), z]),
+            colors=theme["halluc"], thickness=2.0, name="score z")
+        print("\ndepth is time: the whole trace is one solid. Drag to orbit.")
+        fig.show()
+        fpl.loop.run()
+        return
 
     fig = fpl.Figure(shape=(2, 1), size=(1100, 760), cameras=[["3d"], ["2d"]],
                      names=[["trace"], ["score over tokens"]])
