@@ -22,6 +22,7 @@ latter overestimates by the GQA ratio, often 4x or 8x.
 """
 
 import argparse
+import gguf_utils
 import json
 import os
 import sys
@@ -52,34 +53,7 @@ def read_gguf_shape(path):
     r = gguf.GGUFReader(path)
 
     def kv(key):
-        f = r.fields.get(key)
-        if f is None:
-            return None
-        # contents() is the correct accessor. Reading parts[data[0]][0] treats a
-        # string field as a numeric array and returns its first *byte*, which is
-        # how chat_template came back as the integer 123 (the '{' character).
-        try:
-            v = f.contents()
-            return v.decode("utf-8") if isinstance(v, bytes) else v
-        except Exception:
-            pass
-        try:
-            import gguf as _g
-            if f.types and int(f.types[0]) == int(_g.GGUFValueType.STRING):
-                return str(bytes(f.parts[f.data[0]]), "utf-8")
-            return f.parts[f.data[0]][0].item()
-        except Exception:
-            return None
-        f = r.fields.get(key)
-        if f is None:
-            return None
-        try:
-            return f.parts[f.data[0]][0].item()
-        except Exception:
-            try:
-                return bytes(f.parts[f.data[0]]).decode()
-            except Exception:
-                return None
+        return gguf_utils.read_kv(r, key)
 
     arch = kv("general.architecture")
     if not arch:

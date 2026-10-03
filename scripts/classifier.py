@@ -66,6 +66,12 @@ def parse_args():
     return p.parse_args()
 
 
+def load_qids(path):
+    with open(path) as f:
+        ids = json.load(f)
+    return set(ids.get("t", [])) | set(ids.get("f", []))
+
+
 def collect_paths(ids_path, acts_root, ans_dir, other_dir, mode):
     """Returns [(path, label)] without loading anything."""
     with open(ids_path) as f:
@@ -119,6 +125,16 @@ def evaluate(coef, intercept, X, y, name):
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+
+    if args.train_ids and args.test_ids:
+        overlap = load_qids(args.train_ids) & load_qids(args.test_ids)
+        if overlap:
+            sample = ", ".join(sorted(overlap)[:5])
+            suffix = "..." if len(overlap) > 5 else ""
+            raise SystemExit(
+                f"train/test qid overlap: {len(overlap)} ids ({sample}{suffix}). "
+                "Use disjoint qid files before reporting test metrics."
+            )
 
     with open(os.path.join(args.acts_root, "neuron_index.json")) as f:
         idx_meta = json.load(f)

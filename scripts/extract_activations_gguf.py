@@ -44,7 +44,7 @@ import numpy as np
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ns_common import THINK_CLOSE, normalise_piece  # noqa: E402
+from ns_constants import THINK_CLOSE, normalise_piece  # noqa: E402
 
 MAGIC = b"CETT"
 FORMAT_VERSION = 1
@@ -352,7 +352,7 @@ def main():
                 prompt_len = len(tok(prompt, add_special_tokens=True)["input_ids"])
             mf.write(json.dumps({"id": qid, "text": prompt + data["response"]},
                                 ensure_ascii=False) + "\n")
-            wanted.append((qid, data, prompt_len))
+            wanted.append((qid, data, prompt_len, prompt))
     print(f"{len(wanted)} sequences")
 
     # ---- phase 1: tokenize -------------------------------------------------
@@ -363,14 +363,16 @@ def main():
         m0 = os.path.join(args.output_root, "_manifest_prompts.jsonl")
         with open(m0, "w", encoding="utf-8") as pf:
             pf.write("\n".join(prompt_lines) + "\n")
-        run_tool(args, m0, tok_dir, tokenize_only=True)
-    run_tool(args, m1, tok_dir, tokenize_only=True)
+        if run_tool(args, m0, tok_dir, tokenize_only=True) != 0:
+            raise SystemExit("tokenization of rendered prompts failed")
+    if run_tool(args, m1, tok_dir, tokenize_only=True) != 0:
+        raise SystemExit("tokenization of prompt+response sequences failed")
 
     # ---- phase 2: spans, then the forward passes ---------------------------
     m2 = os.path.join(args.output_root, "_manifest_spans.jsonl")
     plans, n_layers = [], None
     with open(m1, encoding="utf-8") as src, open(m2, "w", encoding="utf-8") as mf:
-        for (qid, data, prompt_len), line in zip(wanted, src):
+        for (qid, data, prompt_len, prompt), line in zip(wanted, src):
             tpath = os.path.join(tok_dir, f"{qid}.toks")
             if not os.path.exists(tpath):
                 skipped["failed"] += 1
@@ -434,7 +436,8 @@ def main():
             raise SystemExit(f"could not read block_count from {args.gguf}")
 
     print(f"\nphase 2/2: {len(plans)} forward passes, {n_layers} layers")
-    run_tool(args, m2, dump_dir, tokenize_only=False, n_layers=n_layers)
+    if run_tool(args, m2, dump_dir, tokenize_only=False, n_layers=n_layers) != 0:
+        raise SystemExit("llama-cett-dump activation pass failed")
 
     # ---- assemble ----------------------------------------------------------
     col_norms, written = None, 0

@@ -22,8 +22,6 @@ direction only, which is all the pipeline needs.
 """
 
 import argparse
-import json
-import sys
 
 # SentencePiece marks a word boundary with U+2581; byte-level BPE uses the
 # GPT-2 byte map, where U+0120 is a leading space.
@@ -140,19 +138,10 @@ def load(path):
             import gguf as _g
             if f.types and int(f.types[0]) == int(_g.GGUFValueType.STRING):
                 return str(bytes(f.parts[f.data[0]]), "utf-8")
-            return f.parts[f.data[0]][0].item()
+            value = f.parts[f.data[0]][0]
+            return value.item() if hasattr(value, "item") else value
         except Exception:
             return None
-        f = r.fields.get(key)
-        if f is None:
-            return None
-        try:
-            return f.parts[f.data[0]][0].item()
-        except Exception:
-            try:
-                return bytes(f.parts[f.data[0]]).decode("utf-8")
-            except Exception:
-                return None
 
     f = r.fields.get("tokenizer.ggml.tokens")
     if f is None:

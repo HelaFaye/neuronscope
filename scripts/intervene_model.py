@@ -36,6 +36,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ns_common import TEXT_LAYER_RE, load_model  # noqa: E402
+from profiles import validate_selection  # noqa: E402
 
 
 def parse_args():
@@ -73,7 +74,12 @@ def main():
             print("no --scale given, defaulting to 0.1; "
                   "tune_scale.py picks this properly")
 
+    by_layer = validate_selection(
+        by_layer, spec["n_layers"], n_neurons, label=os.path.basename(src)
+    )
     total = sum(len(v) for v in by_layer.values())
+    if total == 0:
+        raise SystemExit(f"{src}: contains no selected neurons")
     print(f"{total} H-Neurons across {len(by_layer)} layers "
           f"({total / (spec['n_layers'] * n_neurons) * 100:.4f}% of all neurons)")
 

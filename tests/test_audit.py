@@ -1,101 +1,285 @@
-import stub, json, os, sys, types, tempfile
-_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
-sys.path.insert(0, _SCRIPTS)
+import os
+import subprocess
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+import pytest
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+
 from profiles import Profile, SuppressionHandle, fingerprint
+from gguf_utils import field_value
 
-FAIL=[]
-def check(name, fn):
-    try:
-        fn(); print(f"  PASS  {name}")
-    except Exception as e:
-        FAIL.append(name); print(f"  FAIL  {name}: {type(e).__name__}: {e}")
 
-cfg = types.SimpleNamespace(model_type="qwen3", num_hidden_layers=4,
-    hidden_size=32, intermediate_size=64, num_attention_heads=4,
-    vocab_size=1000, _name_or_path="fake/model")
+CFG = types.SimpleNamespace(
+    model_type="qwen3",
+    num_hidden_layers=4,
+    hidden_size=32,
+    intermediate_size=64,
+    num_attention_heads=4,
+    vocab_size=1000,
+    _name_or_path="fake/model",
+)
+
 
 class FakeModel:
-    def __init__(s, cfg, layers=4, inter=64, vision=True):
-        s.config=cfg; s._m={}
+    def __init__(self, cfg, layers=4, inter=64, vision=True):
+        self.config = cfg
+        self._m = {}
+
         for i in range(layers):
-            s._m[f"model.layers.{i}.mlp.down_proj"]=torch.nn.Linear(32, inter)
-        if vision:  # the trap the regex exists to avoid
-            s._m["vision_tower.encoder.layers.0.mlp.down_proj"]=torch.nn.Linear(16,99)
-    def named_modules(s): return list(s._m.items())
+            self._m[f"model.layers.{i}.mlp.down_proj"] = torch.nn.Linear(
+                inter, 32
+            )
 
-fp, geom = fingerprint(cfg)
-prof = Profile.create(fp, geom, "fake/model", {"0":[1,2],"2":[5]},
-                      scale=0.1, n_layers=4, n_neurons=64, config_name="t1")
+        if vision:
+            self._m[
+                "vision_tower.encoder.layers.0.mlp.down_proj"
+            ] = torch.nn.Linear(16, 99)
 
-print("\n[1] Profile carries the dims intervene_model.py reads")
-check("n_neurons present", lambda: prof.data["n_neurons"])
-check("n_layers present",  lambda: prof.data["n_layers"])
-def intervene_contract():
-    spec=prof.data
-    by_layer={int(k):v for k,v in spec["by_layer"].items()}
-    n=spec["n_neurons"]; total=sum(len(v) for v in by_layer.values())
-    pct = total/(spec["n_layers"]*n)*100
-    assert abs(pct - 3/256*100) < 1e-9, pct
-check("intervene_model.py read path", intervene_contract)
+    def named_modules(self):
+        return list(self._m.items())
 
-print("\n[2] Round-trip through disk")
-def roundtrip():
+
+@pytest.fixture
+def profile():
+    fp, geom = fingerprint(CFG)
+    return Profile.create(
+        fp,
+        geom,
+        "fake/model",
+        {"0": [1, 2], "2": [5]},
+        scale=0.1,
+        n_layers=4,
+        n_neurons=64,
+        config_name="t1",
+    )
+
+
+def test_profile_carries_dimensions(profile):
+    assert profile.data["n_neurons"] == 64
+    assert profile.data["n_layers"] == 4
+
+    spec = profile.data
+    by_layer = {int(k): v for k, v in spec["by_layer"].items()}
+    total = sum(len(v) for v in by_layer.values())
+    pct = total / (spec["n_layers"] * spec["n_neurons"]) * 100
+    assert abs(pct - 3 / 256 * 100) < 1e-9
+
+
+def test_profile_roundtrip(profile):
     with tempfile.TemporaryDirectory() as d:
-        p = prof.save(d)
-        assert os.path.basename(p)=="t1.json"
-        back = Profile.load(p)
-        assert back.by_layer == {0:[1,2],2:[5]}
-        assert back.data["n_neurons"]==64
-check("save/load", roundtrip)
+        path = profile.save(d)
+        assert os.path.basename(path) == "t1.json"
 
-print("\n[3] Geometry gate")
-def rejects_mismatch():
-    other = types.SimpleNamespace(**{**vars(cfg), "intermediate_size":128})
-    m = FakeModel(other, inter=128)
-    try:
-        prof.check(m); raise AssertionError("accepted a mismatched model")
-    except ValueError: pass
-check("rejects wrong geometry", rejects_mismatch)
-check("accepts matching geometry", lambda: prof.check(FakeModel(cfg)))
+        loaded = Profile.load(path)
+        assert loaded.by_layer == {0: [1, 2], 2: [5]}
+        assert loaded.data["n_neurons"] == 64
+        assert loaded.data["n_layers"] == 4
 
-print("\n[4] Hook wiring")
-def hooks():
-    m = FakeModel(cfg)
-    h = SuppressionHandle(m, prof)
-    assert len(h._targets)==2, h._targets
-    assert {l for l,_ in h._targets}=={0,2}
-    # the vision tower must never be touched
-    assert m._m["vision_tower.encoder.layers.0.mlp.down_proj"]._pre == []
-    assert h.scale==0.1
-    h.set_scale(0.5); assert h.scale==0.5
-    h.remove()
-    assert all(not mod._pre for mod in m._m.values())
-check("hooks only text layers, vision untouched", hooks)
-def bounds():
-    bad = Profile.create(fp, geom, "fake/model", {"0":[999]}, 0.1, 4, 64)
-    try:
-        SuppressionHandle(FakeModel(cfg), bad)
-        raise AssertionError("accepted out-of-range neuron")
-    except ValueError as e:
-        assert "references neuron 999" in str(e), e
-check("rejects out-of-range neuron index", bounds)
-def missing_layer():
-    bad = Profile.create(fp, geom, "fake/model", {"9":[1]}, 0.1, 4, 64)
-    try:
-        SuppressionHandle(FakeModel(cfg), bad)
-        raise AssertionError("accepted a layer that does not exist")
-    except ValueError as e:
-        assert "never matched" in str(e), e
-check("rejects nonexistent layer", missing_layer)
 
-print("\n[5] Single source of truth for the layer regex")
-def one_regex():
-    import subprocess
-    out = subprocess.run(["grep","-rn","TEXT_LAYER_RE = ",
-        _SCRIPTS],capture_output=True,text=True).stdout
-    assert out.count("\n")==1, out
-check("TEXT_LAYER_RE defined once", one_regex)
+def test_profile_rejects_geometry_mismatch(profile):
+    other = types.SimpleNamespace(
+        **{**vars(CFG), "intermediate_size": 128}
+    )
+    with pytest.raises(ValueError):
+        profile.check(FakeModel(other, inter=128))
 
-print("\n" + ("ALL PASS" if not FAIL else f"{len(FAIL)} FAILURES: {FAIL}"))
-sys.exit(1 if FAIL else 0)
+
+def test_profile_accepts_matching_geometry(profile):
+    profile.check(FakeModel(CFG))
+
+
+def test_hooks_only_target_text_layers(profile):
+    model = FakeModel(CFG)
+    handle = SuppressionHandle(model, profile)
+
+    assert len(handle._targets) == 2
+    assert {layer for layer, _ in handle._targets} == {0, 2}
+
+    vision = model._m[
+        "vision_tower.encoder.layers.0.mlp.down_proj"
+    ]
+    assert len(vision._forward_pre_hooks) == 0
+
+    assert handle.scale == 0.1
+    handle.set_scale(0.5)
+    assert handle.scale == 0.5
+
+    handle.remove()
+    assert all(len(module._forward_pre_hooks) == 0 for module in model._m.values())
+
+
+def _fingerprint_geometry():
+    return fingerprint(CFG)
+
+
+def test_rejects_out_of_range_neuron_index():
+    fp, geom = _fingerprint_geometry()
+
+    with pytest.raises(
+        ValueError,
+        match=r"references neuron 999",
+    ):
+        Profile.create(
+            fp,
+            geom,
+            "fake/model",
+            {"0": [999]},
+            0.1,
+            4,
+            64,
+        )
+
+
+def test_rejects_negative_neuron_index():
+    fp, geom = _fingerprint_geometry()
+
+    with pytest.raises(
+        ValueError,
+        match=r"references neuron -1",
+    ):
+        Profile.create(
+            fp,
+            geom,
+            "fake/model",
+            {"0": [-1]},
+            0.1,
+            4,
+            64,
+        )
+
+
+def test_rejects_duplicate_neuron_index():
+    fp, geom = _fingerprint_geometry()
+
+    with pytest.raises(
+        ValueError,
+        match=r"duplicate neuron 1",
+    ):
+        Profile.create(
+            fp,
+            geom,
+            "fake/model",
+            {"0": [1, 1]},
+            0.1,
+            4,
+            64,
+        )
+
+
+def test_rejects_out_of_range_layer():
+    fp, geom = _fingerprint_geometry()
+
+    with pytest.raises(
+        ValueError,
+        match=r"layer 4 is outside",
+    ):
+        Profile.create(
+            fp,
+            geom,
+            "fake/model",
+            {"4": [1]},
+            0.1,
+            4,
+            64,
+        )
+
+
+def test_rejects_nonexistent_layer():
+    fp, geom = _fingerprint_geometry()
+
+    with pytest.raises(
+        ValueError,
+        match=r"layer 9 is outside",
+    ):
+        Profile.create(
+            fp,
+            geom,
+            "fake/model",
+            {"9": [1]},
+            0.1,
+            4,
+            64,
+        )
+
+
+def test_gguf_string_field():
+    class FakeField:
+        def __init__(self, value):
+            self._value = value
+            self.parts = {0: [value]}
+            self.data = [0]
+
+        def contents(self):
+            return self._value
+
+    assert field_value(FakeField(b"chat-template")) == "chat-template"
+
+
+def test_gguf_numeric_field():
+    class FakeField:
+        def __init__(self, value):
+            self._value = value
+            self.parts = {0: [value]}
+            self.data = [0]
+
+        def contents(self):
+            return self._value
+
+    assert field_value(FakeField(32)) == 32
+
+
+def test_layer_regex_defined_once():
+    matches = []
+
+    for path in SCRIPTS.rglob("*.py"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "TEXT_LAYER_RE =" in line:
+                matches.append(f"{path}:{lineno}")
+
+    assert len(matches) == 1, matches
+
+
+def test_extractor_has_no_merge_conflict_markers():
+    path = SCRIPTS / "extract_activations_gguf.py"
+    text = path.read_text(encoding="utf-8")
+
+    for marker in ("<" * 7, "=" * 7, ">" * 7, "|" * 7):
+        assert marker not in text
+
+
+def test_repository_has_no_merge_conflict_markers():
+    files = [
+        ROOT / ".gitignore",
+        SCRIPTS / "extract_activations_gguf.py",
+        SCRIPTS / "gguf_tokenizer.py",
+        SCRIPTS / "vram_budget.py",
+        ROOT / "tests" / "test_audit.py",
+        ROOT / "viz" / "weights.py",
+    ]
+
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for marker in ("<" * 7, "=" * 7, ">" * 7, "|" * 7):
+            assert marker not in text, path
+
+
+def test_git_diff_check():
+    result = subprocess.run(
+        ["git", "diff", "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

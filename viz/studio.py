@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scripts"))
+import gguf_utils
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -81,16 +82,7 @@ def _gguf_meta(path):
         r = gguf.GGUFReader(path)
 
         def kv(key):
-            f = r.fields.get(key)
-            if f is None:
-                return None
-            try:
-                return f.parts[f.data[0]][0].item()
-            except Exception:
-                try:
-                    return bytes(f.parts[f.data[0]]).decode()
-                except Exception:
-                    return None
+            return gguf_utils.read_kv(r, key)
 
         arch = kv("general.architecture")
         out["arch"] = arch

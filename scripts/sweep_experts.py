@@ -36,6 +36,7 @@ import time
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gguf_utils
 from merge_eval import GRADERS, compare, kind_of, mcnemar, run_endpoint  # noqa
 
 
@@ -71,16 +72,7 @@ def gguf_moe_info(path):
     r = gguf.GGUFReader(path)
 
     def kv(key):
-        f = r.fields.get(key)
-        if f is None:
-            return None
-        try:
-            return f.parts[f.data[0]][0].item()
-        except Exception:
-            try:
-                return bytes(f.parts[f.data[0]]).decode()
-            except Exception:
-                return None
+        return gguf_utils.read_kv(r, key)
 
     arch = kv("general.architecture")
     if not arch:
