@@ -48,7 +48,7 @@
   pessimistic per-subject utility; manual choices are always honoured. UI
   shows an orange ⚠ with an explanation for models without stats, stats lines
   and tables, and the reason behind each auto pick.
-- TestQA bank reorganised by subject (163 graded items, at least 20 per subject):
+- TestQA bank reorganised by subject (210 graded items, 30 per subject):
   new logic, science, factual (including false-premise) and code
   (API-existence) items; writing graded by mechanical `constraints`
   checks; vision items with deterministically generated images

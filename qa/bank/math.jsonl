@@ -23,3 +23,8 @@
 {"id": "r-monty", "kind": "reasoning", "subject": "math", "prompt": "In the Monty Hall problem with three doors, what is the probability of winning the car if you always switch? Give a fraction.", "answer": "2/3", "answer_type": "number"}
 {"id": "r-handshakes", "kind": "reasoning", "subject": "math", "prompt": "Ten people each shake hands with every other person exactly once. How many handshakes are there?", "answer": "45", "answer_type": "number"}
 {"id": "q-pi", "kind": "qa", "subject": "math", "prompt": "What are the first three digits of pi, including the 3? Respond with the answer only.", "aliases": ["3.14", "314"]}
+{"id": "r-pow12", "kind": "reasoning", "subject": "math", "prompt": "What is 2 to the power of 12?", "answer": "4096", "answer_type": "number"}
+{"id": "r-eggs", "kind": "reasoning", "subject": "math", "prompt": "A recipe uses 3 eggs for 12 cookies. How many eggs are needed for 60 cookies?", "answer": "15", "answer_type": "number"}
+{"id": "r-lcm", "kind": "reasoning", "subject": "math", "prompt": "What is the least common multiple of 12 and 18?", "answer": "36", "answer_type": "number"}
+{"id": "r-width", "kind": "reasoning", "subject": "math", "prompt": "A rectangle's length is twice its width and its area is 72 square units. What is its width?", "answer": "6", "answer_type": "number"}
+{"id": "r-dice7", "kind": "reasoning", "subject": "math", "prompt": "Two fair six-sided dice are rolled. What is the probability that the total is 7? Give a fraction.", "answer": "1/6", "answer_type": "number"}

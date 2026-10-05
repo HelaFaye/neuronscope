@@ -34,6 +34,8 @@ REFERENCE = {
     "top_k_frequent": "from collections import Counter\ndef top_k_frequent(words,k):\n    c=Counter(words)\n    return sorted(c,key=lambda w:(-c[w],w))[:k]",
     "is_anagram": "def is_anagram(a,b):\n    f=lambda s: sorted(s.replace(' ','').lower())\n    return f(a)==f(b)",
     "matmul": "def matmul(a,b):\n    if not a or not b or len(a[0])!=len(b): raise ValueError('shape')\n    return [[sum(x*y for x,y in zip(r,c)) for c in zip(*b)] for r in a]",
+    "run_length_encode": "from itertools import groupby\ndef run_length_encode(s):\n    return ''.join(f'{k}{len(list(g))}' for k,g in groupby(s))",
+    "valid_ipv4": "def valid_ipv4(s):\n    p=s.split('.')\n    return len(p)==4 and all(x.isdigit() and str(int(x))==x and int(x)<=255 for x in p)",
     "to_snake_case": "import re\ndef to_snake_case(n):\n    n=re.sub(r'([A-Z]+)([A-Z][a-z])',r'\\1_\\2',n)\n    return re.sub(r'([a-z\\d])([A-Z])',r'\\1_\\2',n).lower()",
 }
 
@@ -44,7 +46,6 @@ WRITING = {
     "w-two-sent": ("The cat naps in the sun. It wakes only for dinner.", "The cat naps."),
     "w-slogan": ("Every adventure starts with a sip.", "Stay hydrated."),
     "w-tips": ("- Keep a schedule\n- Avoid screens late\n- Keep the room cool\n- Skip late caffeine", "- Keep a schedule\n- Avoid screens"),
-    "w-lipogram": ("Rain falls softly on a dark city road.", "Rain falls softly on the quiet street."),
     "w-summary": ("Regular exercise strengthens the heart and lungs, helps control weight, lifts mood through endorphins, improves sleep, and lowers the risk of chronic diseases such as diabetes.", "It is good."),
     "w-json": ('{"title": "Bread at Home", "tags": ["baking", "bread"]}', "Title: Bread at Home"),
     "w-limerick": ("A coder who worked through the night\nkept fixing a bug out of sight\nshe changed just one line\nand all ran fine\nthen the tests went from red into bright", "A coder who worked through the night"),
@@ -60,6 +61,17 @@ WRITING = {
     "w-steps": ("1. Boil water\n2. Steep the tea\n3. Pour and enjoy", "1. Boil water\n3. Pour"),
     "w-although": ("Although it rained all day, we still enjoyed our long walk outside.", "Although it rained, we walked."),
     "w-title": ("The Robot Who Lost Its Way", "the robot who lost its way!"),
+    "w-question": ("Where can I find books about local history?", "I want books about local history."),
+    "w-then-question": ("It is raining hard today. Will it stop by noon?", "It is raining hard today. It will stop by noon."),
+    "w-fruits": ("1. Apple\n2. Banana\n3. Cherry\n4. Mango\n5. Pear", "1. Apple\n2. Banana\n3. Cherry"),
+    "w-five-words": ("Keep going, you are close.", "Keep going."),
+    "w-csv": ("name,age\nAlice,30\nBob,25", "name,age\nAlice,30"),
+    "w-alpha": ("apple\nbanana\ncherry", "cherry\napple\nbanana"),
+    "w-yesno": ("Yes, water makes other things wet.", "Water is wet, yes."),
+    "w-markdown": ("# Notes\n- buy milk\n- call Sam", "## Notes\n- buy milk\n- call Sam"),
+    "w-quote": ('She said "see you soon" and left.', "She said see you soon and left."),
+    "w-lowercase": ("coffee tastes best in the morning.", "Coffee tastes best in the morning."),
+    "w-paragraphs": ("The Moon orbits Earth.\n\nIt has phases.\n\nIt causes tides.", "The Moon orbits Earth. It has phases. It causes tides."),
 }
 
 
@@ -108,6 +120,7 @@ def test_code_exec_requires_opt_in():
     ("Answer: 1,000", {"answer": "1000", "answer_type": "number"}, "correct"),
     ("<think>maybe 41</think>Answer: 42", {"answer": "42", "answer_type": "number"}, "correct"),
     ("Answer: 41", {"answer": "42", "answer_type": "number"}, "wrong"),
+    ("Answer: 9 - 4 = 5", {"answer": "5", "answer_type": "number"}, "correct"),
     ("Answer: (A)", {"answer": "A", "answer_type": "choice"}, "correct"),
     ("Answer: B", {"answer": "A", "answer_type": "choice"}, "wrong"),
     ("Answer: Friday.", {"answer": "Friday", "answer_type": "text"}, "correct"),
@@ -127,7 +140,7 @@ def test_expect_abstain_qa():
 
 def test_bank_ids_unique_and_subjects_known():
     tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
-    assert len(tasks) == len({t["id"] for t in tasks}) >= 160
+    assert len(tasks) == len({t["id"] for t in tasks}) >= 210
     assert {t["subject"] for t in tasks} <= set(sc.SUBJECTS)
 
 
@@ -135,7 +148,7 @@ def test_every_subject_has_enough_graded_items():
     tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
     graded = Counter(t["subject"] for t in tasks if t["kind"] != "canary")
     assert set(graded) == set(sc.SUBJECTS)
-    assert min(graded.values()) >= 20, graded
+    assert min(graded.values()) >= 30, graded
 
 
 def test_writing_checks_accept_good_and_reject_bad():

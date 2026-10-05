@@ -18,18 +18,18 @@ re-applied without asking the models again.
 
 ## The bank (`qa/bank/<subject>.jsonl`)
 
-One file per subject, each with at least 20 graded items, so every subject
+One file per subject, each with 30 graded items, so every subject
 gets a usable per-subject estimate from a single run:
 
 | subject | graded | what it contains |
 |---|---|---|
-| code | 28 | 21 executable functions (the interpreter), 4 API-existence tasks (`code`: every referenced stdlib symbol must exist), 3 short facts |
-| math | 25 | arithmetic, algebra, probability, combinatorics, classic trick questions |
-| logic | 22 | syllogisms, ordering, knights and knaves, lateral-thinking traps |
-| science | 24 | 18 short facts, 6 physics/chemistry calculations |
-| factual | 23 | 19 facts plus 4 **false-premise or unanswerable** questions, where the right answer is to say so |
-| writing | 20 | instruction following, checked mechanically (`constraints`) |
-| vision | 21 | generated images: counting, colour, shape, position, reading text |
+| code | 30 | 23 executable functions (the interpreter), 4 API-existence tasks (`code`: every referenced stdlib symbol must exist), 3 short facts |
+| math | 30 | arithmetic, algebra, probability, combinatorics, classic trick questions |
+| logic | 30 | syllogisms, ordering, knights and knaves, lateral-thinking traps |
+| science | 30 | 22 short facts, 8 physics/chemistry calculations |
+| factual | 30 | 24 facts plus 6 **false-premise or unanswerable** questions, where the right answer is to say so |
+| writing | 30 | instruction following, checked mechanically (`constraints`) |
+| vision | 30 | generated images: counting, colour, shape, position, reading text |
 | (canary) | 7 | ungraded general prompts: answered vs refused |
 
 ```bash
@@ -45,7 +45,7 @@ How each kind is graded:
 | `code_exec` | **the interpreter**: the reply's code runs against unit tests |
 | `code` | every module attribute the code uses must exist |
 | `qa` | gold aliases; `expect_abstain` items count declining (or naming the false premise) as correct |
-| `constraints` | mechanical checks: `lines`, `sentences`, `bullets`, `numbered`, `min_words`/`max_words`, `max_chars`, `must_include`, `must_not_include`, `forbid_chars`, `regex`, `starts_with`, `ends_with`, `json_keys`, `acrostic`, `title_case` |
+| `constraints` | mechanical checks: `lines`, `sentences`, `paragraphs`, `bullets`, `numbered`, `min_words`/`max_words`, `max_chars`, `must_include`, `must_not_include`, `forbid_chars`, `regex`, `starts_with`, `ends_with`, `json_keys`, `acrostic`, `title_case` |
 | `canary` | ungraded |
 
 A wrong answer is a **hallucination** in the per-subject report: the model
@@ -111,7 +111,7 @@ round-robin across task kinds, with a fixed `--seed` so runs are comparable.
 The report always ends with a per-subject block:
 
 ```
-per subject (right / hallucinated / abstained, 95% CI on right; '*' = fewer than 20 graded)
+per subject (right / hallucinated / abstained, 95% CI on right; '*' = fewer than 30 graded)
   m
     code      n  28   right   79% [ 60%- 90%]   halluc   14%   abstain    7%
     factual   n  23   right   74% [ 54%- 87%]   halluc    9%   abstain   17%

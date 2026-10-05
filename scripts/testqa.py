@@ -16,7 +16,8 @@ Task kinds (qa/bank/*.jsonl, mixable, one JSON object per line):
     qa         {"prompt", "aliases": [...], "expect_abstain"?: bool}
     constraints {"prompt", "checks": {...}}  instruction following, checked
                mechanically: lines, sentences, bullets, numbered, min/max_words,
-               max_chars, must_include, must_not_include, forbid_chars, regex,
+               max_chars, must_include, must_not_include, forbid_chars,
+               paragraphs, regex,
                starts_with, ends_with, json_keys, acrostic, title_case
     canary     {"prompt"}  ungraded; answered vs refused
 
@@ -97,7 +98,8 @@ def grade_reasoning(text: str, task: dict) -> str:
     kind = task.get("answer_type", "text")
     gold = str(task["answer"])
     if kind == "number":
-        got, want = parse_number(ans), parse_number(gold)
+        # "9 - 4 = 5": the result is what follows the last "=".
+        got, want = parse_number(ans.rsplit("=", 1)[-1]), parse_number(gold)
         if got is None:
             # Fall back to the last number anywhere in the reply.
             nums = NUM_RE.findall(body)
@@ -170,6 +172,10 @@ def check_constraints(text: str, checks: dict) -> list[str]:
     for w in c.get("must_not_include", []):
         if w.lower() in low:
             fail.append(f"contains {w!r}")
+    if "paragraphs" in c:
+        n = len([b for b in re.split(r"\n\s*\n", body) if b.strip()])
+        if n != c["paragraphs"]:
+            fail.append(f"{n} paragraphs, want {c['paragraphs']}")
     if c.get("forbid_chars") and any(ch in body for ch in c["forbid_chars"]):
         fail.append("uses a forbidden character")
     for rx in c.get("regex", []):
@@ -559,7 +565,7 @@ def main(argv=None) -> int:
     p.add_argument("--per-subject", type=int, default=0, metavar="N",
                    help="balanced sample of up to N graded tasks per subject")
     p.add_argument("--seed", type=int, default=0, help="sampling seed for --per-subject")
-    p.add_argument("--min-subject-n", type=int, default=20, help="flag subjects graded on fewer items")
+    p.add_argument("--min-subject-n", type=int, default=30, help="flag subjects graded on fewer items")
     p.add_argument("--list", action="store_true", help="show bank coverage by subject and kind, then exit")
     p.add_argument("--reference", help="label compared against (default: first endpoint)")
     p.add_argument("--allow-exec", action="store_true", help="run code_exec tasks (executes model-written code)")
