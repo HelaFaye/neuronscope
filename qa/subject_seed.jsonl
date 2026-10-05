@@ -1,0 +1,70 @@
+{"subject": "code", "prompt": "Why does my Python script raise KeyError when reading this dict?"}
+{"subject": "code", "prompt": "Refactor this JavaScript function to use async/await."}
+{"subject": "code", "prompt": "Write a regex that matches IPv4 addresses."}
+{"subject": "code", "prompt": "How do I undo the last git commit but keep my changes?"}
+{"subject": "code", "prompt": "What does this Rust borrow checker error mean?"}
+{"subject": "code", "prompt": "Write unit tests for a function that parses CSV lines."}
+{"subject": "code", "prompt": "Optimise this SQL query that scans the whole orders table."}
+{"subject": "code", "prompt": "Explain the time complexity of quicksort."}
+{"subject": "code", "prompt": "Convert this bash loop into a Python script."}
+{"subject": "code", "prompt": "How do I read a JSON file in Node.js?"}
+{"subject": "math", "prompt": "What is the derivative of x^3 * sin(x)?"}
+{"subject": "math", "prompt": "Compute the integral of 1/x from 1 to e."}
+{"subject": "math", "prompt": "If a loan of $1000 grows at 5% annually, what is it worth after 3 years?"}
+{"subject": "math", "prompt": "Find the roots of x^2 - 5x + 6 = 0."}
+{"subject": "math", "prompt": "What is the probability of rolling two sixes with two dice?"}
+{"subject": "math", "prompt": "How many diagonals does a hexagon have?"}
+{"subject": "math", "prompt": "Simplify (a^2 - b^2)/(a - b)."}
+{"subject": "math", "prompt": "What is the least common multiple of 12 and 18?"}
+{"subject": "math", "prompt": "Convert 0.375 to a fraction."}
+{"subject": "math", "prompt": "What is the area of a circle with radius 4?"}
+{"subject": "logic", "prompt": "Three boxes are mislabelled; how many fruits must you draw to label them correctly?"}
+{"subject": "logic", "prompt": "If no A are B and some C are A, what follows about C and B?"}
+{"subject": "logic", "prompt": "Knights always tell the truth and knaves always lie. A says B is a knave. B says both are knights. Who is who?"}
+{"subject": "logic", "prompt": "Is the statement 'this sentence is false' true or false?"}
+{"subject": "logic", "prompt": "Mary's father has five daughters: Nana, Nene, Nini, Nono. What is the fifth daughter's name?"}
+{"subject": "logic", "prompt": "Which conclusion follows: all roses are flowers; some flowers fade quickly?"}
+{"subject": "logic", "prompt": "You see a house with two doors, one leads to freedom. One guard lies, one tells the truth. What do you ask?"}
+{"subject": "logic", "prompt": "Arrange these people by age given the clues below."}
+{"subject": "logic", "prompt": "If yesterday was two days after Monday, what day is tomorrow?"}
+{"subject": "logic", "prompt": "Spot the flaw in this argument: every time I wash my car it rains."}
+{"subject": "science", "prompt": "Why do ice cubes float in water?"}
+{"subject": "science", "prompt": "What is the difference between mitosis and meiosis?"}
+{"subject": "science", "prompt": "How does a vaccine train the immune system?"}
+{"subject": "science", "prompt": "What causes the seasons on Earth?"}
+{"subject": "science", "prompt": "Explain Newton's third law with an example."}
+{"subject": "science", "prompt": "What is an isotope?"}
+{"subject": "science", "prompt": "Why is the ocean salty?"}
+{"subject": "science", "prompt": "How do black holes form?"}
+{"subject": "science", "prompt": "What does the mitochondria do in a cell?"}
+{"subject": "science", "prompt": "What is the boiling point of water at high altitude and why?"}
+{"subject": "factual", "prompt": "Who was the first person to walk on the Moon?"}
+{"subject": "factual", "prompt": "What is the longest river in Africa?"}
+{"subject": "factual", "prompt": "When did the Berlin Wall fall?"}
+{"subject": "factual", "prompt": "Which country has the largest population?"}
+{"subject": "factual", "prompt": "Who composed the Four Seasons?"}
+{"subject": "factual", "prompt": "What is the currency of Japan?"}
+{"subject": "factual", "prompt": "Who discovered penicillin?"}
+{"subject": "factual", "prompt": "Which city hosted the 2012 Summer Olympics?"}
+{"subject": "factual", "prompt": "What language is spoken in Brazil?"}
+{"subject": "factual", "prompt": "Who was the first emperor of Rome?"}
+{"subject": "writing", "prompt": "Write a cover letter for a junior data analyst role."}
+{"subject": "writing", "prompt": "Rewrite this paragraph to sound more formal."}
+{"subject": "writing", "prompt": "Give me five title ideas for a blog post about hiking."}
+{"subject": "writing", "prompt": "Write a limerick about a cat who loves coffee."}
+{"subject": "writing", "prompt": "Summarize this article in three bullet points."}
+{"subject": "writing", "prompt": "Draft a thank-you note to my neighbour for watering my plants."}
+{"subject": "writing", "prompt": "Make this product description more persuasive."}
+{"subject": "writing", "prompt": "Write the opening paragraph of a mystery novel."}
+{"subject": "writing", "prompt": "Proofread this sentence for grammar mistakes."}
+{"subject": "writing", "prompt": "Turn these notes into a short speech for a wedding toast."}
+{"subject": "vision", "prompt": "What objects are in this photo?"}
+{"subject": "vision", "prompt": "Describe the image I attached."}
+{"subject": "vision", "prompt": "Read the text in this screenshot."}
+{"subject": "vision", "prompt": "What breed is the dog in this picture?"}
+{"subject": "vision", "prompt": "Is there a person in this image?"}
+{"subject": "vision", "prompt": "Explain the chart in the attached figure."}
+{"subject": "vision", "prompt": "What colour is the car in the photo?"}
+{"subject": "vision", "prompt": "Transcribe the handwriting in this image."}
+{"subject": "vision", "prompt": "Count the apples in this picture."}
+{"subject": "vision", "prompt": "What does this diagram show?"}

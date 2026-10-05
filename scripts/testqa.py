@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""
+TestQA: one bank of graded prompts, any number of OpenAI-compatible endpoints,
+results per kind and per subject, paired comparison against a reference.
+
+Task kinds (qa/bank/*.jsonl, mixable, one JSON object per line):
+
+    reasoning  {"prompt", "answer", "answer_type": number|choice|text}
+               the model is asked to end with "Answer: <value>"; numbers
+               compare with tolerance and accept fractions like 3/28
+    code_exec  {"prompt", "entry_point", "tests": ["assert ...", ...]}
+               the INTERPRETER: the reply's code block runs with the tests in
+               a separate, time- and memory-limited Python process.
+               Off unless --allow-exec (it runs model-written code)
+    code       {"prompt", "modules": [...]}  every referenced symbol must exist
+    qa         {"prompt", "aliases": [...], "expect_abstain"?: bool}
+    canary     {"prompt"}  ungraded; answered vs refused
+
+Every task may carry a "subject"; tasks without one are labelled by the
+subject classifier (scripts/subject_classifier.py), which is the same model a
+router would use to pick an endpoint for a prompt.
+
+    python scripts/testqa.py --endpoint base=http://127.0.0.1:1234/v1@my-model \\
+        --endpoint supp=http://127.0.0.1:1234/v1@my-model-supp050 \\
+        --allow-exec --out runs/testqa.json
+
+Endpoints are LABEL=URL[@model]; URL may or may not end in /v1.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from merge_eval import (ABSTAIN, _code_blocks, grade_canary, grade_code, mcnemar, norm,  # noqa: E402
+                        strip_think)
+from subject_classifier import default_classifier  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+REASONING_SUFFIX = "\n\nThink it through, then finish with a final line of the form 'Answer: <value>'."
+GOOD = {"correct", "answered"}
+
+
+# ---------------------------------------------------------------- graders
+
+ANSWER_RE = re.compile(r"answer\s*(?:is)?\s*[:：]\s*(.+)", re.I)
+NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?(?:\s*/\s*\d+)?|-?\.\d+")
+
+
+def final_answer(text: str) -> str:
+    body = strip_think(text).strip()
+    m = ANSWER_RE.findall(body)
+    if m:
+        return m[-1].strip().strip("*").strip()
+    lines = [l for l in body.splitlines() if l.strip()]
+    return lines[-1].strip() if lines else ""
+
+
+def parse_number(s: str) -> float | None:
+    s = s.replace("\\frac{", "").replace("}{", "/").replace("}", "")
+    m = NUM_RE.findall(s)
+    if not m:
+        return None
+    tok = m[0].replace(",", "").replace(" ", "")
+    try:
+        return float(Fraction(tok)) if "/" in tok else float(tok)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def grade_reasoning(text: str, task: dict) -> str:
+    body = strip_think(text).strip()
+    if not body:
+        return "abstained"
+    ans = final_answer(body)
+    kind = task.get("answer_type", "text")
+    gold = str(task["answer"])
+    if kind == "number":
+        got, want = parse_number(ans), parse_number(gold)
+        if got is None:
+            # Fall back to the last number anywhere in the reply.
+            nums = NUM_RE.findall(body)
+            got = parse_number(nums[-1]) if nums else None
+        if got is None:
+            return "abstained" if any(m in body.lower() for m in ABSTAIN) else "wrong"
+        return "correct" if abs(got - want) <= 1e-6 * max(1.0, abs(want)) + 1e-9 else "wrong"
+    if kind == "choice":
+        m = re.search(r"\b([A-E])\b", ans.upper())
+        return "correct" if m and m.group(1) == gold.upper() else "wrong"
+    a, g = norm(ans), norm(gold)
+    if not a:
+        return "wrong"
+    return "correct" if a == g or re.search(rf"\b{re.escape(g)}\b", a) else "wrong"
+
+
+def grade_qa(text: str, task: dict) -> str:
+    body = strip_think(text).strip()
+    low = body.lower()
+    abstained = not body or any(m in low for m in ABSTAIN)
+    if task.get("expect_abstain"):
+        return "correct" if abstained or any(norm(a) in norm(body) for a in task["aliases"]) else "wrong"
+    if abstained:
+        return "abstained"
+    n = norm(body)
+    return "correct" if any(norm(a) and norm(a) in n for a in task["aliases"]) else "wrong"
+
+
+# ---------------------------------------------------------------- interpreter
+
+RUNNER = r'''
+import resource, sys
+def _limit(res, v):
+    try:
+        resource.setrlimit(res, (v, v))
+    except (ValueError, OSError):
+        pass
+_limit(resource.RLIMIT_CPU, {cpu})
+_limit(resource.RLIMIT_AS, {mem})
+_limit(resource.RLIMIT_FSIZE, 1 << 20)
+_limit(resource.RLIMIT_CORE, 0)
+'''
+
+
+def run_code(code: str, tests: list[str], timeout: float = 10.0, mem_mb: int = 1024) -> tuple[str, str]:
+    """Run candidate code plus tests in a fresh interpreter.
+
+    Isolation is best effort: separate process, empty temp cwd, -I (no user
+    site, no env vars), stripped environment, CPU/memory/file-size rlimits on
+    POSIX, wall-clock timeout. It is NOT a security sandbox; run untrusted
+    models inside a container or VM. Returns (verdict, detail)."""
+    with tempfile.TemporaryDirectory(prefix="testqa-") as d:
+        prelude = RUNNER.format(cpu=int(timeout) + 1, mem=mem_mb * 1024 * 1024) if os.name == "posix" else ""
+        body = [prelude, code, "", "# --- tests ---"]
+        for i, t in enumerate(tests):
+            body.append(f"def __t{i}():")
+            body.extend("    " + line for line in t.splitlines())
+            body.append(f"__t{i}()")
+        body.append('print("__TESTQA_PASS__")')
+        path = Path(d) / "candidate.py"
+        path.write_text("\n".join(body), encoding="utf-8")
+        env = {"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"}
+        try:
+            p = subprocess.run([sys.executable, "-I", str(path)], cwd=d, env=env, capture_output=True,
+                               text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return "timeout", f"exceeded {timeout}s"
+        if p.returncode == 0 and "__TESTQA_PASS__" in p.stdout:
+            return "correct", ""
+        err = (p.stderr or p.stdout).strip().splitlines()
+        return "wrong", (err[-1] if err else f"exit {p.returncode}")[:200]
+
+
+def grade_code_exec(text: str, task: dict, allow_exec: bool, timeout: float) -> tuple[str, str]:
+    code = _code_blocks(strip_think(text))
+    if not code.strip():
+        return "abstained", ""
+    try:
+        compile(code, "<candidate>", "exec")
+    except SyntaxError as e:
+        return "unparsable", str(e)[:120]
+    if f"def {task['entry_point']}" not in code:
+        return "wrong", f"no def {task['entry_point']}"
+    if not allow_exec:
+        return "skipped", "pass --allow-exec to run code"
+    return run_code(code, task["tests"], timeout)
+
+
+# ---------------------------------------------------------------- tasks
+
+def kind_of(task: dict) -> str:
+    if task.get("kind"):
+        return task["kind"]
+    if task.get("tests"):
+        return "code_exec"
+    if "answer" in task:
+        return "reasoning"
+    if task.get("aliases"):
+        return "qa"
+    if task.get("modules"):
+        return "code"
+    return "canary"
+
+
+def load_tasks(paths: list[str], kinds: set[str] | None, subjects: set[str] | None, limit: int) -> list[dict]:
+    files: list[Path] = []
+    for p in paths:
+        q = Path(p)
+        files += sorted(q.glob("*.jsonl")) if q.is_dir() else [q]
+    tasks, seen = [], set()
+    clf = None
+    for f in files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            t = json.loads(line)
+            if t["id"] in seen:
+                raise SystemExit(f"duplicate task id {t['id']} in {f}")
+            seen.add(t["id"])
+            t["kind"] = kind_of(t)
+            if not t.get("subject"):
+                clf = clf or default_classifier()
+                t["subject"] = clf.predict(t["prompt"])
+                t["subject_inferred"] = True
+            if kinds and t["kind"] not in kinds:
+                continue
+            if subjects and t["subject"] not in subjects:
+                continue
+            tasks.append(t)
+    return tasks[:limit] if limit else tasks
+
+
+def prompt_for(task: dict) -> str:
+    return task["prompt"] + (REASONING_SUFFIX if task["kind"] == "reasoning" else "")
+
+
+# ---------------------------------------------------------------- endpoints
+
+def parse_endpoint(spec: str) -> tuple[str, str, str | None]:
+    if "=" not in spec:
+        raise SystemExit(f"--endpoint needs LABEL=URL[@model], got {spec!r}")
+    label, rest = spec.split("=", 1)
+    url, model = rest, None
+    if "@" in rest.split("//", 1)[-1]:
+        url, model = rest.rsplit("@", 1)
+    url = url.rstrip("/")
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return label, url, model
+
+
+def ask(url: str, model: str | None, prompt: str, a) -> str:
+    import requests
+    body = {"messages": [{"role": "user", "content": prompt}], "temperature": a.temperature,
+            "max_tokens": a.max_tokens}
+    if model:
+        body["model"] = model
+    headers = {"Authorization": f"Bearer {a.api_key}"} if a.api_key else {}
+    r = requests.post(f"{url}/chat/completions", json=body, headers=headers, timeout=a.request_timeout)
+    r.raise_for_status()
+    msg = r.json()["choices"][0]["message"]
+    txt = msg.get("content") or ""
+    rc = msg.get("reasoning_content") or msg.get("reasoning")
+    if rc and "</think>" not in txt:
+        txt = f"<think>{rc}</think>{txt}"
+    return txt
+
+
+def grade(task: dict, text: str, a) -> tuple[str, str]:
+    k = task["kind"]
+    if k == "reasoning":
+        return grade_reasoning(text, task), final_answer(text)[:80]
+    if k == "code_exec":
+        return grade_code_exec(text, task, a.allow_exec, a.exec_timeout)
+    if k == "qa":
+        return grade_qa(text, task), ""
+    if k == "code":
+        return grade_code(text, task), ""
+    return grade_canary(text, task), ""
+
+
+def run_endpoint(label: str, url: str, model: str | None, tasks: list[dict], a, cache_dir: Path | None) -> list[dict]:
+    cache: dict = {}
+    cpath = cache_dir / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', label)}.jsonl" if cache_dir else None
+    if cpath and cpath.exists():
+        for line in cpath.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            cache[r["id"]] = r["text"]
+
+    def one(t):
+        t0 = time.time()
+        text = cache.get(t["id"])
+        if text is None:
+            try:
+                text = ask(url, model, prompt_for(t), a)
+            except Exception as e:
+                return {"id": t["id"], "kind": t["kind"], "subject": t["subject"], "verdict": "error",
+                        "note": str(e)[:160]}
+            if cpath:
+                with open(cpath, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"id": t["id"], "text": text}) + "\n")
+        verdict, note = grade(t, text, a)
+        return {"id": t["id"], "kind": t["kind"], "subject": t["subject"], "verdict": verdict, "note": note,
+                "seconds": round(time.time() - t0, 2), "text": strip_think(text).strip()[:600]}
+
+    with ThreadPoolExecutor(max_workers=max(1, a.concurrency)) as pool:
+        return list(pool.map(one, tasks))
+
+
+# ---------------------------------------------------------------- report
+
+def compare(ref: list[dict], var: list[dict], tasks: list[dict]):
+    """Per-item movement between two runs -> gained, lost, canary gained, canary lost."""
+    by_id = {t["id"]: t for t in tasks}
+    r = {x["id"]: x for x in ref}
+    v = {x["id"]: x for x in var}
+    gained, lost, canary_gained, canary_lost = [], [], [], []
+    for tid, x in r.items():
+        y = v.get(tid)
+        if y is None:
+            continue
+        a, b = x["verdict"], y["verdict"]
+        if a == b or {"error", "skipped"} & {a, b}:
+            continue
+        kind = by_id[tid]["kind"]
+        rec = {"id": tid, "kind": kind, "subject": by_id[tid]["subject"], "from": a, "to": b,
+               "prompt": by_id[tid]["prompt"][:110], "answer": y.get("text", "")[:160]}
+        if kind == "canary":
+            (canary_lost if b == "refused" else canary_gained).append(rec)
+        elif a not in GOOD and b in GOOD:
+            gained.append(rec)
+        elif a in GOOD and b not in GOOD:
+            lost.append(rec)
+    return gained, lost, canary_gained, canary_lost
+
+
+def summarise(rows: list[dict]) -> dict:
+    by = {"kind": defaultdict(Counter), "subject": defaultdict(Counter)}
+    for r in rows:
+        by["kind"][r["kind"]][r["verdict"]] += 1
+        by["subject"][r["subject"]][r["verdict"]] += 1
+
+    def score(c: Counter) -> dict:
+        graded = sum(v for k, v in c.items() if k not in ("error", "skipped"))
+        good = c["correct"] + c["answered"]
+        return {"n": sum(c.values()), "graded": graded, "score": round(good / graded, 3) if graded else None,
+                **dict(c)}
+    return {g: {k: score(c) for k, c in sorted(d.items())} for g, d in by.items()}
+
+
+def print_table(title: str, results: dict, group: str) -> None:
+    keys = sorted({k for s in results.values() for k in s[group]})
+    labels = list(results)
+    print(f"\n{title}")
+    print(f"  {'':<12}" + "".join(f"{l[:12]:>14}" for l in labels))
+    for k in keys:
+        cells = []
+        for l in labels:
+            s = results[l][group].get(k)
+            cells.append("-" if not s or s["score"] is None else f"{s['score']:.2f} ({s['graded']})")
+        print(f"  {k:<12}" + "".join(f"{c:>14}" for c in cells))
+
+
+def skills_from(summary: dict) -> dict:
+    """Per-subject scores in the shape subject_classifier.py route expects."""
+    return {s: v["score"] for s, v in summary["subject"].items() if v["score"] is not None}
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--endpoint", action="append", required=True, metavar="LABEL=URL[@model]")
+    p.add_argument("--tasks", nargs="+", default=[str(ROOT / "qa" / "bank")], help="JSONL files or directories")
+    p.add_argument("--kind", nargs="*", help="only these kinds")
+    p.add_argument("--subject", nargs="*", help="only these subjects")
+    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--reference", help="label compared against (default: first endpoint)")
+    p.add_argument("--allow-exec", action="store_true", help="run code_exec tasks (executes model-written code)")
+    p.add_argument("--exec-timeout", type=float, default=10.0)
+    p.add_argument("--concurrency", type=int, default=2)
+    p.add_argument("--max_tokens", type=int, default=2048)
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--request-timeout", type=float, default=900)
+    p.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", ""))
+    p.add_argument("--cache", help="directory for per-endpoint reply caches (resume / regrade without re-asking)")
+    p.add_argument("--show", type=int, default=8, help="regressions to print")
+    p.add_argument("--out")
+    a = p.parse_args(argv)
+
+    tasks = load_tasks(a.tasks, set(a.kind or []), set(a.subject or []), a.limit)
+    if not tasks:
+        raise SystemExit("no tasks selected")
+    kinds = Counter(t["kind"] for t in tasks)
+    print(f"{len(tasks)} tasks: " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())))
+    if kinds.get("code_exec") and not a.allow_exec:
+        print("  code_exec tasks will be checked for syntax only; --allow-exec runs them "
+              "(model-written code, limited but not sandboxed)")
+    cache_dir = Path(a.cache) if a.cache else None
+    if cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    eps = [parse_endpoint(s) for s in a.endpoint]
+    raw, summ = {}, {}
+    for label, url, model in eps:
+        print(f"querying {label} ({url}{' @ ' + model if model else ''})")
+        raw[label] = run_endpoint(label, url, model, tasks, a, cache_dir)
+        summ[label] = summarise(raw[label])
+        errs = sum(1 for r in raw[label] if r["verdict"] == "error")
+        if errs:
+            first = next(r for r in raw[label] if r["verdict"] == "error")
+            print(f"  {errs} request errors, e.g. {first['note']}")
+
+    print_table("score by kind (fraction correct/answered, graded n)", summ, "kind")
+    print_table("score by subject", summ, "subject")
+
+    ref = a.reference or eps[0][0]
+    comparisons = []
+    for label, _, _ in eps:
+        if label == ref:
+            continue
+        g, lost, cg, cl = compare(raw[ref], raw[label], tasks)
+        chi2, disc = mcnemar(len(g), len(lost))
+        verdict = ("significant" if chi2 > 3.84 else "not significant") if disc >= 10 else "too few changes to call"
+        print(f"\n{label} vs {ref}: gained {len(g)}, regressed {len(lost)}, net {len(g) - len(lost):+d}, "
+              f"chi2={chi2:.1f} ({verdict}); canary newly refused {len(cl)}")
+        for r in lost[:a.show]:
+            print(f"    [{r['kind']}] {r['id']}: {r['from']} -> {r['to']}")
+        comparisons.append({"endpoint": label, "gained": g, "regressed": lost, "canary_newly_refused": cl,
+                            "canary_newly_answered": cg, "chi2": chi2, "discordant": disc})
+
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(json.dumps({
+            "tasks": len(tasks), "reference": ref,
+            "endpoints": {l: {"url": u, "model": m} for l, u, m in eps},
+            "summary": summ, "skills": {l: skills_from(s) for l, s in summ.items()},
+            "comparisons": comparisons, "raw": raw}, indent=2))
+        print(f"\nwrote {a.out} (\"skills\" can seed a routing table for subject_classifier.py route)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

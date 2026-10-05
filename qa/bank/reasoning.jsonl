@@ -1,0 +1,35 @@
+{"id": "r-speed", "kind": "reasoning", "subject": "math", "prompt": "A train travels 180 km in 2.5 hours. What is its average speed in km/h?", "answer": "72", "answer_type": "number"}
+{"id": "r-pencils", "kind": "reasoning", "subject": "math", "prompt": "If 3 pencils cost $0.75, how much do 10 pencils cost, in dollars?", "answer": "2.5", "answer_type": "number"}
+{"id": "r-gauss", "kind": "reasoning", "subject": "math", "prompt": "What is the sum of all integers from 1 to 100?", "answer": "5050", "answer_type": "number"}
+{"id": "r-rect", "kind": "reasoning", "subject": "math", "prompt": "A rectangle has a perimeter of 36 cm and a length of 10 cm. What is its area in square centimetres?", "answer": "80", "answer_type": "number"}
+{"id": "r-mult", "kind": "reasoning", "subject": "math", "prompt": "What is 17 multiplied by 23?", "answer": "391", "answer_type": "number"}
+{"id": "r-ages", "kind": "reasoning", "subject": "math", "prompt": "Alice is 3 years older than Bob. In 5 years their ages will add up to 41. How old is Bob now?", "answer": "14", "answer_type": "number"}
+{"id": "r-primes", "kind": "reasoning", "subject": "math", "prompt": "How many prime numbers are there between 1 and 30?", "answer": "10", "answer_type": "number"}
+{"id": "r-discount", "kind": "reasoning", "subject": "math", "prompt": "A shirt costs $40 after a 20% discount. What was the original price in dollars?", "answer": "50", "answer_type": "number"}
+{"id": "r-mod", "kind": "reasoning", "subject": "math", "prompt": "What is the remainder when 2 to the power 10 is divided by 7?", "answer": "2", "answer_type": "number"}
+{"id": "r-clock", "kind": "reasoning", "subject": "math", "prompt": "A clock shows 3:15. What is the smaller angle, in degrees, between the hour hand and the minute hand?", "answer": "7.5", "answer_type": "number"}
+{"id": "r-level", "kind": "reasoning", "subject": "math", "prompt": "How many distinct arrangements are there of the letters in the word LEVEL?", "answer": "30", "answer_type": "number"}
+{"id": "r-balls", "kind": "reasoning", "subject": "math", "prompt": "A bag holds 3 red and 5 blue balls. Two balls are drawn without replacement. What is the probability that both are red? Give a fraction.", "answer": "3/28", "answer_type": "number"}
+{"id": "r-seq", "kind": "reasoning", "subject": "math", "prompt": "What is the next number in the sequence 2, 6, 12, 20, 30, ...?", "answer": "42", "answer_type": "number"}
+{"id": "r-linear", "kind": "reasoning", "subject": "math", "prompt": "Solve for x: 3x + 7 = 31.", "answer": "8", "answer_type": "number"}
+{"id": "r-fuel", "kind": "reasoning", "subject": "math", "prompt": "A car uses 6 litres of fuel per 100 km. How many litres does it use for 250 km?", "answer": "15", "answer_type": "number"}
+{"id": "r-percent", "kind": "reasoning", "subject": "math", "prompt": "What is 15% of 240?", "answer": "36", "answer_type": "number"}
+{"id": "r-workers", "kind": "reasoning", "subject": "math", "prompt": "Two painters together paint a wall in 6 hours. One of them alone takes 10 hours. How many hours does the other take alone?", "answer": "15", "answer_type": "number"}
+{"id": "r-average", "kind": "reasoning", "subject": "math", "prompt": "The average of five numbers is 12. Four of them are 10, 14, 9 and 15. What is the fifth?", "answer": "12", "answer_type": "number"}
+{"id": "r-gcd", "kind": "reasoning", "subject": "math", "prompt": "What is the greatest common divisor of 84 and 126?", "answer": "42", "answer_type": "number"}
+{"id": "r-snail", "kind": "reasoning", "subject": "logic", "prompt": "A snail climbs 3 m up a 10 m well each day and slips back 2 m each night. On which day does it first reach the top?", "answer": "8", "answer_type": "number"}
+{"id": "r-weekday", "kind": "reasoning", "subject": "logic", "prompt": "Today is Wednesday. What day of the week will it be 100 days from now?", "answer": "Friday", "answer_type": "text"}
+{"id": "r-syllogism", "kind": "reasoning", "subject": "logic", "prompt": "All bloops are razzies and all razzies are lazzies. Are all bloops definitely lazzies? Answer yes or no.", "answer": "yes", "answer_type": "text"}
+{"id": "r-some-cats", "kind": "reasoning", "subject": "logic", "prompt": "Some cats are black. All black things absorb light. Must every cat absorb light? Answer yes or no.", "answer": "no", "answer_type": "text"}
+{"id": "r-affirm", "kind": "reasoning", "subject": "logic", "prompt": "If it rains, the ground gets wet. The ground is wet. Can we conclude that it rained? Answer yes or no.", "answer": "no", "answer_type": "text"}
+{"id": "r-heights", "kind": "reasoning", "subject": "logic", "prompt": "Tom is taller than Ann. Ann is taller than Joe. Who is the shortest of the three?", "answer": "Joe", "answer_type": "text"}
+{"id": "r-family", "kind": "reasoning", "subject": "logic", "prompt": "A is the brother of B. B is the sister of C. C is the father of D. What is A to D? Answer with one word.", "answer": "uncle", "answer_type": "text"}
+{"id": "r-powers", "kind": "reasoning", "subject": "math", "prompt": "Which is larger: (A) 2^30 or (B) 10^9? Answer A or B.", "answer": "A", "answer_type": "choice"}
+{"id": "r-sheep", "kind": "reasoning", "subject": "logic", "prompt": "A farmer has 17 sheep. All but 9 run away. How many sheep are left?", "answer": "9", "answer_type": "number"}
+{"id": "r-digits", "kind": "reasoning", "subject": "math", "prompt": "How many times is the digit 1 written when you write out all the integers from 1 to 20?", "answer": "12", "answer_type": "number"}
+{"id": "r-batball", "kind": "reasoning", "subject": "math", "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost, in dollars?", "answer": "0.05", "answer_type": "number"}
+{"id": "r-widgets", "kind": "reasoning", "subject": "logic", "prompt": "If 5 machines make 5 widgets in 5 minutes, how many minutes would 100 machines take to make 100 widgets?", "answer": "5", "answer_type": "number"}
+{"id": "r-monty", "kind": "reasoning", "subject": "math", "prompt": "In the Monty Hall problem with three doors, what is the probability of winning the car if you always switch? Give a fraction.", "answer": "2/3", "answer_type": "number"}
+{"id": "r-handshakes", "kind": "reasoning", "subject": "math", "prompt": "Ten people each shake hands with every other person exactly once. How many handshakes are there?", "answer": "45", "answer_type": "number"}
+{"id": "r-coins", "kind": "reasoning", "subject": "logic", "prompt": "You have 8 identical-looking coins; one is heavier. What is the minimum number of weighings on a balance scale that guarantees finding it?", "answer": "2", "answer_type": "number"}
+{"id": "r-lightbulb", "kind": "reasoning", "subject": "logic", "prompt": "Which weighs more: a kilogram of feathers (A) or a kilogram of steel (B)? Answer A, B, or C if they weigh the same.", "answer": "C", "answer_type": "choice"}

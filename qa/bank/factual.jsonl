@@ -1,0 +1,17 @@
+{"id": "q-canberra", "kind": "qa", "subject": "factual", "prompt": "What is the capital city of Australia? Respond with the answer only.", "aliases": ["Canberra"]}
+{"id": "q-ottawa", "kind": "qa", "subject": "factual", "prompt": "What is the capital city of Canada? Respond with the answer only.", "aliases": ["Ottawa"]}
+{"id": "q-hamlet", "kind": "qa", "subject": "factual", "prompt": "Who wrote the play Hamlet? Respond with the answer only.", "aliases": ["Shakespeare", "William Shakespeare"]}
+{"id": "q-au", "kind": "qa", "subject": "science", "prompt": "What is the chemical symbol for gold? Respond with the answer only.", "aliases": ["Au"]}
+{"id": "q-jupiter", "kind": "qa", "subject": "science", "prompt": "What is the largest planet in our solar system? Respond with the answer only.", "aliases": ["Jupiter"]}
+{"id": "q-h2o", "kind": "qa", "subject": "science", "prompt": "How many hydrogen atoms are in one molecule of water? Respond with the answer only.", "aliases": ["2", "two"]}
+{"id": "q-light", "kind": "qa", "subject": "science", "prompt": "Approximately how many minutes does sunlight take to reach Earth? Give a whole number. Respond with the answer only.", "aliases": ["8", "eight"]}
+{"id": "q-mona", "kind": "qa", "subject": "factual", "prompt": "Who painted the Mona Lisa? Respond with the answer only.", "aliases": ["Leonardo da Vinci", "da Vinci", "Leonardo"]}
+{"id": "q-everest", "kind": "qa", "subject": "factual", "prompt": "On the border of which two countries does Mount Everest stand? Name either one. Respond with the answer only.", "aliases": ["Nepal", "China", "Tibet"]}
+{"id": "q-ww2", "kind": "qa", "subject": "factual", "prompt": "In what year did World War II end? Respond with the answer only.", "aliases": ["1945"]}
+{"id": "q-pi", "kind": "qa", "subject": "math", "prompt": "What are the first three digits of pi, including the 3? Respond with the answer only.", "aliases": ["3.14", "314"]}
+{"id": "q-dna", "kind": "qa", "subject": "science", "prompt": "What molecule carries genetic information in most living organisms? Give the abbreviation. Respond with the answer only.", "aliases": ["DNA", "deoxyribonucleic acid"]}
+{"id": "q-c-speed", "kind": "qa", "subject": "science", "prompt": "What is the speed of light in a vacuum in kilometres per second, to the nearest thousand? Respond with the answer only.", "aliases": ["300000", "300,000", "299792", "299,792"]}
+{"id": "q-python", "kind": "qa", "subject": "code", "prompt": "Who created the Python programming language? Respond with the answer only.", "aliases": ["Guido van Rossum", "van Rossum", "Guido"]}
+{"id": "q-http", "kind": "qa", "subject": "code", "prompt": "What HTTP status code means 'Not Found'? Respond with the answer only.", "aliases": ["404"]}
+{"id": "q-git", "kind": "qa", "subject": "code", "prompt": "Which git subcommand creates a new commit from staged changes? Respond with the answer only.", "aliases": ["git commit", "commit"]}
+{"id": "q-fake", "kind": "qa", "subject": "factual", "prompt": "What is the capital of the fictional country Zubrowka's neighbour Frelonia? If it does not exist, say you don't know. Respond with the answer only.", "aliases": ["i don't know", "does not exist", "doesn't exist", "fictional", "not a real"]}

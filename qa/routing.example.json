@@ -1,0 +1,45 @@
+{
+  "default": "general",
+  "models": {
+    "general": {
+      "url": "http://127.0.0.1:1234/v1",
+      "model": "general-8b",
+      "skills": {
+        "writing": 0.8,
+        "factual": 0.7,
+        "science": 0.7,
+        "code": 0.5,
+        "math": 0.5,
+        "logic": 0.5
+      }
+    },
+    "coder": {
+      "url": "http://127.0.0.1:1234/v1",
+      "model": "coder-14b",
+      "skills": {
+        "code": 0.95,
+        "math": 0.6,
+        "logic": 0.6
+      }
+    },
+    "reasoner": {
+      "url": "http://127.0.0.1:1234/v1",
+      "model": "reasoning-32b",
+      "skills": {
+        "math": 0.9,
+        "logic": 0.9,
+        "science": 0.8,
+        "code": 0.7
+      }
+    },
+    "vlm": {
+      "url": "http://127.0.0.1:1234/v1",
+      "model": "vision-7b",
+      "skills": {
+        "vision": 0.95,
+        "writing": 0.4
+      }
+    }
+  },
+  "_comment": "skills are 0..1; fill them from testqa.py per-subject accuracy rather than by hand"
+}
