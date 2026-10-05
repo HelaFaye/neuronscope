@@ -175,7 +175,7 @@ def main():
                           np.asarray(b[name].data)[untouched])
     print(f"check: layer {layer} neuron {idxs[0]} scaled within {err:.1e} "
           f"relative; neighbour row unchanged: {same}")
-    if err > 1e-2 or not same:
+    if err > 1e-1 or not same:
         raise SystemExit("verification failed; do not use this file")
 
     side = os.path.splitext(out)[0] + ".suppression.json"

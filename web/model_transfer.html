@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeuronScope Model Transfer</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color-scheme:dark;color:#eef2f7;background:#0d1117}
+body{margin:0;background:radial-gradient(circle at top,#172133,#0d1117 55%);min-height:100vh}
+main{max-width:1100px;margin:0 auto;padding:32px 20px 60px}
+h1{margin:0 0 6px;font-size:30px}.sub{color:#9aa8ba;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:850px){.grid{grid-template-columns:1fr}}
+.card{background:#121925;border:1px solid #273143;border-radius:16px;padding:18px;box-shadow:0 10px 30px #0004}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row>*{margin:2px 0}
+input,button{font:inherit;border-radius:10px;border:1px solid #344154;background:#0e1520;color:#eef2f7;padding:10px 12px}
+button{cursor:pointer;background:#1a2b44}button:hover{background:#234164}button:disabled{opacity:.5;cursor:not-allowed}
+.code{font:700 28px ui-monospace,monospace;letter-spacing:4px;color:#8fd3ff}
+.muted{color:#8493a7}.status{padding:10px 12px;border-radius:10px;background:#0d1520;border:1px solid #273143;margin-top:12px}
+.file{padding:12px;border:1px solid #2a3545;border-radius:12px;margin:10px 0;background:#101722}.file b{display:block}.bar{height:8px;background:#1a2330;border-radius:999px;overflow:hidden;margin-top:9px}.bar span{display:block;height:100%;background:linear-gradient(90deg,#5ab8ff,#74e0b0);width:0}
+.small{font-size:13px}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#1b2a3d;color:#a9c4df;margin-left:6px}
+.warn{color:#ffd27c}.ok{color:#82e2b0}.danger{color:#ff9c9c}
+pre{white-space:pre-wrap;word-break:break-word}
+</style>
+</head>
+<body>
+<main>
+<h1>NeuronScope Model Transfer</h1>
+<div class="sub">Direct peer-to-peer GGUF transfer with room codes. The server carries signaling only.</div>
+
+<div class="grid">
+<section class="card">
+<h2>Room</h2>
+<div class="row">
+  <span class="code" id="room">--------</span>
+  <button id="copyBtn">Copy link</button>
+</div>
+<div class="row" style="margin-top:12px">
+  <input id="joinRoom" placeholder="Enter room code" maxlength="8" />
+  <button id="joinBtn">Join</button>
+  <button id="newBtn">New room</button>
+</div>
+<div class="status" id="status">Connecting to signaling…</div>
+<div class="small muted" id="peers">Peers: 0</div>
+</section>
+
+<section class="card">
+<h2>Send model</h2>
+<div class="row">
+  <input id="files" type="file" multiple />
+  <button id="sendBtn" disabled>Offer selected files</button>
+</div>
+<div class="small muted">For multi-GB GGUFs, use Chromium/Edge on the receiving side so files can stream directly to disk.</div>
+<div id="outgoing"></div>
+</section>
+
+<section class="card">
+<h2>Incoming</h2>
+<div class="row">
+  <button id="pickDirBtn">Choose destination folder</button>
+  <button id="acceptBtn" disabled>Accept pending files</button>
+  <button id="declineBtn" disabled>Decline</button>
+</div>
+<div class="small muted" id="dest">No destination selected.</div>
+<div id="incoming"></div>
+</section>
+
+<section class="card">
+<h2>Connection diagnostics</h2>
+<pre class="small" id="diag">No peer yet.</pre>
+</section>
+</div>
+</main>
+<script>
+const CHUNK_SIZE = 1024 * 1024;
+const MAX_BUFFER = 8 * CHUNK_SIZE;
+const LOW_BUFFER = 2 * CHUNK_SIZE;
+const state = {
+  ws:null, selfId:null, room:null, peers:new Map(), pendingOffers:new Map(),
+  destination:null, pendingBatch:null, outgoing:new Map(), incoming:new Map(),
+};
+
+const el = id => document.getElementById(id);
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function log(s){ el('diag').textContent = s + '\n' + el('diag').textContent; }
+function setStatus(s, cls=''){ el('status').textContent=s; el('status').className='status '+cls; }
+function updatePeers(){ el('peers').textContent='Peers: '+state.peers.size; el('sendBtn').disabled=!state.peers.size || !el('files').files.length; }
+function roomLink(){ return location.origin + '/?room=' + encodeURIComponent(state.room||''); }
+
+async function connect(room=null){
+  if(state.ws) state.ws.close();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}/ws`;
+  const ws = new WebSocket(url); state.ws=ws;
+  ws.onopen=()=>{ ws.send(JSON.stringify({type:'join', room:room||undefined})); setStatus('Connected; joining room…','ok'); };
+  ws.onmessage = e => onSignal(JSON.parse(e.data));
+  ws.onerror = () => setStatus('Signaling connection failed.','danger');
+  ws.onclose = () => setStatus('Signaling disconnected.','warn');
+}
+function signal(to,data){ if(state.ws?.readyState===WebSocket.OPEN) state.ws.send(JSON.stringify({type:'signal',to,data})); }
+
+async function makePeer(remoteId, initiator){
+  let rec=state.peers.get(remoteId); if(rec) return rec.pc;
+  const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.cloudflare.com:3478'},{urls:'stun:stun.l.google.com:19302'}]});
+  const rec={pc,dc:null,initiator,remoteId}; state.peers.set(remoteId,rec); updatePeers();
+  pc.onicecandidate=e=>{ if(e.candidate) signal(remoteId,{kind:'ice',candidate:e.candidate}); };
+  pc.onconnectionstatechange=()=>{ log(`peer ${remoteId}: ${pc.connectionState}`); if(['failed','closed','disconnected'].includes(pc.connectionState)){ updatePeers(); } };
+  pc.ondatachannel=e=>attachChannel(rec,e.channel);
+  if(initiator){ attachChannel(rec,pc.createDataChannel('model-transfer',{ordered:true})); await offerPeer(rec); }
+  return pc;
+}
+function attachChannel(rec,dc){ rec.dc=dc; dc.binaryType='arraybuffer'; dc.bufferedAmountLowThreshold=LOW_BUFFER; dc.onopen=()=>{log(`data channel open: ${rec.remoteId}`); updatePeers();}; dc.onclose=()=>log(`data channel closed: ${rec.remoteId}`); dc.onerror=e=>log(`data channel error: ${e}`); dc.onmessage=e=>onData(rec,e.data); }
+async function offerPeer(rec){ const off=await rec.pc.createOffer(); await rec.pc.setLocalDescription(off); signal(rec.remoteId,{kind:'offer',sdp:rec.pc.localDescription.sdp}); }
+
+async function onSignal(m){
+  if(m.type==='joined'){
+    state.selfId=m.selfId; state.room=m.room; el('room').textContent=m.room; history.replaceState(null,'','/?room='+encodeURIComponent(m.room));
+    setStatus('Ready. Share the room code.','ok');
+    for(const id of m.peers) await makePeer(id,true);
+  } else if(m.type==='peer-joined'){
+    // Only the newly joined side creates offers; it receives this peer list separately.
+    log('Peer joined: '+m.peerId);
+  } else if(m.type==='peer-left'){
+    const rec=state.peers.get(m.peerId); if(rec){try{rec.pc.close()}catch{}} state.peers.delete(m.peerId); updatePeers();
+  } else if(m.type==='signal'){
+    await handlePeerSignal(m.from,m.data);
+  } else if(m.type==='error'){
+    setStatus('Server error: '+(m.error||'unknown'),'danger');
+  }
+}
+async function handlePeerSignal(from,d){
+  if(d.kind==='offer'){
+    const pc=await makePeer(from,false); const rec=state.peers.get(from); await pc.setRemoteDescription({type:'offer',sdp:d.sdp}); const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); signal(from,{kind:'answer',sdp:pc.localDescription.sdp});
+  }else if(d.kind==='answer'){
+    const rec=state.peers.get(from); if(rec) await rec.pc.setRemoteDescription({type:'answer',sdp:d.sdp});
+  }else if(d.kind==='ice'){
+    const rec=state.peers.get(from); if(rec) try{await rec.pc.addIceCandidate(d.candidate)}catch(e){log('ICE error: '+e)}
+  }
+}
+
+function fileDescriptor(f){return {id:crypto.randomUUID(),name:f.name,size:f.size,mime:f.type||'application/octet-stream',lastModified:f.lastModified};}
+async function sendJson(rec,obj){ rec.dc.send(JSON.stringify(obj)); }
+async function waitBackpressure(dc){
+  if(dc.bufferedAmount<=MAX_BUFFER) return;
+  await new Promise(resolve=>{ const fn=()=>{dc.removeEventListener('bufferedamountlow',fn);resolve()}; dc.addEventListener('bufferedamountlow',fn); });
+}
+function frame(offset,buf){ const out=new ArrayBuffer(8+buf.byteLength); new DataView(out).setBigUint64(0,BigInt(offset),true); new Uint8Array(out,8).set(new Uint8Array(buf)); return out; }
+function parseFrame(ab){ const v=new DataView(ab); return {offset:Number(v.getBigUint64(0,true)),data:ab.slice(8)}; }
+
+el('files').onchange=updatePeers;
+el('sendBtn').onclick=async()=>{
+  const files=[...el('files').files]; if(!files.length) return;
+  const rec=[...state.peers.values()].find(r=>r.dc?.readyState==='open'); if(!rec) return;
+  const items=files.map(fileDescriptor); const batchId=crypto.randomUUID();
+  state.outgoing.set(batchId,{batchId,files,items,rec});
+  await sendJson(rec,{t:'offer',batchId,items}); renderOutgoing();
+};
+
+async function startSending(batch,offsets={}){
+  for(const item of batch.items){
+    const file=batch.files.find(f=>f.name===item.name && f.size===item.size && f.lastModified===item.lastModified); if(!file) continue;
+    const start=Math.min(offsets[item.id]||0,file.size); const out=renderItem(el('outgoing'),item,'send');
+    await sendJson(batch.rec,{t:'file-begin',id:item.id,offset:start,size:file.size,name:file.name,chunkSize:CHUNK_SIZE});
+    let sent=start; const started=performance.now();
+    while(sent<file.size){
+      const buf=await file.slice(sent,Math.min(sent+CHUNK_SIZE,file.size)).arrayBuffer();
+      await waitBackpressure(batch.rec.dc); batch.rec.dc.send(frame(sent,buf)); sent+=buf.byteLength;
+      updateItem(out,sent,file.size,started);
+    }
+    await sendJson(batch.rec,{t:'file-end',id:item.id}); updateItem(out,file.size,file.size,started,true);
+  }
+}
+
+function renderItem(parent,item,direction){ const d=document.createElement('div'); d.className='file'; d.innerHTML=`<b>${esc(item.name)}</b><span class="small muted">${(item.size/1e9).toFixed(2)} GB · ${direction}</span><div class="bar"><span></span></div><div class="small muted" data-meta>waiting…</div>`; parent.prepend(d); return d; }
+function updateItem(node,done,total,start,finished=false){ const pct=total?done/total*100:0; node.querySelector('.bar span').style.width=pct.toFixed(2)+'%'; const sec=Math.max((performance.now()-start)/1000,.001); const mbps=done/sec/1e6; node.querySelector('[data-meta]').textContent=`${pct.toFixed(1)}% · ${(done/1e9).toFixed(2)} / ${(total/1e9).toFixed(2)} GB · ${mbps.toFixed(1)} MB/s${finished?' · done':''}`; }
+function renderOutgoing(){el('outgoing').innerHTML=''; for(const b of state.outgoing.values()) for(const i of b.items) renderItem(el('outgoing'),i,'send');}
+
+el('pickDirBtn').onclick=async()=>{
+  if(!window.showDirectoryPicker){setStatus('This browser lacks the File System Access API needed for large direct-to-disk receives. Use Chromium/Edge.','warn'); return;}
+  try{ state.destination=await window.showDirectoryPicker({mode:'readwrite'}); el('dest').textContent='Destination: '+state.destination.name; if(state.pendingBatch) el('acceptBtn').disabled=false; }catch{}
+};
+el('acceptBtn').onclick=async()=>{
+  if(!state.pendingBatch || !state.destination) return;
+  const b=state.pendingBatch; const offsets={};
+  for(const item of b.items) offsets[item.id]=0;
+  b.rec=state.pendingRec; b.writerOffsets=offsets; await sendJson(b.rec,{t:'accept',batchId:b.batchId,offsets}); state.pendingBatch=null; state.pendingRec=null; el('acceptBtn').disabled=true; el('declineBtn').disabled=true; renderIncoming(); };
+el('declineBtn').onclick=async()=>{ if(state.pendingBatch&&state.pendingRec) await sendJson(state.pendingRec,{t:'decline',batchId:state.pendingBatch.batchId}); state.pendingBatch=null;state.pendingRec=null;el('acceptBtn').disabled=true;el('declineBtn').disabled=true;renderIncoming(); };
+
+async function uniqueHandle(dir,name){ const dot=name.lastIndexOf('.'); const stem=dot>0?name.slice(0,dot):name; const ext=dot>0?name.slice(dot):''; for(let i=0;i<1000;i++){const candidate=i?`${stem} (${i})${ext}`:name; try{ await dir.getFileHandle(candidate); continue; }catch{} return await dir.getFileHandle(candidate,{create:true}); } throw new Error('unable to create destination file'); }
+async function onData(rec,data){
+  if(typeof data==='string'){
+    const m=JSON.parse(data);
+    if(m.t==='offer'){
+      state.pendingBatch=m; state.pendingRec=rec; renderIncoming(); el('acceptBtn').disabled=!state.destination; el('declineBtn').disabled=false; setStatus(`Incoming ${m.items.length} file(s). Review and accept.`,'ok');
+    } else if(m.t==='accept'){
+      const batch=state.outgoing.get(m.batchId); if(batch) await startSending(batch,m.offsets||{});
+    } else if(m.t==='decline') log('Offer declined');
+    else if(m.t==='file-begin') await beginReceive(rec,m);
+    else if(m.t==='file-end') await finishReceive(m.id);
+    else if(m.t==='cancel') await finishReceive(m.id,true);
+  } else {
+    const f=parseFrame(data); const id=currentReceiveId(); if(!id) return; const rx=state.incoming.get(id); if(!rx) return; if(f.offset!==rx.offset){log(`offset mismatch ${f.offset} != ${rx.offset}`); return;} await rx.writer.write(f.data); rx.offset+=f.data.byteLength; updateItem(rx.node,rx.offset,rx.size,rx.started);
+  }
+}
+function currentReceiveId(){ let last=null; for(const k of state.incoming.keys()) last=k; return last; }
+async function beginReceive(rec,m){
+  if(!state.destination){await sendJson(rec,{t:'decline',batchId:m.id});return;}
+  const handle=await uniqueHandle(state.destination,m.name); const writer=await handle.createWritable(); await writer.seek(0); const node=renderItem(el('incoming'),m,'receive'); state.incoming.set(m.id,{writer,offset:m.offset||0,size:m.size,node,started:performance.now(),rec}); if(m.offset) await writer.seek(m.offset); log(`receiving ${m.name}`);
+}
+async function finishReceive(id,cancel=false){ const rx=state.incoming.get(id); if(!rx) return; try{await rx.writer.close()}catch{} updateItem(rx.node,cancel?0:rx.size,rx.size,rx.started,!cancel); state.incoming.delete(id); }
+function renderIncoming(){ el('incoming').innerHTML=''; if(!state.pendingBatch){return} for(const i of state.pendingBatch.items){const d=document.createElement('div');d.className='file';d.innerHTML=`<b>${esc(i.name)}</b><span class="small muted">${(i.size/1e9).toFixed(2)} GB</span>`;el('incoming').appendChild(d);} }
+
+el('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText(roomLink());setStatus('Share link copied.','ok')}catch{prompt('Copy this link:',roomLink())}};
+el('joinBtn').onclick=()=>{const r=el('joinRoom').value.trim().toUpperCase();if(r)connect(r)};
+el('newBtn').onclick=()=>connect(null);
+(async()=>{ const r=new URLSearchParams(location.search).get('room'); await connect(r||null); updatePeers(); })();
+</script>
+</body>
+</html>
