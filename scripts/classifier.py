@@ -251,6 +251,10 @@ def main():
             "n_neurons": n_neurons if n_experts == 1 else n_experts * n_neurons,
             "total": len(pos),
             "by_layer": by_layer,
+            # Carried through so downstream tools know which modules these
+            # indices address (e.g. a CLIP vision tower vs a text decoder).
+            **{k: idx_meta[k] for k in ("arch", "tower", "module_template")
+               if k in idx_meta},
         }, f, indent=2)
 
     counts = {int(k): len(v) for k, v in by_layer.items()}
