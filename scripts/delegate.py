@@ -100,7 +100,7 @@ def score(instruction, answer):
             method="POST", headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
             d = json.loads(r.read())
-        return float(d.get("score", 0.0)), d.get("detail", "")
+        return float(d["score"]), d.get("detail", "")
     except Exception as e:
         # A gate that fails closed would stall the whole run on a flaky
         # endpoint; a gate that fails open silently would be a lie. Say so.

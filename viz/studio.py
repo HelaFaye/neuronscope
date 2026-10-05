@@ -25,8 +25,8 @@ often on another machine.
 
 It also exposes an OpenAI-compatible API at /v1 (models, chat, completions,
 embeddings) with just-in-time loading: a request naming another model loads
-it, `"model": "auto"` picks one with the subject classifier and a routing
-table, and --idle-ttl unloads after inactivity. Vision models are paired with
+it, `"model": "auto"` picks one from the subject classifier and each model's
+rolling performance stats (models without stats are never auto-picked), and --idle-ttl unloads after inactivity. Vision models are paired with
 their mmproj file automatically and accept image attachments in chat.
 
 Binding beyond loopback requires --token (or NS_STUDIO_TOKEN), and TLS unless
@@ -40,6 +40,7 @@ import hmac
 import http.cookies
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -54,6 +55,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scripts"))
 import gguf_utils
 import ns_security as sec
+import model_stats
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -61,7 +63,9 @@ except ImportError:
 
 STATE = {"models_dirs": [], "server_bin": None, "settings_path": None,
          "download_dir": None, "offline": False, "token": None,
-         "chats_dir": None, "routing": None, "idle_ttl": 0, "jit": True,
+         "chats_dir": None, "stats": None, "min_graded": 20, "min_subject": 5,
+         "halluc_cost": 1.0, "cett": None, "score_ngl": 0, "score_every": 1,
+         "idle_ttl": 0, "jit": True,
          "backend_port": 8080, "tls": False}
 ACTIVITY = {"last": time.time(), "active": 0}
 ACTIVITY_LOCK = threading.Lock()
@@ -369,7 +373,9 @@ DEFAULTS = {"ngl": 99, "ctx": 8192, "batch": 2048, "threads": 0,
             # an iGPU, where generation is limited by weight reads per token.
             "draft_model": "", "draft_max": 16, "draft_min": 4,
             # Load the model's mmproj projector when one sits next to it.
-            "vision": True}
+            "vision": True,
+            # classifier.npz for this model: enables per-reply activation stats
+            "classifier": ""}
 
 # A named config is a complete, reusable setup: model, load settings, preset,
 # visualizer and hardware limits, under a name. The name is also what the model
@@ -656,11 +662,20 @@ def proxy(path, payload, stream_to=None):
     if stream_to is None:
         with urllib.request.urlopen(req, timeout=900) as r:
             return json.loads(r.read())
+    # Stream through untouched, keeping a copy of the text for stats.
+    text = []
     with urllib.request.urlopen(req, timeout=900) as r:
         for raw in r:
             stream_to.write(raw)
             stream_to.flush()
-    return None
+            line = raw.decode(errors="replace").strip()
+            if line.startswith("data:") and "[DONE]" not in line:
+                try:
+                    delta = json.loads(line[5:])["choices"][0].get("delta") or {}
+                    text.append(delta.get("content") or "")
+                except (ValueError, KeyError, IndexError, TypeError):
+                    pass
+    return {"text": "".join(text)}
 
 
 # ------------------------------------------------------- OpenAI-compatible API
@@ -705,30 +720,114 @@ def _has_image(body):
     return False
 
 
+def stats_ids(m, st=None):
+    """Every name a model's stats may have been recorded under."""
+    st = st if st is not None else load_settings()
+    alias = st.get(_key(m["path"]), {}).get("served_name")
+    return [x for x in (m["id"], alias, m["name"], m["name"][:-5]) if x]
+
+
+def model_summary(m, st=None):
+    s = STATE["stats"].summary(stats_ids(m, st), size=m["size"])
+    n = s["graded"].get("n", 0)
+    s["eligible"] = n >= STATE["min_graded"]
+    s["why_not"] = None if s["eligible"] else (
+        "No performance stats for this model file yet." if n == 0 else
+        f"Only {n} graded results; auto routing needs {STATE['min_graded']}.")
+    return s
+
+
+def auto_pick(body, models):
+    """Stats-based routing. Only models with enough graded results compete."""
+    from subject_classifier import default_classifier
+    text = _last_user_text(body)
+    pool = models
+    if _has_image(body):
+        text += " image photo picture"
+        pool = [m for m in models if m.get("mmproj")]
+    proba = default_classifier().predict_proba(text)
+    st = load_settings()
+    by_id = {m["id"]: m for m in pool}
+    sums = {m["id"]: model_summary(m, st) for m in pool}
+    pick = model_stats.rank(proba, sums, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
+    pick["proba"] = dict(list(proba.items())[:3])
+    return by_id.get(pick["model"]), pick
+
+
 def resolve_request_model(body):
-    """Which scanned model should serve this request? -> (model or None, reason)."""
+    """Which scanned model should serve this request? -> (model or None, route info).
+
+    "auto" ranks only models with performance stats; any other model name is a
+    manual choice and is honoured whether or not stats exist."""
     ref = (body.get("model") or "").strip()
     current = PROC["model"]
     models = scan_models()
     if ref.lower() == "auto":
-        table = STATE["routing"]
-        if not table:
-            return current, "auto: no routing table, using loaded model"
-        from subject_classifier import default_classifier, route
-        text = _last_user_text(body)
-        if _has_image(body):
-            text += " image photo picture"
-        pick = route(text, table, default_classifier())
-        spec = table.get("models", {}).get(pick["model"], {})
-        target = find_model(spec.get("model") or pick["model"], models)
-        return target or current, f"auto: subject={pick['subject']} -> {pick['model']}"
+        target, pick = auto_pick(body, models)
+        if target is None:
+            excluded = "; ".join(f"{k}: {v}" for k, v in list(pick.get("excluded", {}).items())[:6])
+            return None, {"mode": "auto", "error": (
+                "auto: no model has enough performance stats to choose from "
+                f"(need {STATE['min_graded']} graded results). Run scripts/testqa.py "
+                f"--publish-stats against your models, or name a model explicitly. {excluded}")}
+        return target, {"mode": "auto", "model": target["id"], "reason": pick["reason"],
+                        "candidates": pick["candidates"][:5]}
     if not ref or (current and find_model(ref, [current])):
-        return current, "loaded"
-    return find_model(ref, models), "requested"
+        return current, {"mode": "loaded", "model": current["id"] if current else None}
+    target = find_model(ref, models)
+    return target, {"mode": "manual", "model": target["id"] if target else ref}
 
 
-def ensure_loaded(model):
-    """JIT: load `model` with its saved settings unless it is already serving."""
+# ---------------------------------------------------------- reply statistics
+
+SCORE_JOBS = queue.Queue(maxsize=4)
+_SCORERS = {}
+_REPLIES = {"n": 0}
+
+
+def note_reply(model, messages, text):
+    """Record an ungraded live reply, and queue an activation score if this
+    model has a classifier configured. Never blocks the response."""
+    if not model or STATE["stats"] is None:
+        return
+    try:
+        from subject_classifier import default_classifier
+        subject = default_classifier().predict(_last_user_text({"messages": messages}))
+    except Exception:
+        subject = None
+    STATE["stats"].record(model["id"], "live", size=model["size"], subject=subject,
+                          abstained=model_stats.looks_abstained(text), chars=len(text or ""))
+    clf = load_settings().get(_key(model["path"]), {}).get("classifier")
+    _REPLIES["n"] += 1
+    if clf and STATE["cett"] and text and _REPLIES["n"] % max(1, STATE["score_every"]) == 0:
+        try:
+            SCORE_JOBS.put_nowait((model, clf, messages, text, subject))
+        except queue.Full:
+            pass        # never queue behind scoring; the next reply matters more
+
+
+def score_worker():
+    while True:
+        model, clf, messages, text, subject = SCORE_JOBS.get()
+        # Activation scoring is an extra prefill; wait for a quiet moment.
+        while ACTIVITY["active"] > 0:
+            time.sleep(1)
+        try:
+            key = (model["path"], clf)
+            if key not in _SCORERS:
+                from hscore import HScorer
+                _SCORERS[key] = HScorer(STATE["cett"], model["path"], clf, ngl=STATE["score_ngl"])
+            res = _SCORERS[key].score([m for m in messages if m.get("role") != "system"] or messages, text)
+            STATE["stats"].record(model["id"], "activation", size=model["size"], subject=subject,
+                                  h_score=res["score"], prob=res["prob"], n_tokens=res["n_tokens"],
+                                  threshold=0.0)
+        except Exception as e:
+            print(f"[studio] activation scoring failed for {model['name']}: {e}", file=sys.stderr)
+
+
+def ensure_loaded(model, own=1):
+    """JIT: load `model` with its saved settings unless it is already serving.
+    `own` is how many in-flight requests belong to the caller."""
     if server_running() and PROC["model"] and PROC["model"]["path"] == model["path"]:
         return True, "loaded"
     if not STATE["jit"]:
@@ -736,7 +835,7 @@ def ensure_loaded(model):
     # One llama-server at a time: let in-flight requests (other than this
     # one) finish before swapping the model out from under them.
     deadline = time.time() + 600
-    while ACTIVITY["active"] > 1 and time.time() < deadline:
+    while ACTIVITY["active"] > own and time.time() < deadline:
         time.sleep(0.5)
     settings = {**DEFAULTS, **load_settings().get(_key(model["path"]), {})}
     return start_server(model, settings, STATE["backend_port"])
@@ -745,16 +844,24 @@ def ensure_loaded(model):
 def openai_models():
     st = load_settings()
     data = []
+    any_eligible = False
     for m in scan_models():
         alias = st.get(_key(m["path"]), {}).get("served_name")
+        sm = model_summary(m, st)
+        g = sm["graded"]
+        any_eligible |= sm["eligible"]
         data.append({"id": alias or m["id"], "object": "model", "owned_by": "local",
+                     "stats": {"graded": g.get("n", 0), "accuracy": g.get("accuracy"),
+                               "hallucination_rate": g.get("hallucination_rate"),
+                               "abstention_rate": g.get("abstention_rate"),
+                               "auto_eligible": sm["eligible"]},
                      "created": int(os.path.getmtime(m["path"])),
                      "loaded": bool(PROC["model"] and PROC["model"]["path"] == m["path"]),
                      "vision": bool(m.get("mmproj")), "arch": m.get("arch"),
                      "quant": m.get("quant"), "size": m["size"]})
-    if STATE["routing"]:
+    if any_eligible:
         data.insert(0, {"id": "auto", "object": "model", "owned_by": "neuronscope",
-                        "description": "routed per prompt by subject classifier"})
+                        "description": "per prompt: subject classifier + rolling performance stats"})
     return {"object": "list", "data": data}
 
 
@@ -842,6 +949,8 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
         self.send_response(code)
+        if self._route:
+            self.send_header("X-NeuronScope-Route", json.dumps(self._route)[:4000])
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -853,8 +962,12 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"request body too large (limit {limit} bytes)")
         return json.loads(self.rfile.read(n) or b"{}")
 
+    _route = None
+
     def _send_headers_sse(self):
         self.send_response(200)
+        if self._route:
+            self.send_header("X-NeuronScope-Route", json.dumps(self._route)[:4000])
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
@@ -866,8 +979,10 @@ class Handler(BaseHTTPRequestHandler):
         touch(+1)
         try:
             with LOCK:
-                target, why = resolve_request_model(body)
+                target, route = resolve_request_model(body)
                 if target is None:
+                    if route.get("error"):
+                        return self._json(409, {"error": {"message": route["error"], "type": "invalid_request_error"}})
                     return self._json(404, {"error": {"message": f"model not found: {body.get('model')}",
                                                       "type": "invalid_request_error"}})
                 ok, msg = ensure_loaded(target)
@@ -877,15 +992,23 @@ class Handler(BaseHTTPRequestHandler):
             if _has_image(body) and not target.get("mmproj"):
                 return self._json(400, {"error": {"message": f"{target['id']} has no mmproj vision projector",
                                                   "type": "invalid_request_error"}})
+            self._route = route
             if body.get("stream"):
                 self._send_headers_sse()
-                proxy(path, body, stream_to=self.wfile)
+                out = proxy(path, body, stream_to=self.wfile)
+                text = out["text"]
             else:
-                self._json(200, proxy(path, body))
+                out = proxy(path, body)
+                text = ((out.get("choices") or [{}])[0].get("message") or {}).get("content") \
+                    if isinstance(out, dict) else None
+                self._json(200, out)
+            if path == "/v1/chat/completions":
+                note_reply(target, body.get("messages") or [], text or "")
         finally:
             touch(-1)
 
     def do_GET(self):
+        self._route = None
         if not self._authed():
             return self._deny()
         if self.path == "/":
@@ -912,7 +1035,13 @@ class Handler(BaseHTTPRequestHandler):
             for m in ms:
                 m["settings"] = {**DEFAULTS, **st.get(_key(m["path"]), {})}
                 m["fit"] = fit_estimate(m["size"])
+                m["stats"] = model_summary(m, st)
             return self._json(200, ms)
+        if self.path == "/api/stats":
+            return self._json(200, {"min_graded": STATE["min_graded"], "min_subject": STATE["min_subject"],
+                                    "hallucination_cost": STATE["halluc_cost"],
+                                    "window": STATE["stats"].window, "scoring": bool(STATE["cett"]),
+                                    "models": {m["id"]: model_summary(m) for m in scan_models()}})
         if self.path == "/api/hosts":
             hosts, current = host_profiles()
             return self._json(200, {"hosts": hosts, "current": current})
@@ -962,12 +1091,13 @@ class Handler(BaseHTTPRequestHandler):
                 "vision": bool(PROC["model"] and PROC["model"].get("mmproj")
                                and "--mmproj" in (PROC["args"] or [])),
                 "idle_ttl": STATE["idle_ttl"], "jit": STATE["jit"],
-                "routing": bool(STATE["routing"]),
+                "auto_ready": any(model_summary(m)["eligible"] for m in scan_models()),
                 "idle_for": int(time.time() - ACTIVITY["last"]),
             })
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        self._route = None
         if self.path == "/api/login":
             req = self._read()
             if STATE["token"] and not THROTTLE.blocked(self.client_address[0]) and hmac.compare_digest(
@@ -994,6 +1124,20 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/chats":
                 return self._json(200, save_chat(self._read(MAX_BODY)))
+
+            if self.path == "/api/stats/ingest":
+                req = self._read(8 * 1024 * 1024)
+                target = find_model(str(req.get("model", "")))
+                if target is None:
+                    return self._json(404, {"error": f"no local model matches {req.get('model')!r}"})
+                n = 0
+                for r in req.get("records", [])[:20000]:
+                    if not isinstance(r, dict):
+                        continue
+                    rec = {k: r[k] for k in ("subject", "task_kind", "verdict", "task", "source") if k in r}
+                    if STATE["stats"].record(target["id"], "graded", size=target["size"], **rec):
+                        n += 1
+                return self._json(200, {"model": target["id"], "recorded": n})
 
             if self.path == "/api/chats/delete":
                 try:
@@ -1068,6 +1212,18 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/chat":
                 req = self._read(MAX_BODY)
+                with LOCK:
+                    target, route = resolve_request_model({"model": req.get("model", ""),
+                                                           "messages": req.get("messages", [])})
+                    if target is None:
+                        msg = route.get("error") or (f"model not found: {req.get('model')}" if req.get("model")
+                                                     else "no model loaded")
+                        return self._json(409, {"error": msg})
+                    ok, why = ensure_loaded(target, own=0)
+                if not ok:
+                    return self._json(503, {"error": f"could not load {target['id']}: {why}"})
+                if _has_image(req) and not target.get("mmproj"):
+                    return self._json(400, {"error": f"{target['id']} has no vision projector (mmproj)"})
                 preset = load_presets().get(req.get("preset", "default"),
                                             PRESET_DEFAULTS)
                 msgs = list(req["messages"])
@@ -1092,14 +1248,12 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 elif preset.get("grammar"):
                     payload["grammar"] = preset["grammar"]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                self.end_headers()
+                self._route = route
+                self._send_headers_sse()
                 touch(+1)
                 try:
-                    proxy("/v1/chat/completions", payload, stream_to=self.wfile)
+                    out = proxy("/v1/chat/completions", payload, stream_to=self.wfile)
+                    note_reply(target, msgs, out["text"])
                 except Exception as e:
                     self.wfile.write(
                         f"data: {json.dumps({'error': str(e)})}\n\n".encode())
@@ -1172,6 +1326,12 @@ form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5re
 .dials select{width:auto}.dials input[type=range]{width:140px}
 .note{font-size:12px;color:var(--mut);margin:.4rem 0}
 .empty{max-width:560px;margin:15vh auto;text-align:center;color:var(--mut)}
+.warnico{color:#e8890c;cursor:help;font-weight:700;margin-left:.3rem}
+.stat{font-size:11px;color:var(--mut);cursor:help}
+.route{font-size:11px;color:var(--mut);margin-top:.2rem}
+table.st{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:.4rem}
+table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px solid var(--line)}
+#modelPick{width:auto;max-width:260px}
 </style>
 <header>
   <h1>NeuronScope Studio</h1>
@@ -1220,7 +1380,9 @@ form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5re
     <input id="draft_model" placeholder="/path/small-Q4_K_M.gguf">
     <label>Extra llama-server flags</label><input id="extra" placeholder="--override-tensor '\.ffn_.*_exps\.=CPU'">
     <label id="visionrow" style="display:none"><input type="checkbox" id="vision" checked> load vision projector <span id="mmname"></span></label>
+    <label>H-Neuron classifier (optional, enables activation stats)</label><input id="classifier" placeholder="models/classifier.npz for this model">
     <button id="load" class="pri" style="margin-top:.7rem;width:100%">Load</button>
+    <div id="statsbox"></div>
     <div id="loadmsg" class="note"></div>
   </div>
   </div>
@@ -1238,6 +1400,7 @@ form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5re
   <form id="f">
     <div id="pending" class="imgs"></div>
     <input type="file" id="file" accept="image/*" multiple hidden>
+    <select id="modelPick" title="which model answers"></select><span id="pickWarn" class="warnico" style="display:none">⚠</span>
     <button type="button" id="attach" title="attach image (vision models)" disabled>📎</button>
     <textarea id="in" rows="2" placeholder="Message… (Enter to send, Shift+Enter for a new line)"></textarea>
     <button class="pri" id="send">Send</button>
@@ -1249,8 +1412,31 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let models=[], sel=null, busy=false, ctrl=null, status_={}, pendingImgs=[];
 let chat={id:null,title:'New chat',messages:[]};
-const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra"];
-const TEXT_FIELDS=["served_name","lora","extra","draft_model"];
+const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra","classifier"];
+const TEXT_FIELDS=["served_name","lora","extra","draft_model","classifier"];
+const pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
+const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, run scripts/testqa.py against it with --publish-stats (see docs/TESTQA.md).';
+function statBadge(m){ const s=m.stats; if(!s) return '';
+  if(!s.eligible) return `<span class="warnico" title="${esc(s.why_not+NOSTATS_HELP)}">⚠</span>`;
+  return ''; }
+function statTitle(s){ const g=s.graded; let t=`Rolling stats over the last ${g.n} graded answers:\n`+
+  `correct ${pct(g.accuracy)}, hallucinated (answered wrong) ${pct(g.hallucination_rate)}, abstained ${pct(g.abstention_rate)}\n`;
+  for(const [k,v] of Object.entries(s.subjects||{})) t+=`  ${k}: ${pct(v.accuracy)} right, ${pct(v.hallucination_rate)} wrong, ${pct(v.abstention_rate)} abstained (n ${v.n})\n`;
+  if(s.activation&&s.activation.n) t+=`H-Neuron activation over ${s.activation.n} replies: mean ${s.activation.mean.toFixed(2)}, flagged ${pct(s.activation.flagged_rate)}\n`;
+  if(s.live&&s.live.n) t+=`Live traffic: ${s.live.n} replies, ${pct(s.live.abstention_rate)} declined`;
+  return t; }
+function statLine(m){ const s=m.stats; if(!s||!s.graded.n) return '';
+  const g=s.graded; return `<div class="stat" title="${esc(statTitle(s))}">✓ ${pct(g.accuracy)} · halluc ${pct(g.hallucination_rate)} · abst ${pct(g.abstention_rate)} · n ${g.n}</div>`; }
+function statsTable(s){ if(!s) return '';
+  if(!s.graded.n && !(s.activation&&s.activation.n) && !(s.live&&s.live.n)) return `<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not+NOSTATS_HELP)}</div>`;
+  let h='<table class="st"><tr><th>subject</th><th>n</th><th>right</th><th>halluc</th><th>abstain</th></tr>';
+  const rows=[['all',s.graded],...Object.entries(s.subjects||{})];
+  for(const [k,v] of rows) if(v.n) h+=`<tr><td>${esc(k)}</td><td>${v.n}</td><td>${pct(v.accuracy)}</td><td>${pct(v.hallucination_rate)}</td><td>${pct(v.abstention_rate)}</td></tr>`;
+  h+='</table>';
+  if(s.activation&&s.activation.n) h+=`<div class="note">H-Neuron activation: ${s.activation.n} replies, mean score ${s.activation.mean.toFixed(2)}, p95 ${s.activation.p95.toFixed(2)}, flagged ${pct(s.activation.flagged_rate)}</div>`;
+  if(s.live&&s.live.n) h+=`<div class="note">Live: ${s.live.n} replies, ${pct(s.live.abstention_rate)} declined</div>`;
+  if(!s.eligible) h+=`<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not)}</div>`;
+  return h; }
 function human(b){const u=["B","KB","MB","GB","TB"];let i=0;while(b>=1024&&i<4){b/=1024;i++}return b.toFixed(1)+' '+u[i]}
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b??{})});
 
@@ -1268,19 +1454,33 @@ $$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.cl
 
 // ---------- models
 async function refresh(){
-  models=await (await fetch('/api/models')).json(); renderModels();
+  models=await (await fetch('/api/models')).json(); renderModels(); renderPicker();
 }
+function renderPicker(){
+  const cur=$('#modelPick').value; const anyOk=models.some(m=>m.stats&&m.stats.eligible);
+  let o=`<option value="">Loaded model</option><option value="auto"${anyOk?'':' disabled'}>Auto (by performance stats)${anyOk?'':' - no models have stats'}</option>`;
+  o+=models.map(m=>`<option value="${esc(m.id)}">${m.stats&&!m.stats.eligible?'⚠ ':''}${esc(m.id)}${m.stats&&!m.stats.eligible?' (no stats)':''}</option>`).join('');
+  $('#modelPick').innerHTML=o; if([...$('#modelPick').options].some(x=>x.value===cur&&!x.disabled)) $('#modelPick').value=cur;
+  pickChanged();
+}
+function pickChanged(){
+  const m=models.find(x=>x.id===$('#modelPick').value); const w=$('#pickWarn');
+  if(m&&m.stats&&!m.stats.eligible){ w.style.display='inline'; w.title=m.stats.why_not+' You picked it manually, so it will be used.'+NOSTATS_HELP; }
+  else w.style.display='none';
+  $('#attach').disabled=!( status_.vision || (m&&m.mmproj) || $('#modelPick').value==='auto');
+}
+$('#modelPick').onchange=pickChanged;
 function renderModels(){
   const q=$('#filter').value.toLowerCase();
   const rows=models.map((m,i)=>[m,i]).filter(([m])=>!q||m.name.toLowerCase().includes(q)||(m.arch||'').includes(q));
   $('#list').innerHTML = rows.length ? rows.map(([m,i])=>{
     const f=m.fit||{}; const cls=f.ok===false?'bad':(/tight/.test(f.note||'')?'warn':'');
     return `<div class="m${sel&&sel.path===m.path?' sel':''}" data-i="${i}">
-      <div class="mn">${esc(m.name)}</div>
+      <div class="mn">${esc(m.name)}${statBadge(m)}</div>
       <div class="mm">${m.quant?`<span class="tag">${esc(m.quant)}</span>`:''}${m.arch?`<span class="tag">${esc(m.arch)}</span>`:''}
         ${m.n_experts?`<span class="tag">MoE ${m.n_experts}</span>`:''}${m.mmproj?'<span class="tag">vision</span>':''}
         <span class="tag">${human(m.size)}</span></div>
-      <div class="mm ${cls}">${esc(f.note||'')}</div></div>`;
+      <div class="mm ${cls}">${esc(f.note||'')}</div>${statLine(m)}</div>`;
   }).join('') : '<div class="note">No .gguf files found under the configured directories.</div>';
   $$('#list .m').forEach(el=>el.onclick=()=>pick(+el.dataset.i));
 }
@@ -1292,6 +1492,7 @@ function pick(i){
   $('#moebox').style.display = sel.n_experts?'block':'none';
   if(sel.n_experts) $('#moehint').textContent = `0 = model default (of ${sel.n_experts})`;
   $('#visionrow').style.display = sel.mmproj?'block':'none';
+  $('#statsbox').innerHTML = statsTable(sel.stats);
   $('#vision').checked = s.vision!==false; $('#mmname').textContent = sel.mmproj?'('+sel.mmproj.split('/').pop()+')':'';
 }
 $('#load').onclick=async()=>{
@@ -1309,7 +1510,7 @@ async function status(){
   const s=status_=await (await fetch('/api/status')).json();
   $('#dot').className='dot'+(s.running?' on':'');
   $('#st').textContent = s.running ? `${s.id||s.model}${s.vision?' · vision':''} · up ${s.uptime}s${s.idle_ttl?` · TTL ${s.idle_ttl}s`:''}` : 'no model loaded';
-  $('#unload').disabled=!s.running; $('#attach').disabled=!s.vision;
+  $('#unload').disabled=!s.running; pickChanged();
   const hasLora=!!s.lora; $('#alpha').disabled=!hasLora;
   $('#adesc').textContent = hasLora ? s.lora.split('/').pop() : 'no adapter loaded';
   if(hasLora && document.activeElement!==$('#alpha')){ $('#alpha').value=s.lora_scale; $('#av').textContent=(+s.lora_scale).toFixed(2); }
@@ -1392,11 +1593,14 @@ $('#f').onsubmit=async e=>{
 async function regenerate(){ if(busy) return; while(chat.messages.length && chat.messages.at(-1).role==='assistant') chat.messages.pop(); renderChat(); await stream(); }
 async function stream(){
   busy=true; $('#send').textContent='Stop'; ctrl=new AbortController();
-  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null;
+  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='';
   try{
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value})});
-    if(!r.ok){ out.body.textContent='error: '+(await r.text()); throw 0; }
+      body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value})});
+    if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} out.body.textContent='error: '+e; throw 0; }
+    try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
+      if(rt){ routeNote = rt.mode==='auto' ? `auto → ${rt.model}: ${rt.reason}` : `model: ${rt.model}${rt.mode==='manual'?' (chosen manually)':''}`;
+        const m=models.find(x=>x.id===rt.model); if(m&&m.stats&&!m.stats.eligible) routeNote+=' ⚠ no performance stats'; } }catch{}
     const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){
       const {done,value}=await rd.read(); if(done) break;
@@ -1421,8 +1625,10 @@ async function stream(){
   const ntok=usage?.completion_tokens ?? timings?.predicted_n;
   const tps=timings?.predicted_per_second ?? (ntok?ntok/secs:null);
   const stats=[ntok?`${ntok} tokens`:null, tps?`${tps.toFixed(1)} tok/s`:null, tFirst?`first token ${((tFirst-t0)/1000).toFixed(2)}s`:null].filter(Boolean).join(' · ');
-  out.stats.textContent=stats;
-  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats}); await persist(); }
+  const fullStats=[routeNote,stats].filter(Boolean).join(' · ');
+  out.stats.textContent=fullStats;
+  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats:fullStats}); await persist(); }
+  status(); refresh();
   busy=false; $('#send').textContent='Send';
 }
 $('#export').onclick=()=>{
@@ -1503,7 +1709,18 @@ def main(argv=None):
     p.add_argument("--settings",
                    default=os.path.expanduser("~/.neuronscope/studio.json"))
     p.add_argument("--chats-dir", default=os.path.expanduser("~/.neuronscope/chats"))
-    p.add_argument("--routing", help="routing table JSON enabling model \"auto\" (see qa/routing.example.json)")
+    p.add_argument("--stats-dir", default=str(model_stats.DEFAULT_DIR),
+                   help="rolling per-model stats (shared with testqa.py --record-stats)")
+    p.add_argument("--stats-window", type=int, default=500, help="most recent observations per kind that count")
+    p.add_argument("--min-graded", type=int, default=20,
+                   help="graded results a model needs before model \"auto\" will consider it")
+    p.add_argument("--hallucination-cost", type=float, default=1.0,
+                   help="how much a wrong answer costs relative to a right one when auto ranks models")
+    p.add_argument("--cett", default=os.environ.get("NS_CETT"),
+                   help="llama-cett-dump binary; enables activation scoring for models with a classifier set")
+    p.add_argument("--score-ngl", type=int, default=0,
+                   help="GPU layers for activation scoring (0 keeps it off the GPU llama-server is using)")
+    p.add_argument("--score-every", type=int, default=1, help="score one reply in N")
     p.add_argument("--idle-ttl", type=int, default=0, help="unload the model after N idle seconds (0 = never)")
     p.add_argument("--no-jit", action="store_true", help="/v1 requests never load or swap models")
     sec.add_server_security_args(p)
@@ -1523,9 +1740,10 @@ def main(argv=None):
     STATE["idle_ttl"] = max(0, a.idle_ttl)
     STATE["jit"] = not a.no_jit
     STATE["backend_port"] = a.backend_port
-    if a.routing:
-        with open(a.routing) as f:
-            STATE["routing"] = json.load(f)
+    STATE["stats"] = model_stats.StatsStore(a.stats_dir, a.stats_window)
+    STATE.update(min_graded=a.min_graded, halluc_cost=a.hallucination_cost, score_ngl=a.score_ngl,
+                 score_every=a.score_every,
+                 cett=a.cett if a.cett and os.path.exists(a.cett) else None)
     tls = bool(a.tls_cert and a.tls_key)
     STATE["tls"] = tls
     try:
@@ -1541,8 +1759,9 @@ def main(argv=None):
     notes = ["JIT " + ("on" if STATE["jit"] else "off")]
     if STATE["idle_ttl"]:
         notes.append(f"idle TTL {STATE['idle_ttl']}s")
-    if STATE["routing"]:
-        notes.append('model "auto" routed by subject')
+    notes.append(f'model "auto" over models with >= {STATE["min_graded"]} graded results')
+    if STATE["cett"]:
+        notes.append("activation scoring available")
     print(f"OpenAI-compatible API: {scheme}://{a.host}:{a.port}/v1  ({', '.join(notes)})")
     print("model dirs:")
     for d in STATE["models_dirs"]:
@@ -1559,6 +1778,7 @@ def main(argv=None):
         srv.socket = sec.server_ssl_context(a.tls_cert, a.tls_key).wrap_socket(
             srv.socket, server_side=True, do_handshake_on_connect=False)
     threading.Thread(target=idle_reaper, daemon=True).start()
+    threading.Thread(target=score_worker, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

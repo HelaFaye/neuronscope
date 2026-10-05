@@ -169,9 +169,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
+    def _score(self, raw):
+        """POST /api/score {messages, response} -> H-Neuron classifier score.
+
+        Used by delegate.py's gate. Synchronous: one prefill on this GGUF."""
+        try:
+            if not CFG.get("classifier"):
+                raise ValueError("start autotrace with --classifier to enable /api/score")
+            if "_scorer" not in CFG:
+                from hscore import HScorer
+                CFG["_scorer"] = HScorer(CFG["binary"], CFG["gguf"], CFG["classifier"],
+                                         CFG["ngl"], CFG["batch"])
+            req = json.loads(raw or b"{}")
+            res = CFG["_scorer"].score(req.get("messages", []), str(req.get("response", "")))
+            res["detail"] = f"prob {res['prob']:.2f} over {res['n_tokens']} response tokens"
+            code = 200
+        except Exception as e:
+            res, code = {"error": f"{type(e).__name__}: {e}"[:300]}, 400
+        body = json.dumps(res).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n)
+        if self.path == "/api/score":
+            return self._score(raw)
         try:
             req = json.loads(raw or b"{}")
         except json.JSONDecodeError:
@@ -250,6 +276,7 @@ def main():
     p.add_argument("--n-layers", type=int, required=True)
     p.add_argument("--publish", help="viz/stream.py base URL")
     p.add_argument("--token", help="bearer token for the viewer")
+    p.add_argument("--classifier", help="classifier.npz for this GGUF; enables POST /api/score")
     p.add_argument("--tier", default="sparse",
                    choices=["raw", "binned", "sparse"])
     p.add_argument("--trace-every", type=int, default=1,

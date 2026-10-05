@@ -355,6 +355,32 @@ def skills_from(summary: dict) -> dict:
     return {s: v["score"] for s, v in summary["subject"].items() if v["score"] is not None}
 
 
+def stats_rows(rows: list[dict]) -> list[dict]:
+    """Graded outcomes only: canaries, skipped code and request errors say
+    nothing about accuracy."""
+    out = []
+    for r in rows:
+        if r["kind"] == "canary" or r["verdict"] in ("error", "skipped"):
+            continue
+        out.append({"subject": r["subject"], "task_kind": r["kind"], "verdict": r["verdict"],
+                    "task": r["id"], "source": "testqa"})
+    return out
+
+
+def record_stats(model_id: str, rows: list[dict], a) -> int:
+    graded = stats_rows(rows)
+    if a.publish_stats:
+        import requests
+        headers = {"Authorization": f"Bearer {a.api_key}"} if a.api_key else {}
+        r = requests.post(a.publish_stats.rstrip("/") + "/api/stats/ingest", headers=headers,
+                          json={"model": model_id, "records": graded}, timeout=60)
+        r.raise_for_status()
+        return int(r.json().get("recorded", 0))
+    from model_stats import StatsStore
+    store = StatsStore(a.record_stats or None)
+    return sum(1 for g in graded if store.record(model_id, "graded", **g))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--endpoint", action="append", required=True, metavar="LABEL=URL[@model]")
@@ -373,6 +399,13 @@ def main(argv=None) -> int:
     p.add_argument("--cache", help="directory for per-endpoint reply caches (resume / regrade without re-asking)")
     p.add_argument("--show", type=int, default=8, help="regressions to print")
     p.add_argument("--out")
+    p.add_argument("--record-stats", nargs="?", const="", metavar="DIR",
+                   help="append graded results to the rolling model stats (default ~/.neuronscope/stats) "
+                        "that Studio's model \"auto\" routes on")
+    p.add_argument("--publish-stats", metavar="STUDIO_URL",
+                   help="send graded results to a running Studio instead (it ties them to the exact model file)")
+    p.add_argument("--stats-model", action="append", default=[], metavar="LABEL=MODEL_ID",
+                   help="model id to record an endpoint's stats under (default: its @model, else its label)")
     a = p.parse_args(argv)
 
     tasks = load_tasks(a.tasks, set(a.kind or []), set(a.subject or []), a.limit)
@@ -393,6 +426,10 @@ def main(argv=None) -> int:
         print(f"querying {label} ({url}{' @ ' + model if model else ''})")
         raw[label] = run_endpoint(label, url, model, tasks, a, cache_dir)
         summ[label] = summarise(raw[label])
+        if a.record_stats is not None or a.publish_stats:
+            mid = dict(x.split("=", 1) for x in a.stats_model).get(label) or model or label
+            n = record_stats(mid, raw[label], a)
+            print(f"  recorded {n} graded results as stats for {mid}")
         errs = sum(1 for r in raw[label] if r["verdict"] == "error")
         if errs:
             first = next(r for r in raw[label] if r["verdict"] == "error")
