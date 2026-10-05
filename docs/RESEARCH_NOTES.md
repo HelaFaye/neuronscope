@@ -93,7 +93,11 @@ one that most providers' terms prohibit.
 
 ---
 
-## Training, and why this repo mostly is not it
+## Training
+
+Retraining on measured deficits is now built in: see [RETRAINING.md](RETRAINING.md). The notes below explain where it sits relative to suppression.
+
+### Why suppression alone is not training
 
 There is no training loop here. NeuronScope suppresses; it cannot add capability.
 If the goal is a better local model over time, the order of leverage is:

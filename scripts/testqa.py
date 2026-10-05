@@ -568,6 +568,8 @@ def main(argv=None) -> int:
                         f"available: {', '.join(sorted(x.stem for x in (ROOT / 'qa' / 'bank' / 'optional').glob('*.jsonl')))}")
     p.add_argument("--subject", nargs="*", help="only these subjects")
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--only-ids", metavar="FILE",
+                   help="JSON with an 'ids' list (e.g. deficits.py holdout_ids.json): run only these tasks")
     p.add_argument("--per-subject", type=int, default=0, metavar="N",
                    help="balanced sample of up to N graded tasks per subject")
     p.add_argument("--seed", type=int, default=0, help="sampling seed for --per-subject")
@@ -599,6 +601,9 @@ def main(argv=None) -> int:
             raise SystemExit(f"no optional pack {pack!r} in qa/bank/optional/")
         a.tasks.append(str(f))
     tasks = load_tasks(a.tasks, set(a.kind or []), set(a.subject or []), a.limit)
+    if a.only_ids:
+        keep = set(json.loads(Path(a.only_ids).read_text())["ids"])
+        tasks = [t for t in tasks if t["id"] in keep or t["kind"] == "canary"]
     if a.per_subject:
         tasks = per_subject_sample(tasks, a.per_subject, a.seed)
     if a.list:

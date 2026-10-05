@@ -23,6 +23,11 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Retraining on deficits: `deficits.py` (categorised, grader-verified SFT and
+  DPO data, verified synthetic expansion, replay buffer, holdout),
+  `finetune.py` (QLoRA / LoRA / full, SFT then DPO, DDP or FSDP via
+  `--launch`), `merge_export.py` (merge + GGUF + quantize, or GGUF LoRA);
+  `testqa.py --only-ids`. See docs/RETRAINING.md.
 - `scripts/build_llama_tools.sh` builds llama.cpp with cett-dump for any
   backend; `tests/test_llamacpp_integration.py` checks the compiled tool
   against PyTorch on a tiny converted model.
