@@ -16,7 +16,7 @@ Task kinds (qa/bank/*.jsonl, mixable, one JSON object per line):
     qa         {"prompt", "aliases": [...], "expect_abstain"?: bool}
     constraints {"prompt", "checks": {...}}  instruction following, checked
                mechanically: lines, sentences, bullets, numbered, min/max_words,
-               max_chars, must_include, must_not_include, forbid_chars,
+               max_chars, must_include, must_not_include, forbid_words, forbid_chars,
                paragraphs, regex,
                starts_with, ends_with, json_keys, acrostic, title_case
     canary     {"prompt"}  ungraded; answered vs refused
@@ -176,6 +176,9 @@ def check_constraints(text: str, checks: dict) -> list[str]:
         n = len([b for b in re.split(r"\n\s*\n", body) if b.strip()])
         if n != c["paragraphs"]:
             fail.append(f"{n} paragraphs, want {c['paragraphs']}")
+    for w in c.get("forbid_words", []):
+        if re.search(rf"\b{re.escape(w)}\b", body, re.I):
+            fail.append(f"uses the word {w!r}")
     if c.get("forbid_chars") and any(ch in body for ch in c["forbid_chars"]):
         fail.append("uses a forbidden character")
     for rx in c.get("regex", []):
@@ -560,6 +563,9 @@ def main(argv=None) -> int:
     p.add_argument("--endpoint", action="append", default=[], metavar="LABEL=URL[@model]")
     p.add_argument("--tasks", nargs="+", default=[str(ROOT / "qa" / "bank")], help="JSONL files or directories")
     p.add_argument("--kind", nargs="*", help="only these kinds")
+    p.add_argument("--with", dest="with_packs", nargs="*", default=[], metavar="PACK",
+                   help="add optional task packs from qa/bank/optional/ (e.g. word-bans); "
+                        f"available: {', '.join(sorted(x.stem for x in (ROOT / 'qa' / 'bank' / 'optional').glob('*.jsonl')))}")
     p.add_argument("--subject", nargs="*", help="only these subjects")
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--per-subject", type=int, default=0, metavar="N",
@@ -587,6 +593,11 @@ def main(argv=None) -> int:
                    help="model id to record an endpoint's stats under (default: its @model, else its label)")
     a = p.parse_args(argv)
 
+    for pack in a.with_packs:
+        f = ROOT / "qa" / "bank" / "optional" / f"{pack}.jsonl"
+        if not f.exists():
+            raise SystemExit(f"no optional pack {pack!r} in qa/bank/optional/")
+        a.tasks.append(str(f))
     tasks = load_tasks(a.tasks, set(a.kind or []), set(a.subject or []), a.limit)
     if a.per_subject:
         tasks = per_subject_sample(tasks, a.per_subject, a.seed)

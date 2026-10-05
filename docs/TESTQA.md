@@ -45,13 +45,19 @@ How each kind is graded:
 | `code_exec` | **the interpreter**: the reply's code runs against unit tests |
 | `code` | every module attribute the code uses must exist |
 | `qa` | gold aliases; `expect_abstain` items count declining (or naming the false premise) as correct |
-| `constraints` | mechanical checks: `lines`, `sentences`, `paragraphs`, `bullets`, `numbered`, `min_words`/`max_words`, `max_chars`, `must_include`, `must_not_include`, `forbid_chars`, `regex`, `starts_with`, `ends_with`, `json_keys`, `acrostic`, `title_case` |
+| `constraints` | mechanical checks: `lines`, `sentences`, `paragraphs`, `bullets`, `numbered`, `min_words`/`max_words`, `max_chars`, `must_include`, `must_not_include`, `forbid_words`, `forbid_chars`, `regex`, `starts_with`, `ends_with`, `json_keys`, `acrostic`, `title_case` |
 | `canary` | ungraded |
 
 A wrong answer is a **hallucination** in the per-subject report: the model
 answered and was wrong (for code, wrong includes unparsable and timed out).
 Abstentions are counted separately, so a model that declines when unsure is
 not scored the same as one that makes something up.
+
+**Optional packs** live in `qa/bank/optional/` and are only included on
+request. `--with word-bans` adds writing tasks that forbid words or letters
+in the reply (IFEval-style lexical constraints such as "without using the
+word 'and'"). They are a standard instruction-following check but are off by
+default.
 
 Writing is graded on instruction following rather than taste, because that is
 what can be checked without a judge model. Every writing task has a known good

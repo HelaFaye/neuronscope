@@ -252,3 +252,19 @@ def test_end_to_end_against_fake_endpoints(tmp_path):
     assert len(cmp["regressed"]) == 12 and not cmp["gained"]
     assert rep["skills"]["good"]["code"] == 1.0
     assert (tmp_path / "cache" / "good.jsonl").exists()
+
+
+def test_optional_word_bans_pack():
+    pack = [json.loads(l) for l in (ROOT / "qa" / "bank" / "optional" / "word-bans.jsonl").read_text().splitlines() if l.strip()]
+    good = {"w-no-and": "The sky glowed orange as the sun slipped below the sandy horizon.",
+            "w-lipogram": "Rain falls softly on a dark city road.",
+            "w-no-very": "The meal was wonderful. Every bite tasted fresh.",
+            "w-no-i": "Welcome to the old town. My name is Sam. Let us explore together."}
+    bad = {"w-no-and": "The sky turned orange and pink.", "w-lipogram": "Rain falls softly on the quiet street.",
+           "w-no-very": "The meal was very good. It was really tasty.", "w-no-i": "I am Sam. I guide tours. I love it."}
+    for t in pack:
+        assert tq.grade_constraints(good[t["id"]], t)[0] == "correct", (t["id"], tq.check_constraints(good[t["id"]], t["checks"]))
+        assert tq.grade_constraints(bad[t["id"]], t)[0] == "wrong", t["id"]
+    # Not in the default bank; added only with --with word-bans.
+    default = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
+    assert not {t["id"] for t in pack} & {t["id"] for t in default}
