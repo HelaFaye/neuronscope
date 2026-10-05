@@ -326,7 +326,7 @@ def main():
         os.makedirs(os.path.join(args.output_root, loc), exist_ok=True)
 
     skipped = {"not_target": 0, "too_long": 0, "no_answer_span": 0, "failed": 0,
-               "span_not_captured": 0, "prompt_mismatch": 0}
+               "span_not_captured": 0, "prompt_boundary_merged": 0}
 
     # ---- phase 0: render sequences -----------------------------------------
     wanted, m1 = [], os.path.join(args.output_root, "_manifest_toks.jsonl")
@@ -341,15 +341,12 @@ def main():
             prompt = tok.apply_chat_template(
                 [{"role": "user", "content": data["question"]}],
                 add_generation_prompt=True, tokenize=False)
-            if use_gguf_tok:
-                # Measured in phase 1 by tokenizing the prompt on its own with
-                # the same binary, so it is in the exact tokenization used.
-                prompt_len = None
-                prompt_lines.append(json.dumps(
-                    {"id": f"{qid}__prompt", "text": prompt},
-                    ensure_ascii=False))
-            else:
-                prompt_len = len(tok(prompt, add_special_tokens=True)["input_ids"])
+            # Measured in phase 1 by tokenizing the prompt on its own with the
+            # same binary, so it is in the exact tokenization that produces
+            # the activations (a transformers tokenizer can disagree).
+            prompt_len = None
+            prompt_lines.append(json.dumps(
+                {"id": f"{qid}__prompt", "text": prompt}, ensure_ascii=False))
             mf.write(json.dumps({"id": qid, "text": prompt + data["response"]},
                                 ensure_ascii=False) + "\n")
             wanted.append((qid, data, prompt_len, prompt))
@@ -383,22 +380,21 @@ def main():
                 continue
             pieces = (tok.pieces(token_ids) if use_gguf_tok
                       else [tok.decode([int(i)]) for i in token_ids])
-            if prompt_len is None:
-                ppath = os.path.join(tok_dir, f"{qid}__prompt.toks")
-                if os.path.exists(ppath):
-                    pids = read_tokens(ppath)
-                    if list(token_ids[:len(pids)]) == list(pids):
-                        prompt_len = len(pids)
-                    else:
-                        skipped["prompt_mismatch"] += 1
-            if prompt_len is None:
-                # Walk the decoded pieces until the rendered prompt is covered.
-                acc, prompt_len = 0, 0
-                for i, p in enumerate(pieces):
-                    acc += len(p)
-                    if acc >= len(prompt):
-                        prompt_len = i + 1
-                        break
+            ppath = os.path.join(tok_dir, f"{qid}__prompt.toks")
+            if not os.path.exists(ppath):
+                skipped["failed"] += 1
+                continue
+            pids = read_tokens(ppath)
+            # Common prefix of the prompt's own ids and the full sequence's.
+            # Usually the whole prompt; one short when the boundary token
+            # merged with the start of the response, which is then counted
+            # as response (never as prompt).
+            prompt_len = 0
+            limit = min(len(pids), len(token_ids))
+            while prompt_len < limit and pids[prompt_len] == token_ids[prompt_len]:
+                prompt_len += 1
+            if prompt_len < len(pids):
+                skipped["prompt_boundary_merged"] += 1
             regions = find_regions(pieces, prompt_len,
                                    data.get("answer_tokens", []),
                                    skip_think=not args.keep_think,

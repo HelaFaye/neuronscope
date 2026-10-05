@@ -86,3 +86,43 @@ def test_hscore_end_to_end(tiny_gguf, tmp_path):
     sc = hscore.HScorer(str(CETT), str(gguf), str(tmp_path / "clf.npz"), ngl=0, batch=512)
     res = sc.score([{"role": "user", "content": "who wrote hamlet"}], "shakespeare wrote hamlet")
     assert res["n_tokens"] > 0 and np.isfinite(res["score"]) and 0 < res["prob"] < 1
+
+
+def test_extraction_pipeline_matches_pytorch(tiny_gguf, tmp_path):
+    """extract_activations_gguf.py end to end (GGUF tokenizer, real cett-dump):
+    the response-region features equal a PyTorch CETT mean over the same tokens."""
+    import torch
+    from transformers import LlamaForCausalLM
+    import gguf_tokenizer
+    import ns_common
+    from extract_activations_gguf import read_tokens
+    hf, gguf = tiny_gguf
+    samples = {"q1": ("who wrote hamlet", "shakespeare wrote hamlet"),
+               "q2": ("what is the capital of france", "paris is the capital"),
+               "q3": ("the cat sat on", "the mat")}
+    with open(tmp_path / "ans.jsonl", "w") as f:
+        for q, (question, response) in samples.items():
+            f.write(json.dumps({q: {"question": question, "response": response, "answer_tokens": []}}) + "\n")
+    (tmp_path / "ids.json").write_text(json.dumps({"t": ["q1", "q3"], "f": ["q2"]}))
+    out = tmp_path / "acts"
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "extract_activations_gguf.py"), "--binary", str(CETT),
+                        "--gguf", str(gguf), "--input_path", str(tmp_path / "ans.jsonl"), "--ids_path",
+                        str(tmp_path / "ids.json"), "--output_root", str(out), "--locations", "output",
+                        "--ngl", "0", "--batch", "512"], capture_output=True, text=True)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-2000:]
+    m = LlamaForCausalLM.from_pretrained(hf, dtype=torch.float32).eval()
+    mgr = ns_common.CETTManager(m)
+    gt = gguf_tokenizer.load(str(gguf))
+    for q, (question, _) in samples.items():
+        got = np.load(out / "output" / f"act_{q}.npy").astype(np.float32)
+        ids = read_tokens(next((out).rglob(f"{q}.toks")))
+        pids = read_tokens(next((out).rglob(f"{q}__prompt.toks")))
+        start = 0
+        while start < len(pids) and pids[start] == ids[start]:
+            start += 1
+        with torch.no_grad():
+            m(torch.tensor([ids.tolist()]))
+        want = mgr.cett().numpy()[:, start:, :].mean(1)
+        assert got.shape == want.shape
+        assert np.abs(got - want).max() / np.abs(want).max() < 5e-3, q
+        mgr.clear()

@@ -72,6 +72,11 @@
   `--publish-stats`.
 
 ### Fixed
+- `extract_activations_gguf.py` measured the prompt with the transformers
+  tokenizer on one path, and fell back to counting decoded characters when
+  the prompt/response boundary token merged. It now always tokenizes the
+  prompt with the same binary and uses the common token-id prefix; verified
+  end to end against PyTorch on a converted model.
 - `cett-dump` silently dropped the last decoder layer: llama.cpp computes the
   final layer's FFN only for tokens that produce logits, so that layer was
   never seen. Every token is now an output (`--last-layer-outputs-only`
