@@ -93,6 +93,10 @@ or confidence AUROC without a large accuracy loss. As with text models,
 suppression trades confident errors for low-confidence ones; it does not add
 knowledge. Measure on held-out images, never on the training split.
 
+## Benchmark it
+
+For standard numbers (ImageNetV2, ImageNet-Sketch, VTAB and the rest of CLIP_benchmark) at each suppression scale, see [BENCHMARKS.md](BENCHMARKS.md#clip_benchmark-imagenetv2-imagenet-sketch-vtab-).
+
 ## 5. Ship it
 
 **Hugging Face checkpoint** (for `transformers`, OpenCLIP-style pipelines, or

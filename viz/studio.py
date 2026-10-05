@@ -1423,7 +1423,9 @@ function statTitle(s){ const g=s.graded; let t=`Rolling stats over the last ${g.
   `correct ${pct(g.accuracy)}, hallucinated (answered wrong) ${pct(g.hallucination_rate)}, abstained ${pct(g.abstention_rate)}\n`;
   for(const [k,v] of Object.entries(s.subjects||{})) t+=`  ${k}: ${pct(v.accuracy)} right, ${pct(v.hallucination_rate)} wrong, ${pct(v.abstention_rate)} abstained (n ${v.n})\n`;
   if(s.activation&&s.activation.n) t+=`H-Neuron activation over ${s.activation.n} replies: mean ${s.activation.mean.toFixed(2)}, flagged ${pct(s.activation.flagged_rate)}\n`;
-  if(s.live&&s.live.n) t+=`Live traffic: ${s.live.n} replies, ${pct(s.live.abstention_rate)} declined`;
+  if(s.live&&s.live.n) t+=`Live traffic: ${s.live.n} replies, ${pct(s.live.abstention_rate)} declined\n`;
+  if(g.sources) t+=`Graded by: ${Object.entries(g.sources).map(([k,v])=>k+' '+v).join(', ')}\n`;
+  const refs=Object.entries(s.reference||{}); if(refs.length) t+=`Published scores (reference only, not used by auto): `+refs.map(([k,v])=>`${k} ${pct(v.score)}`).join(', ');
   return t; }
 function statLine(m){ const s=m.stats; if(!s||!s.graded.n) return '';
   const g=s.graded; return `<div class="stat" title="${esc(statTitle(s))}">✓ ${pct(g.accuracy)} · halluc ${pct(g.hallucination_rate)} · abst ${pct(g.abstention_rate)} · n ${g.n}</div>`; }

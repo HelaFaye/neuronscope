@@ -162,3 +162,30 @@ def test_suppress_mmproj(tmp_path):
     assert np.allclose(got[:, [2, 9]], fc2[:, [2, 9]].astype(np.float32) * 0.5, atol=1e-3)
     assert np.array_equal(got[:, 3], fc2[:, 3].astype(np.float32))
     assert np.array_equal(t["v.blk.0.ffn_down.weight"].reshape(48, 32), fc1)
+
+
+def test_clip_benchmark_harness(setup, tmp_path):
+    """Runs CLIP_benchmark's own zero-shot code on our HF model, with and without H-Neuron scaling."""
+    pytest.importorskip("clip_benchmark")
+    import clip_bench
+    tmp, model = setup
+    prof = tmp_path / "h.json"
+    prof.write_text(json.dumps({"n_neurons": 48, "tower": "vision", "by_layer": {"0": [1, 2, 3], "2": [5]}}))
+    out = tmp_path / "bench.json"
+    assert clip_bench.main(["eval", "--model", str(model), "--dataset", f"imagefolder:{tmp / 'imgs'}", "dummy",
+                            "--dataset-root", str(tmp_path / "ds"), "--h_neurons", str(prof), "--scales", "1", "0",
+                            "--batch-size", "16", "--num-workers", "0", "--device", "cpu", "--limit", "40",
+                            "--out", str(out)]) == 0
+    rep = json.loads(out.read_text())
+    folder = rep["datasets"][f"imagefolder:{tmp / 'imgs'}"]
+    assert folder["n_classes"] == 3 and set(folder["scales"]) == {"1.0", "0.0"}
+    for m in folder["scales"].values():
+        assert 0 <= m["top1"] <= m["top5"] <= 1 and 0 <= m["confident_error_rate"] <= 1
+    # scaling the selected neurons to zero must change the logits
+    assert folder["scales"]["1.0"] != folder["scales"]["0.0"]
+    assert "dummy" in rep["datasets"]
+    exp = tmp_path / "exported"
+    assert clip_bench.main(["export", "--dataset", f"imagefolder:{tmp / 'imgs'}", "--per-class", "2",
+                            "--out", str(exp)]) == 0
+    assert sorted(p.name for p in exp.iterdir()) == ["blue", "green", "red"]
+    assert all(len(list(d.iterdir())) == 2 for d in exp.iterdir())

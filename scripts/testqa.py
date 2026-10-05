@@ -532,7 +532,7 @@ def skills_from(summary: dict) -> dict:
     return {s: v["score"] for s, v in summary["subject"].items() if v["score"] is not None}
 
 
-def stats_rows(rows: list[dict]) -> list[dict]:
+def stats_rows(rows: list[dict], source: str = "testqa") -> list[dict]:
     """Graded outcomes only: canaries, skipped code and request errors say
     nothing about accuracy."""
     out = []
@@ -540,12 +540,12 @@ def stats_rows(rows: list[dict]) -> list[dict]:
         if r["kind"] == "canary" or r["verdict"] in ("error", "skipped"):
             continue
         out.append({"subject": r["subject"], "task_kind": r["kind"], "verdict": r["verdict"],
-                    "task": r["id"], "source": "testqa"})
+                    "task": r["id"], "source": r.get("source", source)})
     return out
 
 
-def record_stats(model_id: str, rows: list[dict], a) -> int:
-    graded = stats_rows(rows)
+def record_stats(model_id: str, rows: list[dict], a, source: str = "testqa") -> int:
+    graded = stats_rows(rows, source)
     if a.publish_stats:
         import requests
         headers = {"Authorization": f"Bearer {a.api_key}"} if a.api_key else {}

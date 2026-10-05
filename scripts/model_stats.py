@@ -81,7 +81,7 @@ class StatsStore:
         return self.root / f"{model_key(model_id)}.jsonl"
 
     def record(self, model_id: str, kind: str, size: int | None = None, **fields) -> dict:
-        if kind not in ("graded", "activation", "live"):
+        if kind not in ("graded", "activation", "live", "reference"):
             raise ValueError(f"unknown stats kind {kind!r}")
         rec = {"t": time.time(), "model": model_id, "kind": kind, **fields}
         if size is not None:
@@ -168,6 +168,13 @@ class StatsStore:
                                  "flagged_rate": sum(x > thr for x in s) / len(s), "threshold": thr}
         else:
             out["activation"] = {"n": 0}
+        ref = {}
+        for r in by_kind["reference"]:          # latest published score per benchmark
+            ref[r.get("benchmark", "?")] = {"score": r.get("score"), "subject": r.get("subject"),
+                                            "source": r.get("source")}
+        out["reference"] = ref
+        sources = Counter(r.get("source", "testqa") for r in graded)
+        out["graded"]["sources"] = dict(sources)
         if live:
             ab = sum(1 for r in live if r.get("abstained"))
             out["live"] = {"n": len(live), "abstention_rate": ab / len(live)}

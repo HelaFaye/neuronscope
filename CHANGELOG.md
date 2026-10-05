@@ -23,6 +23,13 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- External benchmarks (docs/BENCHMARKS.md): `clip_bench.py` runs CLIP/SigLIP
+  and H-Neuron-edited variants through CLIP_benchmark (ImageNetV2,
+  ImageNet-Sketch, VTAB via task_adaptation, ...) with selective metrics per
+  scale, and exports ImageFolders for `clip_neurons.py`; `benchmarks.py`
+  drives LiveBench and SWE-bench (prediction, Docker harness, import) into
+  rolling stats, and imports published leaderboard scores (BenchLM) as
+  reference-only stats shown in Studio.
 - Retraining on deficits: `deficits.py` (categorised, grader-verified SFT and
   DPO data, verified synthetic expansion, replay buffer, holdout),
   `finetune.py` (QLoRA / LoRA / full, SFT then DPO, DDP or FSDP via
