@@ -33,7 +33,7 @@ What it does:
 
 | step | detail |
 |---|---|
-| **Categorise** | `factual_gap` (factual answers wrong or declined), `reasoning_failure` (reasoning, executable code, API code wrong), `format_violation` (instruction following, unparsable output) |
+| **Categorise** | `factual_gap` (factual answers wrong or declined), `reasoning_failure` (reasoning, executable code, API code wrong), `format_violation` (instruction following, unparsable output), `perception_failure` (vision items wrong) |
 | **Correction pairs (SFT)** | gold answers where the bank has them; otherwise a teacher model's reply. **Every target must pass the same grader that failed the model**, so nothing wrong is trained in |
 | **Contrastive pairs (DPO)** | `prompt / chosen (verified target) / rejected (the model's own failing reply)` |
 | **Synthetic expansion** | `--expand N`: the teacher writes N variations of each failure. Code variations must ship tests that their own solution passes in the interpreter. Reasoning and factual variations must be answered identically by a second, independent teacher call. Anything unverified is dropped |
@@ -41,10 +41,24 @@ What it does:
 | **Holdout** | half the bank (deterministic by id) is never trained on, not even through variations. `holdout_ids.json` lists it |
 
 `plan.json` and `report.txt` give counts by category and subject, and the
-method each category calls for. Vision items are reported but skipped; they
-need multimodal training data. The teacher can be any OpenAI-compatible
+method each category calls for. The teacher can be any OpenAI-compatible
 endpoint: a larger local model, or a hosted one if its terms allow training
 on its outputs.
+
+### Vision deficits
+
+Vision items go to `sft_vision.jsonl` and `dpo_vision.jsonl`, with their
+images rendered into `images/`, in the image + messages format VLM trainers
+take. Their targets are the bank's gold answers. `--expand N` needs no teacher
+for them: `scripts/vision_synth.py` draws N new scenes in the failed item's
+skill family (counting, colour, shape, position, size, reading text and
+numbers, arithmetic), and the answer is known because the program drew it.
+Every bank vision item maps to a family. Replay anchors are the model's own
+correct vision answers, topped up with text anchors when there are too few.
+
+```bash
+python scripts/vision_synth.py --family count_shape -n 4 --out /tmp/preview   # look at what it draws
+```
 
 ## 3. Train
 
@@ -71,6 +85,18 @@ python scripts/finetune.py --launch 4 --model ... --method full --fsdp --out run
   recent PyTorch wheels may not include their `sm_XX`; `--check` shows
   whether yours is supported before you start.
 
+### Vision-language models
+
+```bash
+python scripts/finetune.py --vision --model org/vlm --data runs/retrain --method lora --dpo --out runs/vlm-adapter
+```
+
+`--vision` loads the model with its processor and trains on the vision files.
+Adapters go on the language model and the projector; the vision encoder is
+always frozen. `--freeze-projector` also leaves the projector alone, which
+means the base model's existing `mmproj` GGUF still matches the result: use it
+when llama.cpp cannot convert your model's projector (below).
+
 ## 4. Merge and convert
 
 ```bash
@@ -82,6 +108,13 @@ The first merges the adapter into the base, converts it with llama.cpp's
 converter and quantizes it. The second converts only the adapter to a GGUF
 LoRA: load it in Studio's adapter field and the α slider blends base and
 retrained behaviour live, the same way it does for suppression.
+
+With `--vision`, merging writes the language GGUF and also tries to convert the
+projector to `mmproj-model-f16.gguf`. llama.cpp converts projectors for the VLM
+families it serves (Gemma 3, Qwen-VL, SmolVLM, Pixtral and others) but not
+every Hugging Face layout, HF-format LLaVA included. When it cannot, the
+command exits with status 2, records `mmproj_error` in
+`neuronscope-export.json`, and points you at `--freeze-projector`.
 
 ## 5. Measure again, honestly
 
@@ -100,5 +133,8 @@ has traded one deficit for another. Re-run with `--publish-stats` so Studio's
 
 `tests/test_retrain.py` runs the whole chain on a tiny Llama: verified
 deficit dataset with holdout and replay share, LoRA SFT plus DPO,
-merge, a Q8_0 GGUF that llama.cpp loads, and a GGUF LoRA adapter. QLoRA and
-FSDP need GPUs and have not been run here.
+merge, a Q8_0 GGUF that llama.cpp loads, and a GGUF LoRA adapter. The vision
+path runs on a tiny LLaVA: vision dataset with verified variations, LoRA SFT
+plus DPO with and without a frozen projector, merge and language GGUF. QLoRA,
+FSDP and real VLM projector conversion need GPUs or downloads and have not
+been run here.

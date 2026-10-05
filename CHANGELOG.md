@@ -23,6 +23,12 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Vision retraining: deficits.py now writes `sft_vision.jsonl` /
+  `dpo_vision.jsonl` with rendered images for failed vision items, and
+  `vision_synth.py` adds variations whose answers are known by construction
+  (no teacher). `finetune.py --vision [--freeze-projector]` trains VLMs with
+  their processor (vision encoder frozen); `merge_export.py --vision` writes the
+  language GGUF and the mmproj where llama.cpp can convert it.
 - Live activations from llama-server, compiled and tested:
   `llama-tools/server-activations/apply_patch.py` (or
   `build_llama_tools.sh --server-activations`) patches current llama.cpp to

@@ -7,6 +7,9 @@ at runtime.
     # merged model -> GGUF -> quantized GGUF
     python scripts/merge_export.py --base org/base-model --adapter runs/adapter \\
         --out runs/merged --gguf Q4_K_M
+    # vision-language model: merged model + text GGUF + mmproj projector GGUF
+    python scripts/merge_export.py --vision --base org/vlm --adapter runs/adapter \
+        --out runs/merged --gguf Q4_K_M
     # adapter only (Studio's α slider then blends base and fine-tune live)
     python scripts/merge_export.py --base org/base-model --adapter runs/adapter \\
         --out runs/adapter-gguf --lora-gguf
@@ -32,16 +35,19 @@ def llama_dir(arg: str | None) -> Path:
     return d
 
 
-def merge(base: str, adapter: str, out: Path, dtype: str) -> Path:
+def merge(base: str, adapter: str, out: Path, dtype: str, vision: bool = False) -> Path:
     import torch
     from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = AutoModelForCausalLM.from_pretrained(base, dtype=getattr(torch, dtype))
+    if vision:
+        from transformers import AutoModelForImageTextToText as Auto, AutoProcessor as Tok
+    else:
+        from transformers import AutoModelForCausalLM as Auto, AutoTokenizer as Tok
+    model = Auto.from_pretrained(base, dtype=getattr(torch, dtype))
     model = PeftModel.from_pretrained(model, adapter).merge_and_unload()
     out.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(out, safe_serialization=True)
     tok_src = adapter if (Path(adapter) / "tokenizer_config.json").exists() else base
-    AutoTokenizer.from_pretrained(tok_src).save_pretrained(out)
+    Tok.from_pretrained(tok_src).save_pretrained(out)
     # SentencePiece models: llama.cpp's converter prefers the original file.
     for name in ("tokenizer.model",):
         for src in (Path(base), Path(adapter)):
@@ -67,6 +73,8 @@ def main(argv=None) -> int:
     p.add_argument("--gguf", nargs="?", const="F16", metavar="QUANT",
                    help="also convert to GGUF; optional quant type such as Q4_K_M or Q8_0 (default F16)")
     p.add_argument("--lora-gguf", action="store_true", help="convert only the adapter to a GGUF LoRA")
+    p.add_argument("--vision", action="store_true",
+                   help="vision-language model (finetune.py --vision): also write its mmproj GGUF")
     a = p.parse_args(argv)
     out = Path(a.out)
     meta = {"base": a.base, "adapter": a.adapter}
@@ -79,7 +87,7 @@ def main(argv=None) -> int:
         meta["lora_gguf"] = str(dst)
     else:
         if (Path(a.adapter) / "adapter_config.json").exists():
-            merged = merge(a.base, a.adapter, out / "hf", a.dtype)
+            merged = merge(a.base, a.adapter, out / "hf", a.dtype, a.vision)
         else:
             # finetune.py --method full: already a complete model.
             merged = Path(a.adapter)
@@ -95,8 +103,26 @@ def main(argv=None) -> int:
                 q = out / f"model-{a.gguf.upper()}.gguf"
                 run([str(ll / "build" / "bin" / "llama-quantize"), str(f16), str(q), a.gguf.upper()])
                 meta["gguf"] = str(q)
+            if a.vision:
+                # The projector stays f16: suppress_mmproj.py edits and llama.cpp load it unquantized.
+                mm = out / "mmproj-model-f16.gguf"
+                cmd = [sys.executable, str(ll / "convert_hf_to_gguf.py"), str(merged), "--mmproj",
+                       "--outfile", str(mm), "--outtype", "f16"]
+                print("running:", " ".join(cmd))
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode == 0:
+                    meta["mmproj"] = str(mm)
+                else:
+                    # llama.cpp converts projectors for the VLM families it serves (Gemma 3,
+                    # Qwen-VL, SmolVLM, Pixtral, ...), not every HF layout.
+                    meta["mmproj_error"] = (r.stderr or r.stdout).strip().splitlines()[-1][:500]
     (out / "neuronscope-export.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
+    if "mmproj_error" in meta:
+        print("\nThe language model converted, but llama.cpp could not convert this projector:\n  "
+              + meta["mmproj_error"] + "\nIf you trained with finetune.py --freeze-projector, the base model's "
+              "existing mmproj GGUF still matches; use that.", file=sys.stderr)
+        return 2
     return 0
 
 

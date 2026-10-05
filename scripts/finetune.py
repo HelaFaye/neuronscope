@@ -16,6 +16,15 @@ Data: `sft.jsonl` (chat `messages`) and optionally `dpo.jsonl` (prompt /
 chosen / rejected) in --data. SFT loss is computed on the assistant reply
 only. DPO runs after SFT, on top of the SFT adapter, when --dpo is given.
 
+Vision-language models (`--vision`): trains on `sft_vision.jsonl` /
+`dpo_vision.jsonl` (images + messages, written by deficits.py) with the
+model's processor. Adapters go on the language model and the projector; the
+vision tower stays frozen, since perception failures on rendered scenes are
+rarely the encoder's (and its features are what H-Neuron edits of the
+`mmproj` act on). `--freeze-projector` adapts the language model alone, so
+the base model's existing mmproj GGUF keeps working. merge_export.py --vision
+writes the language GGUF and, where llama.cpp can convert it, the projector.
+
 Which method:
   qlora   base weights in 4-bit NF4, adapters in 16-bit. Least memory; needs a
           CUDA GPU that bitsandbytes supports.
@@ -90,6 +99,32 @@ def sft_dataset(path: Path):
     return Dataset.from_list(rows)
 
 
+def _vision_rows(path: Path, keys: tuple[str, ...]):
+    from PIL import Image
+    rows = []
+    for r in load_jsonl(path):
+        imgs = [Image.open(path.parent / p).convert("RGB") for p in r.get("images", [])]
+        rows.append({"images": imgs, **{k: r[k] for k in keys}})
+    return rows
+
+
+def sft_vision_dataset(path: Path):
+    from datasets import Dataset
+    rows = []
+    for r in _vision_rows(path, ("messages",)):
+        msgs = r["messages"]
+        if msgs and msgs[-1]["role"] == "assistant":
+            rows.append({"images": r["images"], "prompt": msgs[:-1], "completion": [msgs[-1]]})
+    if not rows:
+        raise SystemExit(f"no usable vision SFT records in {path}")
+    return Dataset.from_list(rows)
+
+
+def dpo_vision_dataset(path: Path):
+    from datasets import Dataset
+    return Dataset.from_list(_vision_rows(path, ("prompt", "chosen", "rejected")))
+
+
 def dpo_dataset(path: Path):
     from datasets import Dataset
     rows = [{"prompt": r["prompt"], "chosen": r["chosen"], "rejected": r["rejected"]} for r in load_jsonl(path)]
@@ -99,9 +134,18 @@ def dpo_dataset(path: Path):
 def load_model(a, rep):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(a.model)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+    if a.vision:
+        from transformers import AutoModelForImageTextToText, AutoProcessor
+        tok = AutoProcessor.from_pretrained(a.model)
+        inner = tok.tokenizer
+        if inner.pad_token is None:
+            inner.pad_token = inner.eos_token
+        auto = AutoModelForImageTextToText
+    else:
+        tok = AutoTokenizer.from_pretrained(a.model)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        auto = AutoModelForCausalLM
     prec = precision(rep)
     dtype = torch.bfloat16 if prec["bf16"] else torch.float16 if prec["fp16"] else torch.float32
     kw = {"dtype": dtype}
@@ -113,7 +157,7 @@ def load_model(a, rep):
         kw["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                                        bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=dtype)
         kw["device_map"] = {"": local_rank if local_rank >= 0 else 0}
-    model = AutoModelForCausalLM.from_pretrained(a.model, **kw)
+    model = auto.from_pretrained(a.model, **kw)
     if a.method == "qlora":
         from peft import prepare_model_for_kbit_training
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=a.gradient_checkpointing)
@@ -125,8 +169,14 @@ def lora_config(a):
         return None
     from peft import LoraConfig
     targets = "all-linear" if a.lora_targets == "all-linear" else a.lora_targets.split(",")
+    extra = {}
+    if a.vision:
+        # language model and projector only; the vision encoder stays as it is
+        frozen = "vision_tower|vision_model|visual" + ("|multi_modal_projector|mm_projector|merger|connector"
+                                                       if a.freeze_projector else "")
+        extra["exclude_modules"] = rf".*({frozen})\..*"
     return LoraConfig(r=a.lora_r, lora_alpha=a.lora_alpha, lora_dropout=a.lora_dropout,
-                      target_modules=targets, task_type="CAUSAL_LM")
+                      target_modules=targets, task_type="CAUSAL_LM", **extra)
 
 
 def common_args(a, prec, out: Path, model) -> dict:
@@ -162,8 +212,17 @@ def train(a) -> int:
     out = Path(a.out)
     from trl import SFTConfig, SFTTrainer
     peft_cfg = lora_config(a)
-    sft_args = config(SFTConfig, **common_args(a, prec, out / "sft-run", model), completion_only_loss=True)
-    trainer = SFTTrainer(model=model, args=sft_args, train_dataset=sft_dataset(data / "sft.jsonl"),
+    sft_file, dpo_file = ("sft_vision.jsonl", "dpo_vision.jsonl") if a.vision else ("sft.jsonl", "dpo.jsonl")
+    extra = {"max_length": None} if a.vision else {}      # truncation would cut image tokens
+    sft_args = config(SFTConfig, **{**common_args(a, prec, out / "sft-run", model), **extra},
+                      completion_only_loss=True)
+    train_ds = sft_vision_dataset(data / sft_file) if a.vision else sft_dataset(data / sft_file)
+    if a.vision and a.method != "full":
+        for n, prm in model.named_parameters():
+            if any(k in n for k in ("vision_tower", "vision_model", "visual.")) or \
+                    (a.freeze_projector and any(k in n for k in ("projector", "merger", "connector"))):
+                prm.requires_grad_(False)
+    trainer = SFTTrainer(model=model, args=sft_args, train_dataset=train_ds,
                          processing_class=tok, peft_config=peft_cfg)
     trainer.train()
     model = trainer.model
@@ -172,19 +231,20 @@ def train(a) -> int:
     tok.save_pretrained(sft_dir)
 
     if a.dpo:
-        if not (data / "dpo.jsonl").exists() or not (data / "dpo.jsonl").read_text().strip():
-            raise SystemExit("--dpo given but dpo.jsonl is empty")
+        if not (data / dpo_file).exists() or not (data / dpo_file).read_text().strip():
+            raise SystemExit(f"--dpo given but {dpo_file} is empty")
         from trl import DPOConfig, DPOTrainer
         dkw = common_args(a, prec, out / "dpo-run", model)
-        dkw.update(learning_rate=a.dpo_lr, num_train_epochs=a.dpo_epochs, max_steps=a.dpo_max_steps)
+        dkw.update(learning_rate=a.dpo_lr, num_train_epochs=a.dpo_epochs, max_steps=a.dpo_max_steps, **extra)
         # With adapters, the reference policy is the same model with adapters
         # disabled, so no second copy of the weights is loaded.
         dtrainer = DPOTrainer(model=model, ref_model=None, args=config(DPOConfig, **dkw, beta=a.dpo_beta),
-                              train_dataset=dpo_dataset(data / "dpo.jsonl"), processing_class=tok)
+                              train_dataset=(dpo_vision_dataset if a.vision else dpo_dataset)(data / dpo_file),
+                              processing_class=tok)
         dtrainer.train()
         dtrainer.model.save_pretrained(out)
         tok.save_pretrained(out)
-    meta = {"base": a.model, "method": a.method, "data": str(data), "dpo": bool(a.dpo),
+    meta = {"base": a.model, "method": a.method, "vision": bool(a.vision), "data": str(data), "dpo": bool(a.dpo),
             "lora": None if a.method == "full" else {"r": a.lora_r, "alpha": a.lora_alpha, "targets": a.lora_targets},
             "precision": prec, "hardware": rep}
     (out / "neuronscope-finetune.json").write_text(json.dumps(meta, indent=2))
@@ -199,6 +259,10 @@ def main(argv=None) -> int:
     p.add_argument("--out", help="adapter (or full model) output directory")
     p.add_argument("--method", choices=["qlora", "lora", "full"], default="qlora")
     p.add_argument("--dpo", action="store_true", help="run DPO on dpo.jsonl after SFT")
+    p.add_argument("--vision", action="store_true",
+                   help="vision-language model: train on sft_vision.jsonl / dpo_vision.jsonl with its processor")
+    p.add_argument("--freeze-projector", action="store_true",
+                   help="with --vision: adapt the language model only, so the base model's mmproj GGUF still matches")
     p.add_argument("--fsdp", action="store_true", help="shard weights across GPUs (for --method full)")
     p.add_argument("--launch", type=int, default=0, metavar="N_GPUS", help="re-run this command under accelerate on N GPUs")
     p.add_argument("--check", action="store_true", help="print the hardware report and exit")

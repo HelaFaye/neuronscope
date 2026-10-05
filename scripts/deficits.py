@@ -7,6 +7,9 @@ is a directory with:
 
     sft.jsonl        chat-format correction pairs (deficits + replay anchors)
     dpo.jsonl        prompt / chosen / rejected pairs for preference training
+    sft_vision.jsonl, dpo_vision.jsonl, images/
+                     the same for vision items, in the image + messages
+                     format VLM trainers take (finetune.py --vision)
     holdout_ids.json bank items never trained on; measure on these afterwards
     plan.json        deficit counts by category and subject, and the training
                      method each category calls for
@@ -18,18 +21,22 @@ Pipeline:
      factual_gap        qa items answered wrong (hallucinated) or declined
      reasoning_failure  reasoning / executable code / API code answered wrong
      format_violation   instruction-following (constraints) or unparsable output
+     perception_failure vision items answered wrong
 2. **Correction targets.** Every target is checked with the same grader that
    scored the model, so nothing unverified is trained in:
      - gold answers where the bank has them (qa aliases, reasoning answers);
      - otherwise a teacher model (`--teacher URL@model`), retried up to
        `--teacher-tries` times, keeping only replies that pass.
+   Vision items always have gold answers.
 3. **Contrastive pairs:** the verified target is "chosen", the model's own
    failing reply is "rejected".
 4. **Synthetic expansion** (`--expand N`, needs a teacher): N variations of each
    failed item, each verified before use. Variations of executable-code
    items carry tests and a solution that must pass the interpreter
    (`--allow-exec`). Reasoning and factual variations must be answered
-   identically by a second, independent teacher call.
+   identically by a second, independent teacher call. Vision variations need
+   no teacher: vision_synth.py draws new scenes whose answers are known by
+   construction.
 5. **Replay buffer:** deficits make up `--deficit-fraction` (default 0.25) of
    the SFT set. The rest is anchor data: items the model already answers
    correctly, in its own words, plus any `--general` chat data. That keeps it
@@ -68,6 +75,8 @@ CATEGORY_METHOD = {
                           "reasoning and code habits are behavioural; adapters capture them cheaply"),
     "format_violation": ("LoRA / QLoRA (DDP across GPUs), SFT then DPO",
                          "instruction following is behaviour, not knowledge"),
+    "perception_failure": ("LoRA on the language model and projector, vision tower frozen (finetune.py --vision)",
+                           "reading the image is usually intact; mapping what is seen to the answer is what fails"),
 }
 ABSTAIN_TARGET = ("I can't give a reliable answer to that: the question rests on a premise that isn't true, "
                   "or there is no record that settles it.")
@@ -80,6 +89,8 @@ def categorise(task: dict, verdict: str) -> str | None:
         return "format_violation"
     if task["kind"] == "qa":
         return "factual_gap"
+    if task.get("image"):
+        return "perception_failure"
     if task["kind"] in ("reasoning", "code_exec", "code"):
         return "reasoning_failure"
     return None
@@ -217,6 +228,43 @@ def chat(prompt: str, answer: str) -> list[dict]:
     return [{"role": "user", "content": prompt}, {"role": "assistant", "content": answer}]
 
 
+def vision_user(prompt: str, n_images: int = 1) -> dict:
+    return {"role": "user", "content": [{"type": "image"}] * n_images + [{"type": "text", "text": prompt}]}
+
+
+def vision_reply(text: str) -> dict:
+    return {"role": "assistant", "content": [{"type": "text", "text": text}]}
+
+
+def save_image(task: dict, out: Path) -> str:
+    """Render (or copy) a task's image into out/images; returns the relative path."""
+    from qa_images import render
+    name = re.sub(r"[^A-Za-z0-9_.~-]", "_", task["id"]) + ".png"
+    dst = out / "images" / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    img = task["image"]
+    if isinstance(img, dict):
+        dst.write_bytes(render(img))
+    else:
+        src = Path(img)
+        if not src.is_absolute():
+            src = Path(task.get("_base", ".")) / src
+        dst = dst.with_suffix(src.suffix or ".png")
+        dst.write_bytes(src.read_bytes())
+    return f"images/{dst.name}"
+
+
+def mix(deficits: list, pool: list, frac: float, rng: random.Random) -> tuple[list, list]:
+    """Deficits plus enough replay anchors that deficits are `frac` of the set."""
+    want = round(len(deficits) * (1 - frac) / max(frac, 1e-6)) if deficits else 0
+    replay = []
+    if pool and want:
+        replay = rng.sample(pool, want) if want <= len(pool) else pool + [rng.choice(pool) for _ in range(want - len(pool))]
+    sft = deficits + replay
+    rng.shuffle(sft)
+    return sft, replay
+
+
 def load_results(path: str, label: str | None) -> tuple[str, list[dict]]:
     d = json.loads(Path(path).read_text())
     raw = d["raw"]
@@ -249,6 +297,7 @@ def build(args) -> dict:
 
     holdout = sorted(i for i in tasks if in_holdout(i, args.holdout_frac))
     deficits, anchors, dpo, skipped = [], [], [], Counter()
+    v_deficits, v_anchors, v_dpo = [], [], []
     by_cat = defaultdict(Counter)
     for r in rows:
         t = tasks.get(r["id"])
@@ -261,7 +310,37 @@ def build(args) -> dict:
             continue
         reply = tq.strip_think(cache.get(t["id"], r.get("text", ""))).strip()
         if t.get("image"):
-            skipped["vision item (needs multimodal training data)"] += 1
+            prompt = tq.prompt_for(t)
+            if cat is None:
+                if r["verdict"] in ("correct", "answered") and reply:
+                    v_anchors.append({"images": [save_image(t, out)], "messages": [vision_user(prompt), vision_reply(reply)],
+                                      "source": "anchor", "task": t["id"]})
+                continue
+            target = gold_target(t)
+            if not target or not verified(t, target, args.allow_exec):
+                skipped["vision item without a gold answer"] += 1
+                continue
+            meta = {"category": cat, "subject": t["subject"]}
+            img = save_image(t, out)
+            v_deficits.append({"images": [img], "messages": [vision_user(prompt), vision_reply(target)],
+                               "source": "correction", "task": t["id"], "target": "gold", **meta})
+            if reply:
+                v_dpo.append({"images": [img], "prompt": [vision_user(prompt)], "chosen": [vision_reply(target)],
+                              "rejected": [vision_reply(reply)], "source": "correction", "task": t["id"], **meta})
+            if args.expand:
+                from vision_synth import variations
+                vs = variations(t, args.expand, args.seed)
+                if not vs:
+                    skipped["vision item with no synthetic family"] += 1
+                for new in vs:
+                    tgt = gold_target(new)
+                    nimg = save_image(new, out)
+                    v_deficits.append({"images": [nimg], "messages": [vision_user(new["prompt"]), vision_reply(tgt)],
+                                       "source": "synthetic", "task": new["id"], **meta})
+                    if reply:
+                        v_dpo.append({"images": [nimg], "prompt": [vision_user(new["prompt"])],
+                                      "chosen": [vision_reply(tgt)], "rejected": [vision_reply(reply)],
+                                      "source": "synthetic", "task": new["id"], **meta})
             continue
         if cat is None:
             if r["verdict"] in ("correct", "answered") and reply:
@@ -295,23 +374,29 @@ def build(args) -> dict:
                 if isinstance(rec.get("messages"), list):
                     general.append({"messages": rec["messages"], "source": "general"})
     pool = anchors + general
-    want_anchor = round(len(deficits) * (1 - args.deficit_fraction) / max(args.deficit_fraction, 1e-6)) if deficits else 0
-    replay = []
-    if pool and want_anchor:
-        replay = rng.sample(pool, want_anchor) if want_anchor <= len(pool) else \
-            pool + [rng.choice(pool) for _ in range(want_anchor - len(pool))]
-    sft = deficits + replay
-    rng.shuffle(sft)
+    sft, replay = mix(deficits, pool, args.deficit_fraction, rng)
     actual_frac = len(deficits) / len(sft) if sft else 0.0
+    # Vision replay: the model's own correct vision answers first, then text
+    # anchors in the same content-list format (no image), so a VLM keeps both.
+    v_pool = v_anchors + [{"images": [], "messages": [
+        {"role": m["role"], "content": [{"type": "text", "text": m["content"]}]} for m in a["messages"]],
+        "source": a["source"]} for a in pool]
+    need = round(len(v_deficits) * (1 - args.deficit_fraction) / max(args.deficit_fraction, 1e-6))
+    v_sft, v_replay = mix(v_deficits, v_anchors if len(v_anchors) >= need else v_pool, args.deficit_fraction, rng)
 
     (out / "sft.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in sft))
     (out / "dpo.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in dpo))
+    if v_sft:
+        (out / "sft_vision.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in v_sft))
+        (out / "dpo_vision.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in v_dpo))
     (out / "holdout_ids.json").write_text(json.dumps({"ids": holdout}, indent=1))
     plan = {"model": label, "results": args.results,
             "deficits_by_category": {c: dict(v) for c, v in by_cat.items()},
             "sft_examples": len(sft), "deficit_examples": len(deficits), "replay_examples": len(replay),
             "deficit_fraction": round(actual_frac, 3), "dpo_pairs": len(dpo),
-            "anchor_pool": len(pool), "holdout_items": len(holdout), "skipped": dict(skipped),
+            "anchor_pool": len(pool),
+            "vision": {"sft_examples": len(v_sft), "deficit_examples": len(v_deficits),
+                       "replay_examples": len(v_replay), "dpo_pairs": len(v_dpo), "vision_anchors": len(v_anchors)}, "holdout_items": len(holdout), "skipped": dict(skipped),
             "methods": {c: {"method": CATEGORY_METHOD[c][0], "why": CATEGORY_METHOD[c][1]} for c in by_cat}}
     (out / "plan.json").write_text(json.dumps(plan, indent=2))
     lines = [f"Retraining set for {label}", ""]
@@ -319,7 +404,11 @@ def build(args) -> dict:
         lines.append(f"{c:<18} {sum(v.values()):>4}  " + ", ".join(f"{s} {n}" for s, n in v.most_common()))
         lines.append(f"{'':<18}       -> {CATEGORY_METHOD[c][0]}")
     lines += ["", f"SFT: {len(sft)} examples ({len(deficits)} deficit, {len(replay)} replay; deficit share {actual_frac:.0%})",
-              f"DPO: {len(dpo)} pairs", f"holdout: {len(holdout)} bank items never trained on"]
+              f"DPO: {len(dpo)} pairs"]
+    if v_sft:
+        lines += [f"vision SFT: {len(v_sft)} examples ({len(v_deficits)} deficit, {len(v_replay)} replay), "
+                  f"vision DPO: {len(v_dpo)} pairs -> finetune.py --vision"]
+    lines += [f"holdout: {len(holdout)} bank items never trained on"]
     if skipped:
         lines += ["skipped: " + "; ".join(f"{k}: {v}" for k, v in skipped.items())]
     if deficits and not pool:
