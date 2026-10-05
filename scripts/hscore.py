@@ -80,19 +80,19 @@ class HScorer:
         with self.lock, tempfile.TemporaryDirectory(prefix="hscore-") as work:
             m1 = os.path.join(work, "t.jsonl")
             with open(m1, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"id": "p", "text": prompt}, ensure_ascii=False) + "\n")
                 f.write(json.dumps({"id": "r", "text": text}, ensure_ascii=False) + "\n")
             self._run(["--tokenize-only", "-ngl", "0", "-c", "4096", "--manifest", m1, "--outdir", work])
             ids = read_tokens(os.path.join(work, "r.toks"))
+            p_ids = read_tokens(os.path.join(work, "p.toks"))
             n_tok = len(ids)
             if n_tok > self.batch:
                 raise ValueError(f"{n_tok} tokens exceeds batch {self.batch}")
-            # First token index past the rendered prompt.
-            acc, start = 0, n_tok
-            for i, t in enumerate(ids):
-                acc += len(tok.decode([int(t)]))
-                if acc >= len(prompt):
-                    start = i + 1
-                    break
+            # The response starts where the prompt's own tokenization ends. If
+            # the boundary merged into one token, back off to the common prefix.
+            start = 0
+            while start < min(len(p_ids), n_tok) and p_ids[start] == ids[start]:
+                start += 1
             if start >= n_tok:
                 raise ValueError("empty response region")
             m2 = os.path.join(work, "s.jsonl")

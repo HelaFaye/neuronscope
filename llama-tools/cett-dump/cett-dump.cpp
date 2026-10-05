@@ -548,6 +548,12 @@ static bool eval_callback(ggml_tensor * t, bool ask, void * user_data) {
 // Evaluate one sequence and write its dump. Returns false on failure.
 static bool write_aggregate(dump_ctx & dump, const std::string & out_path);
 
+// llama.cpp computes the final layer's FFN only for tokens flagged as
+// outputs. Flagging every token makes that layer complete, at the cost of an
+// n_vocab x n_tokens logits buffer (~1 GB for 2k tokens at a 150k vocab).
+// --last-layer-outputs-only restores the cheap behaviour (last layer unseen).
+static bool g_all_outputs = true;
+
 static bool run_one(llama_context * ctx, const common_params & params,
                     const std::string & text, const std::string & out_path,
                     const std::vector<span_t> & spans, int32_t n_layers,
@@ -598,8 +604,24 @@ static bool run_one(llama_context * ctx, const common_params & params,
     llama_memory_clear(llama_get_memory(ctx), true);
 
     g_active = &dump;
-    const bool ok = llama_decode(
-        ctx, llama_batch_get_one(tokens.data(), (int32_t) tokens.size())) == 0;
+    bool ok;
+    if (g_all_outputs) {
+        const int32_t n = (int32_t) tokens.size();
+        llama_batch batch = llama_batch_init(n, 0, 1);
+        for (int32_t i = 0; i < n; ++i) {
+            batch.token[i]     = tokens[i];
+            batch.pos[i]       = i;
+            batch.n_seq_id[i]  = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i]    = 1;
+        }
+        batch.n_tokens = n;
+        ok = llama_decode(ctx, batch) == 0;
+        llama_batch_free(batch);
+    } else {
+        ok = llama_decode(
+            ctx, llama_batch_get_one(tokens.data(), (int32_t) tokens.size())) == 0;
+    }
     g_active = nullptr;
 
     if (ok && !dump.failed && dump.next_off != dump.n_total) {
@@ -682,6 +704,8 @@ int main(int argc, char ** argv) {
             tokenize_only = true;
         } else if (strcmp(argv[i], "--max") == 0) {
             use_max = true;
+        } else if (strcmp(argv[i], "--last-layer-outputs-only") == 0) {
+            g_all_outputs = false;
         } else if (strcmp(argv[i], "--n-layers") == 0 && i + 1 < argc) {
             n_layers_arg = (int32_t) atoi(argv[++i]);
         } else {

@@ -46,16 +46,17 @@ It walks every prerequisite in order and ends with one next action.
 ## 2. Build llama.cpp (for serving and GGUF extraction)
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp ~/llama.cpp
-cp -r llama-tools/cett-dump ~/llama.cpp/tools/
-echo 'add_subdirectory(cett-dump)' >> ~/llama.cpp/tools/CMakeLists.txt
-cd ~/llama.cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON   # or -DGGML_CUDA=ON / -DGGML_METAL=ON / CPU only
-cmake --build build -j --target llama-server llama-cett-dump llama-quantize
+scripts/build_llama_tools.sh --backend vulkan     # or cpu, cuda, metal, hip; --dir to choose the checkout
 ```
 
-Vulkan works on AMD, Intel and NVIDIA and is the most portable choice. See
+It clones llama.cpp, adds the `cett-dump` extractor, and builds
+`llama-cett-dump`, `llama-server`, `llama-quantize` and `llama-eval-callback`.
+Vulkan works on AMD, Intel and NVIDIA and is the most portable choice; see
 [HARDWARE.md](HARDWARE.md) for backend notes.
+
+`cett-dump` is tested against current llama.cpp: on a model converted with
+llama.cpp's own converter its CETT values match the PyTorch hook path on every
+layer (`tests/test_llamacpp_integration.py`, run with `NS_LLAMA` set).
 
 ## 3. Point NeuronScope at a model
 

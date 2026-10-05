@@ -23,6 +23,9 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- `scripts/build_llama_tools.sh` builds llama.cpp with cett-dump for any
+  backend; `tests/test_llamacpp_integration.py` checks the compiled tool
+  against PyTorch on a tiny converted model.
 - CLIP/SigLIP H-Neurons (`clip_neurons.py`: collect, extract, evaluate,
   export) and `suppress_mmproj.py` for llama.cpp vision projectors.
 - TestQA (`testqa.py`) with a 77-task bank: reasoning, executable coding through
@@ -57,6 +60,13 @@
   `--publish-stats`.
 
 ### Fixed
+- `cett-dump` silently dropped the last decoder layer: llama.cpp computes the
+  final layer's FFN only for tokens that produce logits, so that layer was
+  never seen. Every token is now an output (`--last-layer-outputs-only`
+  restores the old behaviour). Found by compiling it for the first time;
+  it now matches the PyTorch reference to f16 precision on every layer.
+- `hscore.py` located the response by decoded character length, which broke
+  on byte-fallback tokens; it now compares prompt and full token ids.
 - `delegate.py`'s H-Neuron gate called `/api/score` on the tracing proxy, which
   never implemented it, so every gate check failed as "unreachable". The proxy
   now implements it (`autotrace.py --classifier`).

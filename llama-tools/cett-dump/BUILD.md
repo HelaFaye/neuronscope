@@ -26,6 +26,13 @@ printf 'The capital of France is' > /tmp/seq.txt
     --prompt-file /tmp/seq.txt --out /tmp/dump.bin
 ```
 
+Or just run `scripts/build_llama_tools.sh --backend vulkan`.
+
+Every token is flagged as an output so llama.cpp computes the final layer for
+all of them; that costs an n_vocab x n_tokens logits buffer (about 1 GB for
+2k tokens at a 150k vocabulary). `--last-layer-outputs-only` trades the last
+layer's activations for that memory.
+
 Expect one record per decoder layer. If you get zero, the node naming differs
 in your llama.cpp version -- run `llama-eval-callback` on the same model and
 grep its output for the ffn_down node names, then adjust
