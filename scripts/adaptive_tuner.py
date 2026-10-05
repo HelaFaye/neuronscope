@@ -15,15 +15,14 @@ import json
 import math
 import os
 import shlex
-import statistics
 import subprocess
 import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 def wilson_interval(correct:int,total:int,z:float=1.96):

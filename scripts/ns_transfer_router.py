@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Single entry point showing all NeuronScope transfer modes."""
-import argparse, os, sys, subprocess
+import argparse
+import sys
+import subprocess
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 

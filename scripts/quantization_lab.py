@@ -26,7 +26,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path

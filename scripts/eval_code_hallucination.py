@@ -42,7 +42,6 @@ import argparse
 import ast
 import importlib
 import json
-import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import requests as _http

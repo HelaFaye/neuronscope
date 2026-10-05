@@ -45,7 +45,7 @@ check that and neither can this plugin -- it is on you.
 import json
 import os
 import re
-from typing import List, Optional
+from typing import List
 
 import torch
 

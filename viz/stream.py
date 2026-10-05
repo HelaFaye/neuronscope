@@ -29,11 +29,9 @@ the user is trained to click through.
 """
 
 import argparse
-import hashlib
 import hmac
 import http.cookies
 import json
-import math
 import os
 import queue
 import ssl

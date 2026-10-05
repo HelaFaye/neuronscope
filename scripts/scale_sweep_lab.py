@@ -21,7 +21,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -29,7 +28,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -21,11 +21,9 @@ wrong about your machine.
 """
 
 import argparse
-import glob
 import os
 import shutil
 import subprocess
-import sys
 
 GIB = 1024 ** 3
 

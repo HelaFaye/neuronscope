@@ -34,7 +34,6 @@ import ast
 import importlib
 import json
 import re
-import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import requests

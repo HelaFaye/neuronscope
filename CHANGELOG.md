@@ -34,6 +34,11 @@
   automatically and accept image attachments. Also adds saved chats with
   Markdown export, tokens/s and time to first token, stop/regenerate, and
   dark mode.
+- Adaptive Tuning lab rebuilt: labelled form, resumable state path, CA file,
+  score-by-scale chart with confidence intervals, baseline and next interval,
+  results table, light/dark.
+- `tests/test_ui_pages.py` syntax-checks every embedded page's JavaScript and
+  the pages as actually served (needs `node`).
 - `install.sh` detects NVIDIA (CUDA) and macOS (MPS) as well as AMD (ROCm) and CPU.
 
 ### Fixed
@@ -43,6 +48,12 @@
 - `adaptive_tuner.py tune` crashed because `--token` and `--auto-delete` were
   never defined. The tuning lab GUI dropped the token it collected.
 - Studio listed `mmproj-*.gguf` projector files as loadable models.
+- Quantization Lab page never initialised: the server injected the models
+  directory into a `<script>` unquoted, and never filled the profiles
+  placeholder (`__PROFILES__ is not defined`). Values are now JSON-encoded.
+- Scale Sweep Lab page had a JavaScript syntax error (a stray `${''}`), so
+  none of its controls worked.
+- `mcp` 2.x renamed `FastMCP` to `MCPServer`; the MCP server imports either.
 
 ### Changed
 - Documentation reorganised into `docs/`; machine-specific paths, IPs and

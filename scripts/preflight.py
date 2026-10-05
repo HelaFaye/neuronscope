@@ -18,7 +18,6 @@ import argparse
 import json
 import os
 import sys
-import re
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM

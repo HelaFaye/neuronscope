@@ -36,7 +36,6 @@ import json
 import random
 import re
 import string
-import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import requests

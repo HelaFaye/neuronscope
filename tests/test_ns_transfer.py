@@ -1,4 +1,4 @@
-import json, tempfile, threading
+import threading
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 import sys

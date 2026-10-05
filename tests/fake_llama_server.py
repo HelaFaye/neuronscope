@@ -2,7 +2,6 @@
 """Stand-in for llama-server in tests: same CLI shape, same HTTP surface."""
 import argparse
 import json
-import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 p = argparse.ArgumentParser()

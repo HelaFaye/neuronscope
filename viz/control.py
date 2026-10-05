@@ -21,7 +21,6 @@ process launching on your network; do not do that.
 import argparse
 import hmac
 import sys
-import html
 import http.cookies
 import json
 import os

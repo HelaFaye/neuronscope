@@ -25,7 +25,6 @@ import http.cookies
 import json
 import os
 import queue
-import shutil
 import signal
 import socket
 import subprocess

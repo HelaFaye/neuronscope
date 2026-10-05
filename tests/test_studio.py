@@ -1,7 +1,6 @@
 """Studio's OpenAI-compatible API, JIT loading, routing, TTL and chat storage
 against a fake llama-server."""
 import json
-import os
 import socket
 import sys
 import threading
