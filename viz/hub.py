@@ -8,7 +8,7 @@ not. This supervises them -- open a tab and its service starts, close the tab
 and it stops.
 
     python viz/hub.py --root . --port 7860
-    python viz/hub.py --root . --host 0.0.0.0 --token "$(openssl rand -hex 8)"
+    python viz/hub.py --root . --host 0.0.0.0 --token-file hub.token --tls-cert c.pem --tls-key k.pem
 
 Services are declared in SERVICES, not discovered, because a supervisor that
 starts arbitrary commands from a config file is a remote shell. Each entry says
@@ -37,6 +37,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+import ns_security as sec  # noqa: E402
 try:
     import shell            # the mode registry
 except ImportError:
@@ -572,13 +574,22 @@ def main():
     p.add_argument("--root", default=".")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--token")
     p.add_argument("--idle-after", type=int, default=90,
                    help="seconds to keep a service alive after its last tab")
+    sec.add_server_security_args(p)
     a = p.parse_args()
 
+    os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
+    token = sec.resolve_token(a.token, a.token_file) or None
+    tls = bool(a.tls_cert and a.tls_key)
+    try:
+        for w in sec.check_bind(a.host, token or "", tls=tls, allow_plaintext=a.allow_plaintext):
+            print("warning:", w)
+    except sec.SecurityConfigError as e:
+        raise SystemExit(f"error: {e}")
+
     STATE.update({"root": os.path.abspath(a.root),
-                  "token": a.token or os.environ.get("NS_STUDIO_TOKEN"),
+                  "token": token,
                   "idle_after": a.idle_after})
     SERVICES.update(declare(STATE["root"], sys.executable))
 
@@ -587,12 +598,12 @@ def main():
     for n, s in SERVICES.items():
         ok = os.path.exists(os.path.join(STATE["root"], s["script"]))
         print(f"  {n:<8} {s['script']:<18} {'ok' if ok else 'MISSING'}")
-    if a.host == "0.0.0.0" and not STATE["token"]:
-        print("\n!! bound to 0.0.0.0 with no --token: anyone on this network "
-              "can start processes here")
 
     threading.Thread(target=reaper, daemon=True).start()
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    if tls:
+        srv.socket = sec.server_ssl_context(a.tls_cert, a.tls_key).wrap_socket(
+            srv.socket, server_side=True, do_handshake_on_connect=False)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

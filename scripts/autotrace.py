@@ -10,10 +10,10 @@ words instead of alongside them -- one prefill pass, a few seconds for a typical
 response.
 
     llama-server -m model.gguf --port 8080 &
-    python viz/stream.py --token secret --host 0.0.0.0 &          # viewer
+    python viz/stream.py --token-file viewer.token --host 0.0.0.0 --allow-plaintext &          # viewer
     python scripts/autotrace.py --upstream http://127.0.0.1:8080 \\
         --binary ~/llama.cpp/build/bin/llama-cett-dump \\
-        --gguf model.gguf --tokenizer ornith-ai/Ornith-1.5-9B \\
+        --gguf model.gguf --tokenizer Qwen/Qwen3-8B \\
         --n-layers 36 --publish http://127.0.0.1:7890 --port 8088
 
 Then point Cline, Studio or anything else at :8088 instead of :8080. Nothing
@@ -260,7 +260,10 @@ def main():
     p.add_argument("--batch", type=int, default=4096)
     p.add_argument("--port", type=int, default=8088)
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--allow-unauthenticated", action="store_true", help="permit a non-loopback bind (no auth)")
     a = p.parse_args()
+    import ns_security as sec
+    sec.loopback_only(a.host, "the tracing proxy", a.allow_unauthenticated)
     CFG.update(vars(a))
     CFG["max_frames"] = a.max_frames
     CFG["max_tokens"] = a.max_tokens

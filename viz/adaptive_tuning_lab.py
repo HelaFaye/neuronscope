@@ -28,5 +28,5 @@ class H(BaseHTTPRequestHandler):
   th=threading.Thread(target=run,daemon=True);STATE['thread']=th;th.start();self.sendj({'ok':True})
  def log_message(self,*a):pass
 def main():
- p=argparse.ArgumentParser();p.add_argument('--host',default='127.0.0.1');p.add_argument('--port',type=int,default=8800);a=p.parse_args();s=ThreadingHTTPServer((a.host,a.port),H);print(f'NeuronScope Adaptive Tuning: http://{a.host}:{a.port}/');s.serve_forever()
+ p=argparse.ArgumentParser();p.add_argument('--host',default='127.0.0.1');p.add_argument('--port',type=int,default=8800);p.add_argument('--allow-unauthenticated',action='store_true');a=p.parse_args();import ns_security as sec;sec.loopback_only(a.host,'the Adaptive Tuning lab',a.allow_unauthenticated);s=ThreadingHTTPServer((a.host,a.port),H);print(f'NeuronScope Adaptive Tuning: http://{a.host}:{a.port}/');s.serve_forever()
 if __name__=='__main__':main()

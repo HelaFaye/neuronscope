@@ -373,7 +373,7 @@ DEFAULTS = {"ngl": 99, "ctx": 8192, "batch": 2048, "threads": 0,
 
 # A named config is a complete, reusable setup: model, load settings, preset,
 # visualizer and hardware limits, under a name. The name is also what the model
-# is served as, so Cline sees "ornith-suppressed" rather than a filename.
+# is served as, so Cline sees "model-suppressed" rather than a filename.
 CONFIG_DEFAULTS = {
     "name": "", "path": "", "settings": {}, "preset": "default",
     "viz": "pygfx", "viz_device": "auto",
@@ -464,8 +464,8 @@ def audit_config(cfg, model):
             os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
         from vram_budget import GIB, detect_vram, plan, read_gguf_shape
         shape = read_gguf_shape(model["path"])
-        # A config can name the machine it is for, so you can check the
-        # friend's rig from the laptop. Falls back to whatever this box has.
+        # A config can name the machine it is for, so you can plan for another
+        # host from this one. Falls back to whatever this machine has.
         reserve_mult = 1.0
         vram = int((cfg.get("vram_gib") or 0) * GIB)
         hosts, current = host_profiles()

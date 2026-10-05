@@ -126,7 +126,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--host',default='127.0.0.1');ap.add_argument('--port',type=int,default=8797);a=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--host',default='127.0.0.1');ap.add_argument('--port',type=int,default=8797);ap.add_argument('--allow-unauthenticated',action='store_true',help='permit a non-loopback bind (no auth)');a=ap.parse_args()
+    import ns_security as sec; sec.loopback_only(a.host,'the Scale Sweep Lab',a.allow_unauthenticated)
     s=ThreadingHTTPServer((a.host,a.port),Handler);print(f'NeuronScope Scale Sweep Lab: http://{a.host}:{a.port}')
     try:s.serve_forever()
     except KeyboardInterrupt:pass

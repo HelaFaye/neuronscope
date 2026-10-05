@@ -23,11 +23,16 @@ import ns_security as sec  # noqa: E402
 MIN_MCP = (2, 3)
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    # mcp 2.x renamed FastMCP to MCPServer; the decorator API is unchanged.
+    from mcp.server.mcpserver import MCPServer as FastMCP
     IMPORT_ERROR = None
 except Exception as e:  # pragma: no cover - depends on optional package
-    FastMCP = None
-    IMPORT_ERROR = e
+    try:
+        from mcp.server.fastmcp import FastMCP  # mcp 1.x, refused by ensure()
+        IMPORT_ERROR = None
+    except Exception:
+        FastMCP = None
+        IMPORT_ERROR = e
 
 ROOT = Path(__file__).resolve().parent
 CLI = ROOT / "ns_transfer.py"
@@ -247,7 +252,7 @@ else:
 
 def main() -> None:
     ensure()
-    mcp.run()  # stdio transport: no network listener
+    mcp.run("stdio")  # no network listener
 
 
 if __name__ == "__main__":

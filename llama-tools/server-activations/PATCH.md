@@ -157,7 +157,7 @@ NS_ACTIVATIONS=sparse NS_TOPK=48 \
 NS_CLASSIFIER=models/classifier.bin \
   ./build/bin/llama-server -m model.gguf --parallel 1 --port 8080
 
-python viz/stream.py --source http://127.0.0.1:8080 --token secret --host 0.0.0.0
+python viz/stream.py --source http://127.0.0.1:8080 --token-file viewer.token --host 0.0.0.0 --allow-plaintext
 ```
 
 ## What to expect

@@ -50,6 +50,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import ns_security as sec  # noqa: E402
 from records import Session  # noqa: E402
 from timeline import THEMES, classify_frames, load_mask, load_trace  # noqa
 
@@ -291,7 +293,10 @@ def main():
     p.add_argument("--port", type=int, default=7880)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--dump", metavar="BIN", help="write the payload and exit")
+    p.add_argument("--allow-unauthenticated", action="store_true", help="permit a non-loopback bind (no auth)")
     a = p.parse_args()
+    if not a.dump:
+        sec.loopback_only(a.host, "the trace viewer", a.allow_unauthenticated)
 
     blob, meta = build_payload(a.session, a.h_neurons, a.active_pct,
                                a.score_z, a.max_cells)

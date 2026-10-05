@@ -4,8 +4,8 @@ Does suppression help? Ask the original and the edited model the same fresh
 questions and compare, question by question.
 
     python scripts/compare_models.py \\
-        --target base=http://192.168.41.171:1234/v1@huihui-ornith-1.5-9b-abliterated \\
-        --target s025=http://192.168.41.171:1234/v1@ornith-1.5-9b-supp025 \\
+        --target base=http://GPU-HOST:1234/v1@my-model \\
+        --target s025=http://GPU-HOST:1234/v1@my-model-supp25 \\
         --n 200 --out runs/compare-s025
 
 Targets are name=URL[@model]. Any OpenAI-compatible server works: LM Studio

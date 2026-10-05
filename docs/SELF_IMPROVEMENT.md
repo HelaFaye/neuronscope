@@ -57,9 +57,8 @@ measurement. Cheap, honest, and it compounds.
 **3. Abstention SFT.** `export_sft_dataset.py` turns your collected pairs into
 training data: correct answers stay, hallucinated ones become declines. That is
 a genuine improvement loop -- the model learns to say "I don't know" exactly
-where it used to fabricate. It needs a training run, which your 12 GB carve-out
-cannot host; a 9B QLoRA wants ~24 GB. The friend's 16 GB card could do 4-bit
-QLoRA at a short sequence length. This is the one with real upside and real
+where it used to fabricate. It needs a training run: a 9B QLoRA wants ~24 GB of VRAM, and a 16 GB card
+can manage 4-bit QLoRA at a short sequence length. This is the one with real upside and real
 hardware cost.
 
 **4. Task-specific profiles.** `task_neurons.py` already tells you whether

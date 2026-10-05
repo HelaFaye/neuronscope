@@ -14,7 +14,7 @@ cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j --target llama-cett-dump
 ```
 
-On EndeavourOS you need `vulkan-headers`, `shaderc` and your driver's Vulkan
+On Linux you need `vulkan-headers`, `shaderc` and your driver's Vulkan
 ICD (`vulkan-radeon` for AMD). Confirm the GPU is visible with `vulkaninfo
 --summary` before building.
 

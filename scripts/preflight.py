@@ -11,7 +11,7 @@ reports the numbers that decide whether the run is feasible:
 
 Run this before downloading 19GB of weights.
 
-    python preflight.py --model_path ornith-ai/Ornith-1.0-9B --n_pairs 400
+    python preflight.py --model_path Qwen/Qwen3-8B --n_pairs 400
 """
 
 import argparse

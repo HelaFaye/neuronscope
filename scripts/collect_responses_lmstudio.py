@@ -16,8 +16,8 @@ Replaces scripts/collect_responses.py. Differences that matter:
   5. Resumable. Re-running skips qids already present in the output file.
 
     python collect_responses_lmstudio.py \
-        --base_url http://192.168.41.171:1234/v1 \
-        --model ornith-1.0-9b-MSB \
+        --base_url http://GPU-HOST:1234/v1 \
+        --model qwen3-8b-MSB \
         --data_path data/TriviaQA/rc.nocontext/train-00000-of-00001.parquet \
         --output_path data/consistency_samples.jsonl \
         --sample_num 10 --max_questions 3000 --concurrency 8
@@ -53,7 +53,7 @@ def parse_args():
     p.add_argument("--concurrency", type=int, default=8,
                    help="Match or slightly exceed Max Concurrent Predictions.")
 
-    # Ornith's card recommends 0.6/0.95/20. The original repo used 1.0/0.9/50,
+    # Many reasoning-model cards recommend 0.6/0.95/20. The original repo used 1.0/0.9/50,
     # which makes the consistency filter more selective but characterises
     # behaviour you will not actually deploy.
     p.add_argument("--temperature", type=float, default=0.6)

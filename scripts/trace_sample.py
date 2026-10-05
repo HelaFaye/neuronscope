@@ -15,8 +15,8 @@ neurons and averaging erases them), which brings 512 bins down to about 16 MB.
 
     python scripts/trace_sample.py \\
         --binary ~/llama.cpp/build/bin/llama-cett-dump \\
-        --gguf ~/models/Ornith-1.0-9B-Q6_K.gguf \\
-        --tokenizer ornith-ai/Ornith-1.0-9B \\
+        --gguf ~/models/Qwen3-8B-Q6_K.gguf \\
+        --tokenizer Qwen/Qwen3-8B \\
         --input_path data/consistency_samples.jsonl --qid <id> \\
         --out runs/trace-<id> --bin-neurons 512
 

@@ -3,7 +3,7 @@
 Compare activations across sessions, with the comparability question enforced
 rather than left to the user.
 
-The naive version of this is meaningless. Layer 5 neuron 1234 in Ornith has no
+The naive version of this is meaningless. Layer 5 neuron 1234 in one model has no
 relationship to layer 5 neuron 1234 in Qwen3.5: independently trained networks
 have no neuron correspondence, so differencing their maps yields noise that
 looks convincingly like structure. This module sorts comparisons into tiers and
@@ -21,7 +21,7 @@ same thing.
                       more" and is testable rather than folklore.
 
     LINEAGE        same geometry, different weights, and you assert one was
-                   post-trained from the other (Ornith-1.0-9B from Qwen3.5-9B,
+                   post-trained from the other (a fine-tune from its base checkpoint,
                    say). Post-training does not permute neurons, so indices
                    plausibly still correspond -- but that is a hypothesis, not
                    a guarantee, so it must be asserted with --assert-lineage
@@ -35,8 +35,8 @@ Distribution-level comparisons (depth profiles, sparsity, concentration) and
 behavioural ones (which items each model got wrong) are valid across every
 tier, because neither depends on indices lining up.
 
-    python viz/compare.py runs/ornith-q6 runs/ornith-q4
-    python viz/compare.py runs/qwen35 runs/ornith10 --assert-lineage
+    python viz/compare.py runs/model-q6 runs/model-q4
+    python viz/compare.py runs/base runs/finetune --assert-lineage
     python viz/compare.py a b c --json out.json
 """
 

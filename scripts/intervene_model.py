@@ -15,16 +15,16 @@ workload it may simply make the model less useful. Always run --eval_prompts
 before and after, and check that the model can still do its actual job.
 
     python scripts/intervene_model.py \
-        --model_path ornith-ai/Ornith-1.0-9B \
+        --model_path Qwen/Qwen3-8B \
         --h_neurons models/h_neurons.json \
         --scale 0.1 \
-        --output_path models/ornith-9b-suppressed
+        --output_path models/model-suppressed
 
 Then:
-    python llama.cpp/convert_hf_to_gguf.py models/ornith-9b-suppressed \
-        --outfile ornith-9b-suppressed-f16.gguf --outtype f16
+    python llama.cpp/convert_hf_to_gguf.py models/model-suppressed \
+        --outfile model-suppressed-f16.gguf --outtype f16
     ./llama.cpp/build/bin/llama-quantize \
-        ornith-9b-suppressed-f16.gguf ornith-9b-suppressed-Q8_0.gguf Q8_0
+        model-suppressed-f16.gguf model-suppressed-Q8_0.gguf Q8_0
 """
 
 import argparse

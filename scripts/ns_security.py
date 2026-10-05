@@ -156,6 +156,20 @@ def check_bind(host: str, token: str, *, tls: bool, allow_plaintext: bool) -> li
     return warnings
 
 
+def loopback_only(host: str, name: str, allow_unauthenticated: bool = False) -> None:
+    """For local tools that have no authentication of their own."""
+    if is_loopback(host):
+        return
+    if allow_unauthenticated:
+        print(f"warning: {name} has no authentication and is listening on {host}; anyone who can "
+              "reach the port can use it.", file=sys.stderr)
+        return
+    raise SystemExit(
+        f"error: {name} has no authentication, so it refuses to listen on {host!r}.\n"
+        "Bind to 127.0.0.1 and reach it through an SSH tunnel (ssh -L PORT:127.0.0.1:PORT host) "
+        "or run it under viz/hub.py, or pass --allow-unauthenticated on a network you trust.")
+
+
 def server_ssl_context(certfile: str, keyfile: str) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2

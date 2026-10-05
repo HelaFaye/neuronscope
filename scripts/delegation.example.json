@@ -1,8 +1,8 @@
 {
   "_comment": "Copy to delegation.json and edit. Endpoints only -- nothing here becomes a command line.",
   "boss": {
-    "url": "http://192.168.41.171:1234/v1",
-    "model": "huihui-ornith-1.5-9b-abliterated"
+    "url": "http://GPU-HOST:1234/v1",
+    "model": "my-model"
   },
   "minions": [
     {
@@ -13,8 +13,8 @@
     },
     {
       "name": "remote",
-      "url": "http://192.168.41.171:1234/v1",
-      "model": "huihui-ornith-1.5-9b-abliterated",
+      "url": "http://GPU-HOST:1234/v1",
+      "model": "my-model",
       "good_at": ["reason", "code", "plan"]
     }
   ],

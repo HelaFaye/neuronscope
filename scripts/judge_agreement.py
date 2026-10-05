@@ -27,7 +27,7 @@ disagreements point at where your labels are ambiguous.
 
     python scripts/judge_agreement.py \\
         --input_path data/consistency_samples.jsonl \\
-        --base_url http://192.168.41.171:8080/v1 --model <judge-model> \\
+        --base_url http://GPU-HOST:8080/v1 --model <judge-model> \\
         --n 150 --show 15
 """
 

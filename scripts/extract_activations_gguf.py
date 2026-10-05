@@ -24,8 +24,8 @@ in one training set.
 
     python scripts/extract_activations_gguf.py \\
         --binary ~/llama.cpp/build/bin/llama-cett-dump \\
-        --gguf ~/models/ornith-1.0-9b-Q6_K.gguf \\
-        --tokenizer ornith-ai/Ornith-1.0-9B \\
+        --gguf ~/models/Qwen3-8B-Q6_K.gguf \\
+        --tokenizer Qwen/Qwen3-8B \\
         --input_path data/answer_tokens.jsonl \\
         --ids_path data/train_qids.json \\
         --output_root data/activations \\
@@ -230,7 +230,7 @@ def run_tool(args, manifest, outdir, tokenize_only, n_layers=None):
            "--outdir", outdir]
     if tokenize_only:
         # -c is required even here: without it llama.cpp reserves the
-        # model's full trained context (262k on Ornith, ~8 GB of KV) for a
+        # model's full trained context (often 128k-262k, gigabytes of KV) for a
         # pass that only tokenizes, and the OOM killer takes it.
         cmd += ["--tokenize-only", "-ngl", "0", "-c", "4096"]
     else:

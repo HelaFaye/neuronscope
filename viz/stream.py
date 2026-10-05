@@ -18,8 +18,8 @@ Bandwidth is the whole design. On a 36-layer, 14336-wide model:
 So the reduction happens server-side and the client chooses a tier. A phone
 asks for `sparse`; a desktop on the same switch asks for `binned`.
 
-    python viz/stream.py --simulate --token secret --host 0.0.0.0
-    python viz/stream.py --source http://127.0.0.1:8080 --token secret \\
+    python viz/stream.py --simulate --token-file viewer.token --host 0.0.0.0 --allow-plaintext  # behind a VPN
+    python viz/stream.py --source http://127.0.0.1:8080 --token-file viewer.token \\
         --tls-cert cert.pem --tls-key key.pem --host 0.0.0.0
 
 Open the printed URL on the phone. Auth is a bearer token or cookie; TLS is
@@ -41,6 +41,10 @@ import urllib.request
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import ns_security as sec  # noqa: E402
 
 STATE = {"token": None, "tier": "binned", "source": None, "simulate": False}
 SUBS = []
@@ -412,14 +416,19 @@ def main():
     p.add_argument("--source", help="llama-server with --activations (not yet "
                                     "implemented upstream)")
     p.add_argument("--tier", default="binned", choices=sorted(TIERS))
-    p.add_argument("--token", help="require this token")
-    p.add_argument("--tls-cert")
-    p.add_argument("--tls-key")
     p.add_argument("--port", type=int, default=7890)
     p.add_argument("--host", default="127.0.0.1")
+    sec.add_server_security_args(p)
     a = p.parse_args()
 
-    STATE.update({"token": a.token or os.environ.get("NS_STUDIO_TOKEN"),
+    os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
+    token = sec.resolve_token(a.token, a.token_file) or None
+    try:
+        for w in sec.check_bind(a.host, token or "", tls=bool(a.tls_cert), allow_plaintext=a.allow_plaintext):
+            print("warning:", w)
+    except sec.SecurityConfigError as e:
+        raise SystemExit(f"error: {e}")
+    STATE.update({"token": token,
                   "tier": a.tier, "source": a.source,
                   "simulate": a.simulate})
 
@@ -438,12 +447,6 @@ def main():
     print(f"NeuronScope live on {scheme}://{a.host}:{a.port}")
     print(f"tier {a.tier}: {TIERS[a.tier][0]}, "
           f"~{TIERS[a.tier][1] / 1024:.1f} KB/token")
-    if not STATE["token"]:
-        print("\n!! no --token: anyone on this network can watch the stream")
-    if a.host == "0.0.0.0" and not a.tls_cert:
-        print("   plaintext on the LAN. For an untrusted network prefer a "
-              "WireGuard or\n   Tailscale tunnel over a self-signed cert users "
-              "learn to click through.")
 
     if a.simulate:
         threading.Thread(target=simulate, daemon=True).start()

@@ -25,6 +25,10 @@ do not put it on an untrusted network.
 import argparse
 import json
 import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import ns_security as sec  # noqa: E402
 import re
 import urllib.error
 import urllib.request
@@ -323,14 +327,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=".", help="repo root to inspect")
     p.add_argument("--port", type=int, default=7860)
-    p.add_argument("--host", default="127.0.0.1",
-                   help="0.0.0.0 to expose on the LAN. No auth: trusted "
-                        "networks only.")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--allow-unauthenticated", action="store_true", help="permit a non-loopback bind (no auth)")
     a = p.parse_args()
+    sec.loopback_only(a.host, "the dashboard", a.allow_unauthenticated)
     ROOT = os.path.abspath(a.root)
     print(f"NeuronScope on http://{a.host}:{a.port}  (root {ROOT})")
-    if a.host == "0.0.0.0":
-        print("exposed to the LAN with no authentication")
     ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
 
 

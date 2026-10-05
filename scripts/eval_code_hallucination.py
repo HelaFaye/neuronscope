@@ -25,7 +25,7 @@ It is a held-out measurement. If it informs the neuron set or the scale, it
 stops measuring anything.
 
     python scripts/eval_code_hallucination.py \\
-        --base_url http://192.168.41.171:8080 \\
+        --base_url http://GPU-HOST:8080 \\
         --tasks data/code_tasks.jsonl \\
         --alphas 0 0.5 1.0 --adapter_id 0 \\
         --out results.json
@@ -226,7 +226,7 @@ def main():
         print("         install them or those tasks will under-report")
 
     alphas = [None] if args.no_adapter else args.alphas
-    label = args.label or ("reference" if args.no_adapter else "ornith")
+    label = args.label or ("reference" if args.no_adapter else "adapter")
     print(f"{len(tasks)} tasks x {len(alphas)} setting(s) against {label}\n")
 
     runs = {}

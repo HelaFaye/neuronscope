@@ -1,63 +1,63 @@
 #!/usr/bin/env bash
-# Source this before running anything local:  source env.sh
+# Source this before running local stages:  source env.sh
 #
-# The model lives on an auto-mounted volume, so the path under /run/media can
-# change between reboots or if the drive is reattached. Everything references
-# $NS_GGUF rather than embedding the path, and the check below fails loudly
-# rather than letting a stage run against a missing file.
+# Every script reads the model path from $NS_GGUF instead of embedding it, so
+# this is the one place to point NeuronScope at your model. Put your values in
+# env.local.sh (gitignored) or export them before sourcing:
+#
+#   export NS_GGUF=~/models/Qwen3-8B-Q6_K.gguf
+#   export NS_LLAMA=~/llama.cpp            # llama.cpp checkout with cett-dump built
+#
+# Optional: if the model lives on a removable drive whose mount point changes,
+# set NS_VOLUME_UUID and NS_MODEL_REL (path relative to the volume root) and the
+# path is resolved from the filesystem UUID instead.
 
-# Resolve by filesystem UUID so a different mount point still works.
-NS_VOLUME_UUID="19c7eeb5-52f1-4c37-8483-e37745655fc7"
-# Override without editing:  NS_MODEL_REL=... source env.sh
-: "${NS_MODEL_REL:=.models/mradermacher/Huihui-Ornith-1.5-9B-abliterated-GGUF/Huihui-Ornith-1.5-9B-abliterated.Q6_K.gguf}"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -r "${_here}/env.local.sh" ]] && source "${_here}/env.local.sh"
 
-if [[ -e "/dev/disk/by-uuid/${NS_VOLUME_UUID}" ]]; then
-    _dev=$(readlink -f "/dev/disk/by-uuid/${NS_VOLUME_UUID}")
-    _mnt=$(findmnt -n -o TARGET --source "${_dev}" 2>/dev/null | head -1)
-else
-    _mnt=""
-fi
-# Fall back to the path as it stood when this was written.
-: "${_mnt:=/run/media/hela/${NS_VOLUME_UUID}}"
-
-export NS_GGUF="${_mnt}/${NS_MODEL_REL}"
-# The tokenizer and chat template are read from the GGUF itself, so no
-# HF repo is needed. Set NS_TOKENIZER only to force the transformers path.
-export NS_TOKENIZER="${NS_TOKENIZER:-}"
-export NS_LLAMA="${HOME}/llama.cpp"
-export NS_CETT="${NS_LLAMA}/build/bin/llama-cett-dump"
-
-# Ornith-1.5-9B: 32 blocks (8 attention, 24 SSM). Confirmed by cett-dump.
-# AMDVLK Pro is installed and failing to initialise (-3) on this box. RADV
-# handles it fine, but llama.cpp and wgpu enumerate ICDs themselves and may not
-# skip as gracefully, so pin RADV explicitly.
-_radv=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
-[[ -r "$_radv" ]] && export VK_DRIVER_FILES="$_radv"
-unset _radv
-
-export NS_LAYERS=32
-# Must exceed the longest sequence: cett-dump needs one decode per sample.
-export NS_BATCH=4096
-
-if [[ ! -r "${NS_GGUF}" ]]; then
-    echo "!! model not readable at:" >&2
-    echo "   ${NS_GGUF}" >&2
-    if [[ -z "${_mnt}" || ! -d "${_mnt}" ]]; then
-        echo "   the volume does not appear to be mounted." >&2
+if [[ -z "${NS_GGUF:-}" && -n "${NS_VOLUME_UUID:-}" && -n "${NS_MODEL_REL:-}" ]]; then
+    if [[ -e "/dev/disk/by-uuid/${NS_VOLUME_UUID}" ]]; then
+        _dev=$(readlink -f "/dev/disk/by-uuid/${NS_VOLUME_UUID}")
+        _mnt=$(findmnt -n -o TARGET --source "${_dev}" 2>/dev/null | head -1)
+    fi
+    if [[ -n "${_mnt:-}" ]]; then
+        export NS_GGUF="${_mnt}/${NS_MODEL_REL}"
+    else
+        echo "!! volume ${NS_VOLUME_UUID} is not mounted:" >&2
         echo "   udisksctl mount -b /dev/disk/by-uuid/${NS_VOLUME_UUID}" >&2
     fi
-else
-    _sz=$(stat -c %s "${NS_GGUF}")
-    echo "model : ${NS_GGUF}"
-    echo "size  : $(( _sz / 1024 / 1024 )) MB"
-    # An 8.3GB file read over USB on every load is worth avoiding. It fits in
-    # page cache on a 32GB machine, so only the first load is slow -- but if
-    # the drive is external and slow, copying to internal storage once is
-    # cheaper than discovering that mid-run.
-    _src=$(findmnt -n -o SOURCE --target "${NS_GGUF}" 2>/dev/null)
-    case "${_src}" in
-        /dev/sd*|/dev/nvme*) : ;;
-        *) echo "note  : unusual backing device ${_src}; check read speed" >&2 ;;
-    esac
 fi
-unset _dev _mnt _sz _src
+
+export NS_LLAMA="${NS_LLAMA:-${HOME}/llama.cpp}"
+export NS_CETT="${NS_CETT:-${NS_LLAMA}/build/bin/llama-cett-dump}"
+export NS_LLAMA_SERVER="${NS_LLAMA_SERVER:-${NS_LLAMA}/build/bin/llama-server}"
+# The tokenizer and chat template are read from the GGUF itself. Set
+# NS_TOKENIZER (an HF id or path) only to force the transformers path.
+export NS_TOKENIZER="${NS_TOKENIZER:-}"
+# Must exceed the longest sequence: cett-dump needs one decode per sample.
+export NS_BATCH="${NS_BATCH:-4096}"
+
+# Some systems ship several Vulkan drivers (e.g. AMDVLK and RADV) and the wrong
+# one can fail to initialise. NS_VULKAN_ICD pins one explicitly, e.g.
+#   NS_VULKAN_ICD=/usr/share/vulkan/icd.d/radeon_icd.x86_64.json
+[[ -n "${NS_VULKAN_ICD:-}" && -r "${NS_VULKAN_ICD}" ]] && export VK_DRIVER_FILES="${NS_VULKAN_ICD}"
+
+if [[ -z "${NS_GGUF:-}" ]]; then
+    echo "NS_GGUF is not set. Export it (or create env.local.sh) to point at your model." >&2
+elif [[ ! -r "${NS_GGUF}" ]]; then
+    echo "!! model not readable at: ${NS_GGUF}" >&2
+else
+    echo "model : ${NS_GGUF} ($(( $(stat -c %s "${NS_GGUF}" 2>/dev/null || stat -f %z "${NS_GGUF}") / 1024 / 1024 )) MB)"
+    if [[ -z "${NS_LAYERS:-}" ]] && python3 -c "import gguf" 2>/dev/null; then
+        NS_LAYERS=$(python3 - "${NS_GGUF}" <<'PY' 2>/dev/null
+import sys, gguf
+r = gguf.GGUFReader(sys.argv[1])
+for f in r.fields.values():
+    if f.name.endswith(".block_count"):
+        print(int(f.parts[f.data[0]][0])); break
+PY
+)
+        [[ -n "${NS_LAYERS}" ]] && export NS_LAYERS && echo "layers: ${NS_LAYERS} (from GGUF)"
+    fi
+fi
+unset _here _dev _mnt

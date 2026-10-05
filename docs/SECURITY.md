@@ -1,0 +1,112 @@
+# Security
+
+NeuronScope runs several network services: the Studio UI and API, the WebRTC
+signaling server, the resumable transfer receiver, and the tuning worker.
+They share one policy, implemented once in `scripts/ns_security.py` and
+covered by `tests/test_security.py`.
+
+## Bind policy (all services)
+
+| bind | token | TLS |
+|---|---|---|
+| `127.0.0.1` / `::1` / `localhost` | optional | optional |
+| anything else | **required**, ≥ 32 chars (refuses to start) | **required**, unless `--allow-plaintext` |
+
+Services with a token (Studio, hub, control, live stream, transfer receiver,
+tuning worker) follow the table above. Local tools that have **no**
+authentication (dashboard, trace viewer, the Quantization / Scale Sweep /
+Adaptive Tuning labs, the tracing proxy) refuse any non-loopback bind unless
+given `--allow-unauthenticated`. Reach them over an SSH tunnel
+(`ssh -L 8796:127.0.0.1:8796 host`) or through the hub instead.
+
+`--allow-plaintext` means "this port is reachable only through WireGuard,
+Tailscale or a TLS-terminating reverse proxy". The service still prints a
+warning.
+
+```bash
+python scripts/ns_security.py token --out ~/.config/neuronscope/transfer.token   # 256-bit, written 0600
+python scripts/ns_security.py selfsigned --host myhost.lan --host 192.0.2.10    # P-256 cert for LAN use
+```
+
+Pass secrets with `--token-file` or `$NS_TRANSFER_TOKEN` (Studio also reads
+`$NS_STUDIO_TOKEN`). `--token` still works but warns, because argv is visible
+to every local user. Clients trust a self-signed cert with `--cafile`.
+
+## What each path guarantees
+
+| Component | Confidentiality | Authentication | Integrity |
+|---|---|---|---|
+| WebRTC data channel | DTLS (always on) | 128-bit invitation key or admitted knock; out-of-band verification code over both DTLS fingerprints | DTLS + per-file SHA-256 checked by the receiver |
+| WebRTC signaling | TLS/WSS when started with a cert | Origin allowlist; invitation key | — |
+| CLI / HTTP transfer | TLS with `--tls-cert`; otherwise the VPN's | 256-bit bearer token, constant-time compare, throttled | per-chunk and per-file SHA-256 (detects corruption; not a signature) |
+| Tuning worker | same as CLI | same as CLI | SHA-256 of source, profile and each candidate recorded |
+| MCP | local stdio | the local client | process boundary |
+| Studio | TLS with `--tls-cert` | token (Bearer or HttpOnly cookie), throttled login | — |
+
+SHA-256 detects accidental corruption. It does not prove who produced the
+bytes; that comes from TLS plus the token, or from DTLS plus the verification
+code.
+
+## Hardening checklist (status)
+
+**WebRTC**
+- [x] HTTPS/WSS (`--tls-cert/--tls-key`); plain HTTP refused off loopback
+- [x] 128-bit invitation key separate from the human-readable room code
+- [x] room codes lengthened to 10 characters (~49.5 bits); they are labels, not secrets
+- [x] throttled joins and knocks per address (8 failures/min → 10 min lockout), identical errors for wrong code and wrong key
+- [x] Origin allowlist on the WebSocket upgrade
+- [x] verification code from both DTLS fingerprints (detects a MITM, including the signaling server)
+- [x] per-file streaming SHA-256, verified by the receiver; mismatches are discarded
+- [x] relay-only mode (TURN) for address privacy; LAN/VPN mode with no STUN
+- [x] `crypto.randomUUID` fallback for non-secure contexts; CSP, no-referrer, frame-deny headers
+
+**HTTP / CLI**
+- [x] built-in TLS server and verifying client (`--cafile`)
+- [x] token mandatory off loopback; 256-bit generator; ≥ 32-char minimum
+- [x] constant-time comparison (`secrets.compare_digest`)
+- [x] tokens from file or environment; argv use warns
+- [x] resumable chunks; final SHA-256 before atomic publish
+- [x] bounded bodies: JSON 64 KiB, chunk 8 MiB; socket idle timeout 120 s
+- [x] failed-auth throttling; cap on concurrent in-progress transfers (`--max-active`)
+- [x] 128-bit hex transfer ids; generic 500 responses (no exception text)
+
+**MCP**
+- [x] `mcp>=2.3,<3`, version checked at startup
+- [x] 0600 state file without secrets
+- [x] tokens in the OS keyring (`keyring`) or 0600 files; legacy inline tokens migrated
+- [x] tokens passed to subprocesses via environment, never argv
+- [x] no tool returns a token; command output is redacted
+- [x] stdio only
+
+**Tuning**
+- [x] candidate, source-model and profile SHA-256 per job
+- [x] atomic publication of candidates
+- [x] authenticated worker API (same policy); TLS client in the controller
+- [x] job-id/scale validation; deletion restricted to generated GGUFs in the worker root
+- [x] persistent per-job state as an audit trail
+- [ ] signed results (a worker compromised with its own token could report false scores)
+
+**Still open / by design**
+- Peer identity on WebRTC is proven by comparing the verification code, not by
+  accounts. That is deliberate (no accounts), and the code check is manual.
+- TURN credentials are served to anyone who can load the page. Use short-lived
+  TURN credentials (e.g. coturn's REST secret) if that matters.
+- TestQA's code interpreter limits resources but is not a sandbox; use a
+  container for untrusted models (see [TESTQA.md](TESTQA.md)).
+- Rate limits are in-process and per address. Put a reverse proxy in front for
+  Internet exposure.
+
+## Recommended deployments
+
+**Private infrastructure**: WireGuard or Tailscale between hosts, services
+bound to the tunnel address with `--allow-plaintext` and a token.
+
+**Across the Internet**: TLS on every service (or a TLS reverse proxy such as
+Caddy or nginx, with the service on loopback), tokens from files, WebRTC in
+relay mode through your own TURN server, and the verification code checked
+on every transfer that matters.
+
+## Reporting
+
+Please report vulnerabilities privately to the maintainers rather than in a
+public issue.
