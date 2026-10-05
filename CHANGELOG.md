@@ -23,6 +23,15 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Live activations from llama-server, compiled and tested:
+  `llama-tools/server-activations/apply_patch.py` (or
+  `build_llama_tools.sh --server-activations`) patches current llama.cpp to
+  serve `GET /activations` over SSE, one frame per generated token. Frames
+  match PyTorch CETT on every layer in an integration test.
+  `export_classifier_bin.py --gguf` folds the down_proj column norms into the
+  classifier, so streamed scores are on the classifier's own scale. Fixes found
+  by compiling: current llama.cpp names the down projection `ffn_out-N`, and the
+  SSE subscription guard was destroyed as soon as it was built.
 - External benchmarks (docs/BENCHMARKS.md): `clip_bench.py` runs CLIP/SigLIP
   and H-Neuron-edited variants through CLIP_benchmark (ImageNetV2,
   ImageNet-Sketch, VTAB via task_adaptation, ...) with selective metrics per

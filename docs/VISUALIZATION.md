@@ -184,16 +184,16 @@ measured instead of repeated.
 ---
 
 
-## Realtime, without a fork
+## Realtime activations
 
-Four ways to get activations while you work, ranked by what is available today:
+Four ways to get activations while you work:
 
 | | how | available | latency |
 |---|---|---|---|
 | **A** | trace the finished response (`scripts/autotrace.py`) | **now** | one prefill behind |
 | **B** | PyTorch hooks during `generate()` | now, needs bf16 in torch | per token |
 | **C** | `llama-cpp-python` + `cb_eval` via ctypes | no compile, fiddly | per token |
-| **D** | fork `llama-server --activations` (`llama-tools/server-activations/`) | **written, uncompiled** | per token |
+| **D** | patched llama-server (`llama-tools/server-activations/`) | **now**, one rebuild | per token |
 
 The assumption worth dropping is that activations must arrive *with* the
 tokens. They do not.
@@ -226,28 +226,41 @@ of tracing everything.
 `viz/stream.py` gained `/api/push`, so a trace produced anywhere on the network
 can drive the viewer.
 
-## D. The fork
+## D. The patched llama-server
 
-`llama-tools/server-activations/` adds `--activations` to llama-server. One
-self-contained header and three insertion points in `server.cpp`, documented in
-`PATCH.md`. Configuration comes from the environment rather than the argument
-parser, so `common/arg.cpp` is untouched -- one fewer file to re-merge when
-llama.cpp moves.
+`llama-tools/server-activations/` makes llama-server stream per-token CETT at
+`GET /activations` (server-sent events). One self-contained header, a small
+glue header, and four insertions, applied by a script; `PATCH.md` explains
+each. Configuration comes from the environment, so `common/arg.cpp` is
+untouched.
 
 ```bash
-cp ns_activations.h llama.cpp/tools/server/     # then apply PATCH.md
+scripts/build_llama_tools.sh --server-activations     # or: apply_patch.py ~/llama.cpp, then rebuild
+python llama-tools/server-activations/export_classifier_bin.py \
+    models/classifier.npz models/classifier.bin --gguf model.gguf
 NS_ACTIVATIONS=sparse NS_CLASSIFIER=models/classifier.bin \
-  ./build/bin/llama-server -m model.gguf --parallel 1 --port 8080
+  ~/llama.cpp/build/bin/llama-server -m model.gguf --parallel 1 --port 8080
 python viz/stream.py --source http://127.0.0.1:8080 --token-file viewer.token
 ```
 
+A test (`tests/test_llamacpp_integration.py`, needs `NS_LLAMA` pointing at a
+patched build) checks every frame against PyTorch CETT on all layers, and the
+streamed score against the classifier applied in PyTorch.
+
 **It carries the classifier.** Without one the server can report activity but
-cannot flag anything -- "this neuron is busy" and "this token is likely
+cannot flag anything: "this neuron is busy" and "this token is likely
 fabricated" are different claims, and only the second needs trained weights.
 `export_classifier_bin.py` writes a flat float32 blob the server reads with no
-numpy and no parser, and the server refuses it if the length does not match the
-model. Every frame carries `scored`, and the client shows "peak (no
-classifier)" rather than a flag when it is false.
+parser, and the server refuses it if the length does not match the model.
+Every frame carries `scored`; the client shows "peak (no classifier)" rather
+than a flag when it is false.
+
+**Scores are on the classifier's scale; raw values are not CETT.** The server
+streams `|a| / ||layer output||` without the `||W[:, j]||` factor, since holding
+dequantised down_proj weights in RAM is a large cost for a live view.
+`--gguf` folds each column norm into its classifier coefficient instead, so
+the score equals the classifier on full CETT. Multiply the streamed values by
+the column norms if you need CETT itself.
 
 **Idle costs nothing.** The callback returns before any device copy when no one
 is subscribed, so the flag can stay on.
@@ -256,22 +269,14 @@ is subscribed, so the flag can stay on.
 several sequences and the node carries no recoverable sequence id, so it
 refuses to enable rather than emitting frames that mix conversations.
 
-**Live scores are not replay scores.** The server emits `|a| / ||layer output||`
-without the `||W[:, j]||` factor, since holding dequantised down_proj weights in
-RAM is a large cost for a live view. Same shape, same story, different scale.
+**Generation only.** Frames are emitted for single-token decodes. The first
+generated token comes out of prompt processing, so N generated tokens give
+N - 1 frames.
 
-Untested: there is no compiler here. The wire format is verified against the
-Python client, and the classifier blob round-trips byte-identically, but the
-first build will need real eyes.
+## Live streaming viewer
 
-## Live streaming (protocol built, source not)
-
-`viz/stream.py` implements near-realtime activation streaming for a phone or
-SBC. **The source does not exist yet**: it needs `llama-server --activations`,
-a fork that reduces in-process and emits alongside the token stream. The eval
-callback in `llama-tools/cett-dump` fires during generation as well as prefill,
-so the C++ side is a known quantity; the protocol is the part that needed
-designing and testing, and that is what this is.
+`viz/stream.py` relays frames from the patched server (or `--simulate`) to a
+phone or SBC, adding auth, TLS and per-viewer backpressure.
 
 ```bash
 python viz/stream.py --simulate --token-file viewer.token --host 0.0.0.0 --allow-plaintext

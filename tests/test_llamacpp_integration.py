@@ -126,3 +126,78 @@ def test_extraction_pipeline_matches_pytorch(tiny_gguf, tmp_path):
         assert got.shape == want.shape
         assert np.abs(got - want).max() / np.abs(want).max() < 5e-3, q
         mgr.clear()
+
+
+SERVER = LLAMA / "build" / "bin" / "llama-server"
+
+
+@pytest.mark.skipif(not (LLAMA / "tools" / "server" / "ns_server_glue.h").exists(),
+                    reason="llama-server not patched with llama-tools/server-activations/apply_patch.py")
+def test_server_activations_match_pytorch(tiny_gguf, tmp_path):
+    """The patched llama-server streams one frame per decoded token whose raw
+    values are |a|/||out|| for every layer, and whose score, with the column
+    norms folded in by export_classifier_bin.py --gguf, equals the classifier
+    applied to full CETT in PyTorch."""
+    import socket
+    import threading
+    import time
+    import urllib.request
+    import torch
+    from transformers import LlamaForCausalLM
+    import ns_common
+    from extract_activations_gguf import weight_col_norms
+    hf, gguf = tiny_gguf
+    coef = np.random.default_rng(2).normal(size=4 * 128).astype(np.float32)
+    np.savez(tmp_path / "clf.npz", coef=coef, intercept=0.25, n_layers=4, n_neurons=128)
+    subprocess.run([sys.executable, str(ROOT / "llama-tools" / "server-activations" / "export_classifier_bin.py"),
+                    str(tmp_path / "clf.npz"), str(tmp_path / "clf.bin"), "--gguf", str(gguf)], check=True)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    env = dict(os.environ, NS_ACTIVATIONS="raw", NS_CLASSIFIER=str(tmp_path / "clf.bin"))
+    proc = subprocess.Popen([str(SERVER), "-m", str(gguf), "--port", str(port), "--parallel", "1", "-c", "256",
+                             "-ngl", "0"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(100):
+            try:
+                urllib.request.urlopen(base + "/health", timeout=1).read()
+                break
+            except Exception:
+                time.sleep(0.1)
+        frames = []
+
+        def listen():
+            with urllib.request.urlopen(base + "/activations", timeout=30) as r:
+                for line in r:
+                    if line.startswith(b"data: "):
+                        frames.append(json.loads(line[6:]))
+                        if len(frames) == 5:
+                            return
+        t = threading.Thread(target=listen, daemon=True)
+        t.start()
+        time.sleep(0.5)
+        prompt = [1, 20, 31, 42, 53, 64]
+        body = json.dumps({"prompt": prompt, "n_predict": 6, "temperature": 0, "ignore_eos": True,
+                           "return_tokens": True}).encode()
+        out = json.loads(urllib.request.urlopen(urllib.request.Request(
+            base + "/completion", body, {"Content-Type": "application/json"}), timeout=30).read())
+        t.join(10)
+    finally:
+        proc.terminate()
+        err = proc.communicate(timeout=10)[1]
+    gen = out["tokens"]
+    assert len(gen) == 6 and len(frames) == 5, err[-1500:]
+    assert all(f["scored"] and f["t"] == "raw" and f["l"] == 4 for f in frames)
+    # frame k is the decode of gen[k], at position len(prompt) + k
+    m = LlamaForCausalLM.from_pretrained(hf, dtype=torch.float32).eval()
+    mgr = ns_common.CETTManager(m)
+    with torch.no_grad():
+        m(torch.tensor([prompt + gen]))
+    cett = mgr.cett().numpy()                                   # [layers, tokens, n_ff]
+    wn = np.stack([weight_col_norms(str(gguf), 4)[l] for l in range(4)])
+    for k, f in enumerate(frames):
+        want = cett[:, len(prompt) + k, :]
+        got = np.asarray(f["v"], dtype=np.float32)
+        assert np.abs(got * wn - want).max() / np.abs(want).max() < 5e-3, k
+        assert f["s"] == pytest.approx(float(want.ravel() @ coef + 0.25), rel=5e-3, abs=5e-3)

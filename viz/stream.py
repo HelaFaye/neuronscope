@@ -2,12 +2,12 @@
 """
 Near-realtime activation streaming, for a phone or SBC on your network.
 
-The fork this expects does not exist yet: `llama-server --activations` would
-reduce in-process and emit alongside the token stream. The eval callback
-cett-dump already uses fires during generation as well as prefill, so the C++
-side is a known quantity. What is not obvious is the protocol, and that is what
-this implements and tests -- against a simulated source now, against the fork
-later, without the client changing.
+The source is llama-server patched with llama-tools/server-activations
+(`scripts/build_llama_tools.sh --server-activations`), started with
+NS_ACTIVATIONS=sparse|binned|raw and --parallel 1. It reduces in-process and
+serves one frame per generated token at /activations; this relays those frames
+and adds auth, TLS and per-viewer backpressure. --simulate stands in when no
+patched server is running.
 
 Bandwidth is the whole design. On a 36-layer, 14336-wide model:
 
@@ -107,7 +107,7 @@ def publish(frame):
 
 
 def relay(source):
-    """Pull /activations from a forked llama-server into our fan-out.
+    """Pull /activations from the patched llama-server into our fan-out.
 
     Frames arrive already reduced by the server, so nothing is re-reduced here;
     this only adds the auth, TLS and backpressure the C++ side does not do.
@@ -132,7 +132,7 @@ def relay(source):
 
 
 def simulate(layers=36, neurons=14336, rate=4.0):
-    """Stand-in for the fork: a plausible activation field at 4 tokens/sec."""
+    """Stand-in for the patched server: a plausible activation field at 4 tokens/sec."""
     import random
     rng = random.Random(0)
     hot = [(rng.randrange(layers), rng.randrange(neurons)) for _ in range(6)]
@@ -410,9 +410,9 @@ function draw(){
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--simulate", action="store_true",
-                   help="synthesise a field; use until the fork exists")
-    p.add_argument("--source", help="llama-server with --activations (not yet "
-                                    "implemented upstream)")
+                   help="synthesise a field (no patched llama-server needed)")
+    p.add_argument("--source", help="llama-server patched by llama-tools/server-activations, "
+                                    "e.g. http://127.0.0.1:8080")
     p.add_argument("--tier", default="binned", choices=sorted(TIERS))
     p.add_argument("--port", type=int, default=7890)
     p.add_argument("--host", default="127.0.0.1")
