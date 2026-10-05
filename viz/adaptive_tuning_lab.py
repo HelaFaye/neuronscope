@@ -23,7 +23,7 @@ class H(BaseHTTPRequestHandler):
   STATE['state']={'status':'starting','results':[]}
   def run():
    try:
-    t=AdaptiveTuner(d['state']);r=t.run(client=WorkerClient(d['worker']),minimum=float(d['min']),maximum=float(d['max']),initial_step=float(d['initial_step']),autotune_resolution=float(d['resolution']),batch_size=int(d['batch_size']),margin_of_error=float(d['margin_of_error']),baseline_score=d.get('baseline_score'),max_batches=40,auto_delete=bool(d.get('auto_delete')));STATE['state']=r
+    t=AdaptiveTuner(d['state']);r=t.run(client=WorkerClient(d['worker'],token=d.get('token',''),cafile=d.get('cafile','')),minimum=float(d['min']),maximum=float(d['max']),initial_step=float(d['initial_step']),autotune_resolution=float(d['resolution']),batch_size=int(d['batch_size']),margin_of_error=float(d['margin_of_error']),baseline_score=d.get('baseline_score'),max_batches=40,auto_delete=bool(d.get('auto_delete')));STATE['state']=r
    except Exception as e:STATE['state']={'status':'failed','error':str(e),'results':[]}
   th=threading.Thread(target=run,daemon=True);STATE['thread']=th;th.start();self.sendj({'ok':True})
  def log_message(self,*a):pass
