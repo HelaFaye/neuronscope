@@ -41,7 +41,25 @@
   the pages as actually served (needs `node`).
 - `install.sh` detects NVIDIA (CUDA) and macOS (MPS) as well as AMD (ROCm) and CPU.
 
+- Rolling per-model stats (`model_stats.py`): graded right/hallucinated/
+  abstained per subject from TestQA, H-Neuron activation scores
+  (`hscore.py`) and live abstentions; tied to the model file.
+- Studio's `model: "auto"` ranks only models with enough graded results, on
+  pessimistic per-subject utility; manual choices are always honoured. UI
+  shows an orange ⚠ with an explanation for models without stats, stats lines
+  and tables, and the reason behind each auto pick.
+- TestQA bank reorganised by subject (163 graded items, at least 20 per subject):
+  new logic, science, factual (including false-premise) and code
+  (API-existence) items; writing graded by mechanical `constraints`
+  checks; vision items with deterministically generated images
+  (`qa_images.py`). `--per-subject`, `--list`, a per-subject
+  right/hallucinated/abstained report with CIs, and `--record-stats` /
+  `--publish-stats`.
+
 ### Fixed
+- `delegate.py`'s H-Neuron gate called `/api/score` on the tracing proxy, which
+  never implemented it, so every gate check failed as "unreachable". The proxy
+  now implements it (`autotrace.py --classifier`).
 - The WebRTC page sent 1 MiB DataChannel frames, above Chromium's 256 KiB
   SCTP limit, so the channel closed on the first chunk. Frames are now sized
   from `pc.sctp.maxMessageSize`.

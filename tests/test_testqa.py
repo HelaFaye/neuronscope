@@ -4,6 +4,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from collections import Counter
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +32,34 @@ REFERENCE = {
     "caesar": "def caesar(s,k):\n    o=[]\n    for c in s:\n        if c.isascii() and c.isalpha():\n            b=ord('A') if c.isupper() else ord('a'); o.append(chr((ord(c)-b+k)%26+b))\n        else: o.append(c)\n    return ''.join(o)",
     "median": "def median(xs):\n    if not xs: raise ValueError('empty')\n    s=sorted(xs); n=len(s)\n    return s[n//2] if n%2 else (s[n//2-1]+s[n//2])/2",
     "top_k_frequent": "from collections import Counter\ndef top_k_frequent(words,k):\n    c=Counter(words)\n    return sorted(c,key=lambda w:(-c[w],w))[:k]",
+    "is_anagram": "def is_anagram(a,b):\n    f=lambda s: sorted(s.replace(' ','').lower())\n    return f(a)==f(b)",
+    "matmul": "def matmul(a,b):\n    if not a or not b or len(a[0])!=len(b): raise ValueError('shape')\n    return [[sum(x*y for x,y in zip(r,c)) for c in zip(*b)] for r in a]",
+    "to_snake_case": "import re\ndef to_snake_case(n):\n    n=re.sub(r'([A-Z]+)([A-Z][a-z])',r'\\1_\\2',n)\n    return re.sub(r'([a-z\\d])([A-Z])',r'\\1_\\2',n).lower()",
+}
+
+# A passing and a failing answer for every writing task, so a grader change that
+# silently accepts everything (or nothing) fails here.
+WRITING = {
+    "w-haiku": ("Waves fold into foam\nsalt wind carries gull voices\nthe tide keeps its time", "Waves fold into foam, salt wind carries gull voices."),
+    "w-two-sent": ("The cat naps in the sun. It wakes only for dinner.", "The cat naps."),
+    "w-slogan": ("Every adventure starts with a sip.", "Stay hydrated."),
+    "w-tips": ("- Keep a schedule\n- Avoid screens late\n- Keep the room cool\n- Skip late caffeine", "- Keep a schedule\n- Avoid screens"),
+    "w-lipogram": ("Rain falls softly on a dark city road.", "Rain falls softly on the quiet street."),
+    "w-summary": ("Regular exercise strengthens the heart and lungs, helps control weight, lifts mood through endorphins, improves sleep, and lowers the risk of chronic diseases such as diabetes.", "It is good."),
+    "w-json": ('{"title": "Bread at Home", "tags": ["baking", "bread"]}', "Title: Bread at Home"),
+    "w-limerick": ("A coder who worked through the night\nkept fixing a bug out of sight\nshe changed just one line\nand all ran fine\nthen the tests went from red into bright", "A coder who worked through the night"),
+    "w-subject": ("Meeting request for next Tuesday", "Can we meet sometime next week to talk about the roadmap and the budget please"),
+    "w-passive": ("The meal was cooked by the chef.", "The chef cooked the meal."),
+    "w-caps": ("HELLO", "Hello"),
+    "w-synonyms": ("joyful, cheerful, content", "joyful, cheerful"),
+    "w-couplet": ("The winter wind is cold and bright,\nit wraps the town in silver light.", "The winter wind is cold."),
+    "w-acrostic": ("Clever minds at work\nOpen loops of thought\nDebugging late\nEvery line is taught", "Clever minds\nDebugging\nOpen\nEvery"),
+    "w-french": ("Bonjour", "Good day"),
+    "w-tweet": ("Our library now opens at 8am on weekdays! #ReadMore", "Our library now opens at 8am on weekdays!"),
+    "w-one-sentence": ("The meeting moved to Wednesday because the projector broke, so bring laptops.", "The meeting moved. Bring laptops."),
+    "w-steps": ("1. Boil water\n2. Steep the tea\n3. Pour and enjoy", "1. Boil water\n3. Pour"),
+    "w-although": ("Although it rained all day, we still enjoyed our long walk outside.", "Although it rained, we walked."),
+    "w-title": ("The Robot Who Lost Its Way", "the robot who lost its way!"),
 }
 
 
@@ -38,7 +68,7 @@ def bank(kind):
 
 
 def test_reference_solutions_pass_every_coding_task():
-    tasks = bank("coding")
+    tasks = [t for t in bank("code") if t["kind"] == "code_exec"]
     assert {t["entry_point"] for t in tasks} == set(REFERENCE)
     for t in tasks:
         verdict, detail = tq.run_code(REFERENCE[t["entry_point"]], t["tests"])
@@ -62,7 +92,7 @@ def test_interpreter_rejects_wrong_and_runaway_code():
 
 
 def test_code_exec_requires_opt_in():
-    t = bank("coding")[0]
+    t = next(t for t in bank("code") if t["kind"] == "code_exec")
     reply = "```python\n" + REFERENCE[t["entry_point"]] + "\n```"
     assert tq.grade_code_exec(reply, t, allow_exec=False, timeout=5)[0] == "skipped"
     assert tq.grade_code_exec(reply, t, allow_exec=True, timeout=5)[0] == "correct"
@@ -97,8 +127,42 @@ def test_expect_abstain_qa():
 
 def test_bank_ids_unique_and_subjects_known():
     tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
-    assert len(tasks) == len({t["id"] for t in tasks}) >= 70
+    assert len(tasks) == len({t["id"] for t in tasks}) >= 160
     assert {t["subject"] for t in tasks} <= set(sc.SUBJECTS)
+
+
+def test_every_subject_has_enough_graded_items():
+    tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
+    graded = Counter(t["subject"] for t in tasks if t["kind"] != "canary")
+    assert set(graded) == set(sc.SUBJECTS)
+    assert min(graded.values()) >= 20, graded
+
+
+def test_writing_checks_accept_good_and_reject_bad():
+    tasks = {t["id"]: t for t in bank("writing")}
+    assert set(tasks) == set(WRITING)
+    for tid, (good, bad) in WRITING.items():
+        assert tq.grade_constraints(good, tasks[tid]) == ("correct", ""), (tid, tq.check_constraints(good, tasks[tid]["checks"]))
+        assert tq.grade_constraints(bad, tasks[tid])[0] == "wrong", tid
+    assert tq.grade_constraints("I can't help with that.", tasks["w-haiku"])[0] == "abstained"
+
+
+def test_vision_tasks_render():
+    pytest.importorskip("PIL")
+    for t in bank("vision"):
+        msg = tq.message_for({**t, "kind": t["kind"]})
+        url = msg["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,") and len(url) > 200
+
+
+def test_per_subject_sampling_is_balanced():
+    tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
+    picked = tq.per_subject_sample(tasks, 8, seed=1)
+    graded = Counter(t["subject"] for t in picked if t["kind"] != "canary")
+    assert set(graded.values()) == {8}
+    code_kinds = Counter(t["kind"] for t in picked if t["subject"] == "code")
+    assert len(code_kinds) >= 3          # round-robin across kinds, not 8 of one
+    assert tq.per_subject_sample(tasks, 8, seed=1) == picked
 
 
 def test_subject_classifier_and_routing():
@@ -110,13 +174,23 @@ def test_subject_classifier_and_routing():
     assert sc.route("Fix this Python bug in my function", table, clf)["model"] == "coder"
 
 
+def key_of(message):
+    """Same question about different images must map to different answers."""
+    c = message["content"]
+    if isinstance(c, str):
+        return c
+    text = next(x["text"] for x in c if x.get("type") == "text")
+    img = next((x["image_url"]["url"] for x in c if x.get("type") == "image_url"), "")
+    return text + "|" + str(hash(img))
+
+
 class Oracle(BaseHTTPRequestHandler):
     answers: dict = {}
     sabotage: set = set()
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        prompt = body["messages"][0]["content"]
+        prompt = key_of(body["messages"][0])
         model = body.get("model", "")
         reply = self.answers.get(prompt, "I don't know.")
         if model == "bad" and prompt in self.sabotage:
@@ -133,12 +207,14 @@ class Oracle(BaseHTTPRequestHandler):
 
 
 def test_end_to_end_against_fake_endpoints(tmp_path):
-    tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], {"reasoning", "code_exec"}, None, 0)
+    tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], {"reasoning", "code_exec", "constraints"}, None, 0)
     answers, sabotage = {}, set()
     for t in tasks:
-        p = tq.prompt_for(t)
+        p = key_of(tq.message_for(t))
         if t["kind"] == "reasoning":
             answers[p] = f"Working...\nAnswer: {t['answer']}"
+        elif t["kind"] == "constraints":
+            answers[p] = WRITING[t["id"]][0]
         else:
             answers[p] = "```python\n" + REFERENCE[t["entry_point"]] + "\n```"
         if len(sabotage) < 12:
@@ -150,13 +226,15 @@ def test_end_to_end_against_fake_endpoints(tmp_path):
     out = tmp_path / "r.json"
     try:
         assert tq.main(["--endpoint", f"good={url}@good", "--endpoint", f"bad={url}/v1@bad",
-                        "--kind", "reasoning", "code_exec", "--allow-exec", "--concurrency", "4",
+                        "--kind", "reasoning", "code_exec", "constraints", "--allow-exec", "--concurrency", "4",
                         "--cache", str(tmp_path / "cache"), "--out", str(out)]) == 0
     finally:
         srv.shutdown()
     rep = json.loads(out.read_text())
     assert rep["summary"]["good"]["kind"]["reasoning"]["score"] == 1.0
     assert rep["summary"]["good"]["kind"]["code_exec"]["score"] == 1.0
+    assert rep["summary"]["good"]["kind"]["constraints"]["score"] == 1.0
+    assert rep["summary"]["good"]["subject"]["vision"]["accuracy"] == 1.0
     cmp = rep["comparisons"][0]
     assert len(cmp["regressed"]) == 12 and not cmp["gained"]
     assert rep["skills"]["good"]["code"] == 1.0

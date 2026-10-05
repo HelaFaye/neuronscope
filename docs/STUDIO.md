@@ -6,7 +6,7 @@ the controls this project exists for.
 
 ```bash
 python viz/studio.py --models-dir ~/models --server ~/llama.cpp/build/bin/llama-server
-python viz/studio.py --models-dir A --models-dir B --idle-ttl 900 --routing qa/routing.example.json
+python viz/studio.py --models-dir A --models-dir B --idle-ttl 900 --min-graded 20
 ```
 
 Open http://127.0.0.1:7870. Without `--models-dir` it scans LM Studio's own
@@ -34,7 +34,8 @@ that. Studio handles everything around it.
 | Tokens/s and time to first token per reply | yes | yes |
 | **Live suppression α** (LoRA scale, no reload) | no | yes |
 | **MoE active-expert override** | no | yes, key read from the model's architecture |
-| **`model: "auto"`**: route each prompt to the best-suited local model | no | yes, via the subject classifier and a routing table |
+| **`model: "auto"`**: route each prompt to the best-suited local model | no | yes, on each model's measured per-subject accuracy, hallucination and abstention rates |
+| **Rolling per-model stats** (graded answers, H-Neuron activations, live abstentions) | no | yes; models without stats are flagged ⚠ |
 | Remote access | LM Link (proprietary) | `--host` + token + TLS |
 
 Not included: RAG and an MCP client. Both are project-sized. The transfer
@@ -52,15 +53,64 @@ curl http://127.0.0.1:7870/v1/chat/completions -H 'Content-Type: application/jso
   the load panel also works, as do the file name or full path.
 - A request that names a model other than the loaded one loads it (JIT).
   `--no-jit` makes such requests fail instead.
-- `"model": "auto"` (only with `--routing`) classifies the last user message
-  (code, math, logic, science, factual, writing, vision) and picks the model
-  whose skills match best. Fill the skills from real numbers:
-  `testqa.py --out` writes per-subject scores under `"skills"`.
+- `"model": "auto"` picks a model from measured performance. See below.
+  Naming a model is always a manual override, whether or not it has stats.
 - Requests with `image_url` content go only to models with a vision projector;
   others get a 400 rather than a confusing failure.
 - `stream: true` is passed straight through as SSE.
 
 Point Cline, Continue, Open WebUI or any OpenAI SDK at `http://host:7870/v1`.
+
+## How `auto` chooses
+
+1. The subject classifier turns the last user message into a probability per
+   subject (code, math, logic, science, factual, writing, vision). Images
+   restrict the candidates to models with a vision projector.
+2. **Only models with at least `--min-graded` (default 20) graded results
+   compete.** A model with no stats is never auto-selected. You can still load
+   it, pick it in the chat's model menu, or name it in an API request.
+3. For each candidate and subject, the utility is
+   `lower 95% bound of accuracy − cost × upper 95% bound of hallucination rate`.
+   Abstaining scores zero, so a model that declines when unsure beats one that
+   guesses wrong. `--hallucination-cost` sets the cost (default 1; 0 ranks on
+   raw accuracy). Bounds rather than point estimates mean a model with more
+   evidence wins over a lucky small sample.
+4. A subject a model has fewer than 5 results for borrows its overall rates,
+   with confidence bounds as wide as 5 observations. Measured evidence beats
+   unverified transfer.
+5. The probability-weighted utilities are compared and the best model is
+   loaded (JIT). If none qualify, the request fails with 409 and says why.
+
+The chat window's model menu offers **Loaded model**, **Auto (by performance
+stats)** and every local model. Models without enough stats show an orange ⚠
+there and in the model list; hovering explains why and how to add stats. Each
+reply notes which model answered, and for auto picks, why (e.g.
+`auto → coder-7b: subject code (97%) -> expected +0.56`).
+
+## Rolling stats
+
+Stats live in `~/.neuronscope/stats/<model id>.jsonl` (append-only) and are
+tied to the model *file*: re-downloading or re-quantizing under the same name
+starts from zero. Summaries count only the last `--stats-window` (default
+500) observations of each kind, and nothing older than 180 days.
+
+| kind | source | used by auto? |
+|---|---|---|
+| graded: right / hallucinated / abstained, per subject | `testqa.py --publish-stats` or `--record-stats` | **yes** |
+| activation: H-Neuron classifier score per reply | Studio, for models with a classifier set in the load panel, when `--cett` (or `$NS_CETT`) is available | no, shown only |
+| live: replies and how often the model declined | every chat and `/v1` reply | no, shown only |
+
+Activation scoring runs one extra prefill per reply in the background, after
+requests finish, on the CPU by default (`--score-ngl` to change). Use
+`--score-every N` to sample. It is shown but not used for ranking, because
+the classifier is a weak signal on whole replies (AUROC around 0.7); graded
+answers are the evidence `auto` trusts.
+
+```bash
+python scripts/model_stats.py show                               # every model's rolling summary
+python scripts/model_stats.py rank "Fix this segfault in my loop"  # what auto would pick, and why
+curl http://127.0.0.1:7870/api/stats
+```
 
 ## Runtime controls
 

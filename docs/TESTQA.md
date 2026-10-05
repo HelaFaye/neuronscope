@@ -16,19 +16,55 @@ Endpoints are `LABEL=URL[@model]`. `/v1` is appended if missing. `--cache`
 stores every reply, so an interrupted run resumes and a grader change can be
 re-applied without asking the models again.
 
-## The bank (`qa/bank/*.jsonl`)
+## The bank (`qa/bank/<subject>.jsonl`)
 
-| file | kind | n | graded by |
-|---|---|---|---|
-| `reasoning.jsonl` | `reasoning` | 35 | final `Answer:` line; numbers with tolerance (fractions, `$`, `1,000`, `\frac{a}{b}` accepted), choices, or normalised text |
-| `coding.jsonl` | `code_exec` | 18 | **the interpreter**: the reply's code runs against unit tests |
-| `factual.jsonl` | `qa` | 17 | gold aliases; `expect_abstain` items reward "I don't know" |
-| `canary.jsonl` | `canary` | 7 | ungraded: answered vs refused |
+One file per subject, each with at least 20 graded items, so every subject
+gets a usable per-subject estimate from a single run:
 
-Every task has a `subject` (code, math, logic, science, factual, writing,
-vision). Add your own files in the same format, or point `--tasks` at another
-directory. Two kinds from `merge_eval.py` work as well: `code`
-(`{"modules": [...]}`, every referenced symbol must exist) and plain `qa`.
+| subject | graded | what it contains |
+|---|---|---|
+| code | 28 | 21 executable functions (the interpreter), 4 API-existence tasks (`code`: every referenced stdlib symbol must exist), 3 short facts |
+| math | 25 | arithmetic, algebra, probability, combinatorics, classic trick questions |
+| logic | 22 | syllogisms, ordering, knights and knaves, lateral-thinking traps |
+| science | 24 | 18 short facts, 6 physics/chemistry calculations |
+| factual | 23 | 19 facts plus 4 **false-premise or unanswerable** questions, where the right answer is to say so |
+| writing | 20 | instruction following, checked mechanically (`constraints`) |
+| vision | 21 | generated images: counting, colour, shape, position, reading text |
+| (canary) | 7 | ungraded general prompts: answered vs refused |
+
+```bash
+python scripts/testqa.py --list                       # coverage by subject and kind
+python scripts/testqa.py --per-subject 10 --list       # what a balanced sample would contain
+```
+
+How each kind is graded:
+
+| kind | graded by |
+|---|---|
+| `reasoning` | final `Answer:` line; numbers with tolerance (fractions, `$`, `1,000`, `\frac{a}{b}` accepted), choices, or normalised text |
+| `code_exec` | **the interpreter**: the reply's code runs against unit tests |
+| `code` | every module attribute the code uses must exist |
+| `qa` | gold aliases; `expect_abstain` items count declining (or naming the false premise) as correct |
+| `constraints` | mechanical checks: `lines`, `sentences`, `bullets`, `numbered`, `min_words`/`max_words`, `max_chars`, `must_include`, `must_not_include`, `forbid_chars`, `regex`, `starts_with`, `ends_with`, `json_keys`, `acrostic`, `title_case` |
+| `canary` | ungraded |
+
+A wrong answer is a **hallucination** in the per-subject report: the model
+answered and was wrong (for code, wrong includes unparsable and timed out).
+Abstentions are counted separately, so a model that declines when unsure is
+not scored the same as one that makes something up.
+
+Writing is graded on instruction following rather than taste, because that is
+what can be checked without a judge model. Every writing task has a known good
+and bad answer in `tests/test_testqa.py`.
+
+**Vision tasks** carry an `image` field: either a file path or a small spec
+rendered deterministically by `scripts/qa_images.py` (shapes, colours, text),
+so the bank stays text-only and every model sees identical pixels. Preview
+them with `python scripts/qa_images.py --bank qa/bank/vision.jsonl --out /tmp/v`.
+Text-only endpoints will fail these; restrict a run with `--subject`.
+
+Add your own files in the same format, or point `--tasks` at another
+directory. Tasks without a `subject` are labelled by the subject classifier.
 
 Reasoning prompts get a suffix asking for a final `Answer: <value>` line.
 Reasoning traces in `<think>` or `reasoning_content` are stripped before
@@ -63,6 +99,42 @@ Every bundled coding task is verified against a reference solution in
 `tests/test_testqa.py`. Keep doing that for new tasks: that test found a wrong
 expected value in this bank before it could mis-grade a model.
 
+## Per-subject runs
+
+```bash
+python scripts/testqa.py --endpoint m=http://127.0.0.1:7870/v1@<id> --subject code math --allow-exec
+python scripts/testqa.py --endpoint m=... --per-subject 15 --seed 1     # balanced, cheaper
+```
+
+`--per-subject N` takes up to N graded items from every subject,
+round-robin across task kinds, with a fixed `--seed` so runs are comparable.
+The report always ends with a per-subject block:
+
+```
+per subject (right / hallucinated / abstained, 95% CI on right; '*' = fewer than 20 graded)
+  m
+    code      n  28   right   79% [ 60%- 90%]   halluc   14%   abstain    7%
+    factual   n  23   right   74% [ 54%- 87%]   halluc    9%   abstain   17%
+    writing * n  15   right   60% [ 36%- 80%]   halluc   40%   abstain    0%
+```
+
+The confidence intervals are wide at these sizes. Two models whose intervals
+overlap heavily on a subject have not been separated by this bank; use the
+paired comparison, or a bigger bank, before acting on the difference.
+
+## Recording stats for routing
+
+```bash
+python scripts/testqa.py --endpoint m=http://127.0.0.1:7870/v1@<id> --allow-exec \
+    --publish-stats http://127.0.0.1:7870            # Studio ties results to the exact model file
+python scripts/testqa.py --endpoint m=... --record-stats   # or write ~/.neuronscope/stats directly
+```
+
+Every graded item becomes a rolling observation for that model (see
+[STUDIO.md](STUDIO.md#how-auto-chooses)). Canaries, skipped code and request
+errors are not recorded. `--stats-model LABEL=ID` records under a different
+id when the endpoint's model name differs from Studio's.
+
 ## Reading the output
 
 ```
@@ -78,14 +150,14 @@ The comparison is a paired McNemar test on items whose verdict changed. Below
 10 discordant items it says "too few changes to call". Read the regression
 list, not just the net number.
 
-## Subject classifier and routing
+## Subject classifier
 
 `scripts/subject_classifier.py` labels prompts by subject. It is a
 dependency-free naive Bayes with keyword priors, trained in milliseconds on
 the bank plus `qa/subject_seed.jsonl`.
 
 ```bash
-python scripts/subject_classifier.py evaluate          # leave-one-out accuracy (~0.75 on 147 prompts)
+python scripts/subject_classifier.py evaluate          # leave-one-out accuracy (~0.81 on 240 prompts)
 python scripts/subject_classifier.py predict "Fix this segfault in my C++ loop"
 python scripts/subject_classifier.py route --table qa/routing.example.json "What is in this photo?"
 ```
@@ -94,13 +166,13 @@ It has three uses:
 
 1. TestQA labels any task without a `subject`, so per-subject tables work on
    your own task files.
-2. Routing: a table maps model names to per-subject skill scores, and `route`
-   picks the best fit for a prompt. Studio uses this for `"model": "auto"`
-   (see [STUDIO.md](STUDIO.md)). Fill the skills from measurements: the
-   `"skills"` block in `testqa.py --out` is exactly that table's shape.
+2. Routing: Studio's `"model": "auto"` classifies each prompt, then ranks
+   models on their measured per-subject stats (see [STUDIO.md](STUDIO.md)).
+   The `route` command above is the older table-driven version, kept for
+   scripting.
 3. It is the seed for choosing which model to load for a job based on its
    measured knowledge. Labelled lines added to `qa/subject_seed.jsonl` sharpen
    it, and `evaluate` tells you whether they did.
 
-It is a router hint, not an oracle. At about 75% accuracy, a wrong route
+It is a router hint, not an oracle. At about 80% accuracy, a wrong route
 costs you a weaker model, not a wrong answer, which is the right failure mode.

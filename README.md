@@ -22,8 +22,8 @@ abstain. NeuronScope extends the method in several directions:
 | **H-Neuron pipeline** | collect → label → extract CETT → sparse classifier → tune scale → export (GGUF in place, LoRA, HF) | [docs/PIPELINE.md](docs/PIPELINE.md) |
 | **Vision H-Neurons** | the same method for CLIP/SigLIP: confident image-caption mismatches, `mmproj` editing | [docs/VISION.md](docs/VISION.md) |
 | **Studio** | LM Studio-style model library, chat with images, saved chats, Hugging Face downloads, and an OpenAI-compatible `/v1` server with JIT loading, idle unload and `model: "auto"` routing; plus a live suppression slider and MoE expert control | [docs/STUDIO.md](docs/STUDIO.md) |
-| **TestQA** | graded reasoning, executable coding (sandboxed interpreter), factual and canary prompts against any endpoints; per-subject scores; paired comparison | [docs/TESTQA.md](docs/TESTQA.md) |
-| **Subject classifier** | labels prompts (code, math, logic, science, factual, writing, vision) and routes them to the best-suited model | [docs/TESTQA.md](docs/TESTQA.md#subject-classifier-and-routing) |
+| **TestQA** | 163 graded items across seven subjects (reasoning, executable code, API existence, false-premise facts, instruction-following writing, generated-image vision) against any endpoints; per-subject right/hallucinated/abstained rates; paired comparison; feeds routing stats | [docs/TESTQA.md](docs/TESTQA.md) |
+| **Subject classifier + stats routing** | labels prompts (code, math, logic, science, factual, writing, vision); `model: "auto"` picks the model with the best measured record for that subject, from rolling per-model stats | [docs/TESTQA.md](docs/TESTQA.md#subject-classifier-and-routing) |
 | **Transfer** | encrypted P2P browser transfer, resumable HTTPS CLI with watch mode, remote tuning worker, MCP control plane | [docs/TRANSFER.md](docs/TRANSFER.md) |
 | **Labs** | capability-preserving quantization, scale sweeps, adaptive remote tuning | [docs/LABS.md](docs/LABS.md) |
 | **Visualization** | 2D/3D activation maps, token-resolved timelines, live tracing proxy, weight views | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) |
@@ -86,7 +86,7 @@ scripts/                     pipeline stages, exporters, evaluators, transfer, s
   ns_transfer*.py, model_transfer.py, tuning_worker.py, ns_security.py
 viz/                         browser and native frontends (studio, hub, labs, explorers)
 web/                         WebRTC transfer page
-qa/                          TestQA bank, subject seed data, routing example
+qa/                          TestQA bank (one file per subject), subject seed data
 llama-tools/                 cett-dump extractor and the optional activations server patch
 tests/                       pytest suite; no model or GPU needed
 docs/                        guides

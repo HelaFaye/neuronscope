@@ -14,7 +14,18 @@ Task kinds (qa/bank/*.jsonl, mixable, one JSON object per line):
                Off unless --allow-exec (it runs model-written code)
     code       {"prompt", "modules": [...]}  every referenced symbol must exist
     qa         {"prompt", "aliases": [...], "expect_abstain"?: bool}
+    constraints {"prompt", "checks": {...}}  instruction following, checked
+               mechanically: lines, sentences, bullets, numbered, min/max_words,
+               max_chars, must_include, must_not_include, forbid_chars, regex,
+               starts_with, ends_with, json_keys, acrostic, title_case
     canary     {"prompt"}  ungraded; answered vs refused
+
+Any task may carry "image": a spec rendered by scripts/qa_images.py, or a
+file path; it is sent as an image_url part, so vision endpoints can be graded
+with the same verdicts.
+
+The bank is organised by subject (qa/bank/<subject>.jsonl). --per-subject N
+draws a balanced sample; --list prints what the bank covers.
 
 Every task may carry a "subject"; tasks without one are labelled by the
 subject classifier (scripts/subject_classifier.py), which is the same model a
@@ -115,6 +126,89 @@ def grade_qa(text: str, task: dict) -> str:
     return "correct" if any(norm(a) and norm(a) in n for a in task["aliases"]) else "wrong"
 
 
+SENT_RE = re.compile(r"[^.!?]+[.!?]+(?=\s|$)")
+
+
+def _clean(text: str) -> str:
+    body = strip_think(text).strip()
+    if body.startswith("```") and body.endswith("```"):
+        body = body.strip("`").split("\n", 1)[-1].strip()
+    return body.strip().strip('"').strip("\u201c\u201d").strip()
+
+
+def check_constraints(text: str, checks: dict) -> list[str]:
+    """Failed checks (empty list = all satisfied)."""
+    body = _clean(text)
+    lines = [l for l in body.splitlines() if l.strip()]
+    words = re.findall(r"[A-Za-z0-9\u00C0-\u024F']+", body)
+    low = body.lower()
+    fail = []
+    c = checks
+    if "lines" in c and len(lines) != c["lines"]:
+        fail.append(f"{len(lines)} lines, want {c['lines']}")
+    if "sentences" in c:
+        n = len(SENT_RE.findall(body)) or (1 if body and body[-1] not in ".!?" else 0)
+        if n != c["sentences"]:
+            fail.append(f"{n} sentences, want {c['sentences']}")
+    if "bullets" in c:
+        n = sum(1 for l in lines if re.match(r"\s*[-*\u2022]\s+", l))
+        if n != c["bullets"]:
+            fail.append(f"{n} bullets, want {c['bullets']}")
+    if "numbered" in c:
+        nums = [int(m.group(1)) for l in lines if (m := re.match(r"\s*(\d+)[.)]\s", l))]
+        if nums != list(range(1, c["numbered"] + 1)):
+            fail.append(f"numbering {nums}")
+    if "min_words" in c and len(words) < c["min_words"]:
+        fail.append(f"{len(words)} words < {c['min_words']}")
+    if "max_words" in c and len(words) > c["max_words"]:
+        fail.append(f"{len(words)} words > {c['max_words']}")
+    if "max_chars" in c and len(body) > c["max_chars"]:
+        fail.append(f"{len(body)} chars > {c['max_chars']}")
+    for w in c.get("must_include", []):
+        if w.lower() not in low:
+            fail.append(f"missing {w!r}")
+    for w in c.get("must_not_include", []):
+        if w.lower() in low:
+            fail.append(f"contains {w!r}")
+    if c.get("forbid_chars") and any(ch in body for ch in c["forbid_chars"]):
+        fail.append("uses a forbidden character")
+    for rx in c.get("regex", []):
+        if not re.search(rx, body, re.M):
+            fail.append(f"does not match {rx}")
+    if c.get("starts_with") and not body.startswith(c["starts_with"]):
+        fail.append(f"does not start with {c['starts_with']!r}")
+    if c.get("ends_with") and not body.rstrip().endswith(c["ends_with"]):
+        fail.append(f"does not end with {c['ends_with']!r}")
+    if c.get("json_keys"):
+        try:
+            obj = json.loads(body)
+            missing = [k for k in c["json_keys"] if not isinstance(obj, dict) or k not in obj]
+            if missing:
+                fail.append(f"JSON missing {missing}")
+        except json.JSONDecodeError:
+            fail.append("not valid JSON")
+    if c.get("acrostic"):
+        initials = "".join(l.strip().lstrip("*-_#> ")[:1].upper() for l in lines)
+        if initials != c["acrostic"].upper():
+            fail.append(f"initials {initials!r}")
+    if c.get("title_case"):
+        small = {"a", "an", "the", "and", "or", "of", "in", "on", "to", "for", "at", "by", "with"}
+        bad = [w for i, w in enumerate(words) if (i == 0 or w.lower() not in small) and not w[:1].isupper()]
+        if bad:
+            fail.append(f"not title case: {bad[:3]}")
+    return fail
+
+
+def grade_constraints(text: str, task: dict) -> tuple[str, str]:
+    body = _clean(text)
+    if not body:
+        return "abstained", ""
+    if any(m in body.lower()[:80] for m in ("i can't", "i cannot", "i won't", "i'm unable", "i am unable")):
+        return "abstained", ""
+    fail = check_constraints(text, task["checks"])
+    return ("wrong", "; ".join(fail)[:160]) if fail else ("correct", "")
+
+
 # ---------------------------------------------------------------- interpreter
 
 RUNNER = r'''
@@ -182,6 +276,8 @@ def kind_of(task: dict) -> str:
         return task["kind"]
     if task.get("tests"):
         return "code_exec"
+    if task.get("checks"):
+        return "constraints"
     if "answer" in task:
         return "reasoning"
     if task.get("aliases"):
@@ -207,6 +303,7 @@ def load_tasks(paths: list[str], kinds: set[str] | None, subjects: set[str] | No
                 raise SystemExit(f"duplicate task id {t['id']} in {f}")
             seen.add(t["id"])
             t["kind"] = kind_of(t)
+            t["_base"] = str(f.parent)
             if not t.get("subject"):
                 clf = clf or default_classifier()
                 t["subject"] = clf.predict(t["prompt"])
@@ -217,6 +314,41 @@ def load_tasks(paths: list[str], kinds: set[str] | None, subjects: set[str] | No
                 continue
             tasks.append(t)
     return tasks[:limit] if limit else tasks
+
+
+def per_subject_sample(tasks: list[dict], n: int, seed: int = 0) -> list[dict]:
+    """Up to n graded tasks per subject (balanced across kinds), canaries kept."""
+    import random
+    rng = random.Random(seed)
+    by = defaultdict(list)
+    out = [t for t in tasks if t["kind"] == "canary"]
+    for t in tasks:
+        if t["kind"] != "canary":
+            by[t["subject"]].append(t)
+    for subj, ts in sorted(by.items()):
+        kinds = defaultdict(list)
+        for t in ts:
+            kinds[t["kind"]].append(t)
+        for v in kinds.values():
+            rng.shuffle(v)
+        picked = []
+        while len(picked) < n and any(kinds.values()):     # round-robin over kinds
+            for k in sorted(kinds):
+                if kinds[k] and len(picked) < n:
+                    picked.append(kinds[k].pop())
+        out += picked
+    return out
+
+
+def bank_listing(tasks: list[dict]) -> str:
+    by = defaultdict(Counter)
+    for t in tasks:
+        by[t["subject"] if t["kind"] != "canary" else "(canary)"][t["kind"]] += 1
+    lines = [f"{'subject':<10} {'graded':>6}  kinds"]
+    for s, c in sorted(by.items()):
+        graded = sum(v for k, v in c.items() if k != "canary")
+        lines.append(f"{s:<10} {graded:>6}  " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
+    return "\n".join(lines)
 
 
 def prompt_for(task: dict) -> str:
@@ -238,9 +370,21 @@ def parse_endpoint(spec: str) -> tuple[str, str, str | None]:
     return label, url, model
 
 
-def ask(url: str, model: str | None, prompt: str, a) -> str:
+def message_for(task: dict) -> dict:
+    text = prompt_for(task)
+    if not task.get("image"):
+        return {"role": "user", "content": text}
+    from qa_images import data_url
+    url = data_url(task["image"], Path(task.get("_base", ".")))
+    return {"role": "user", "content": [{"type": "text", "text": text},
+                                        {"type": "image_url", "image_url": {"url": url}}]}
+
+
+def ask(url: str, model: str | None, message, a) -> str:
     import requests
-    body = {"messages": [{"role": "user", "content": prompt}], "temperature": a.temperature,
+    if isinstance(message, str):
+        message = {"role": "user", "content": message}
+    body = {"messages": [message], "temperature": a.temperature,
             "max_tokens": a.max_tokens}
     if model:
         body["model"] = model
@@ -263,6 +407,8 @@ def grade(task: dict, text: str, a) -> tuple[str, str]:
         return grade_code_exec(text, task, a.allow_exec, a.exec_timeout)
     if k == "qa":
         return grade_qa(text, task), ""
+    if k == "constraints":
+        return grade_constraints(text, task)
     if k == "code":
         return grade_code(text, task), ""
     return grade_canary(text, task), ""
@@ -281,7 +427,7 @@ def run_endpoint(label: str, url: str, model: str | None, tasks: list[dict], a, 
         text = cache.get(t["id"])
         if text is None:
             try:
-                text = ask(url, model, prompt_for(t), a)
+                text = ask(url, model, message_for(t), a)
             except Exception as e:
                 return {"id": t["id"], "kind": t["kind"], "subject": t["subject"], "verdict": "error",
                         "note": str(e)[:160]}
@@ -332,8 +478,16 @@ def summarise(rows: list[dict]) -> dict:
     def score(c: Counter) -> dict:
         graded = sum(v for k, v in c.items() if k not in ("error", "skipped"))
         good = c["correct"] + c["answered"]
-        return {"n": sum(c.values()), "graded": graded, "score": round(good / graded, 3) if graded else None,
-                **dict(c)}
+        out = {"n": sum(c.values()), "graded": graded, "score": round(good / graded, 3) if graded else None,
+               **dict(c)}
+        strict = c["correct"] + c["wrong"] + c["abstained"] + c["unparsable"] + c["timeout"]
+        if strict:
+            from model_stats import wilson
+            wrong = c["wrong"] + c["unparsable"] + c["timeout"]
+            out.update(accuracy=round(c["correct"] / strict, 3), hallucination_rate=round(wrong / strict, 3),
+                       abstention_rate=round(c["abstained"] / strict, 3),
+                       accuracy_ci=[round(x, 3) for x in wilson(c["correct"], strict)])
+        return out
     return {g: {k: score(c) for k, c in sorted(d.items())} for g, d in by.items()}
 
 
@@ -348,6 +502,20 @@ def print_table(title: str, results: dict, group: str) -> None:
             s = results[l][group].get(k)
             cells.append("-" if not s or s["score"] is None else f"{s['score']:.2f} ({s['graded']})")
         print(f"  {k:<12}" + "".join(f"{c:>14}" for c in cells))
+
+
+def print_subjects(summ: dict, min_n: int) -> None:
+    print(f"\nper subject (right / hallucinated / abstained, 95% CI on right; '*' = fewer than {min_n} graded)")
+    for label, sm in summ.items():
+        print(f"  {label}")
+        for subj, v in sm["subject"].items():
+            if "accuracy" not in v:
+                continue
+            n = v["correct"] + v.get("wrong", 0) + v.get("abstained", 0) + v.get("unparsable", 0) + v.get("timeout", 0)
+            lo, hi = v["accuracy_ci"]
+            flag = "*" if n < min_n else " "
+            print(f"    {subj:<9}{flag} n {n:>3}   right {v['accuracy']:5.0%} [{lo:4.0%}-{hi:4.0%}]   "
+                  f"halluc {v['hallucination_rate']:5.0%}   abstain {v['abstention_rate']:5.0%}")
 
 
 def skills_from(summary: dict) -> dict:
@@ -383,11 +551,16 @@ def record_stats(model_id: str, rows: list[dict], a) -> int:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--endpoint", action="append", required=True, metavar="LABEL=URL[@model]")
+    p.add_argument("--endpoint", action="append", default=[], metavar="LABEL=URL[@model]")
     p.add_argument("--tasks", nargs="+", default=[str(ROOT / "qa" / "bank")], help="JSONL files or directories")
     p.add_argument("--kind", nargs="*", help="only these kinds")
     p.add_argument("--subject", nargs="*", help="only these subjects")
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--per-subject", type=int, default=0, metavar="N",
+                   help="balanced sample of up to N graded tasks per subject")
+    p.add_argument("--seed", type=int, default=0, help="sampling seed for --per-subject")
+    p.add_argument("--min-subject-n", type=int, default=20, help="flag subjects graded on fewer items")
+    p.add_argument("--list", action="store_true", help="show bank coverage by subject and kind, then exit")
     p.add_argument("--reference", help="label compared against (default: first endpoint)")
     p.add_argument("--allow-exec", action="store_true", help="run code_exec tasks (executes model-written code)")
     p.add_argument("--exec-timeout", type=float, default=10.0)
@@ -409,6 +582,13 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
 
     tasks = load_tasks(a.tasks, set(a.kind or []), set(a.subject or []), a.limit)
+    if a.per_subject:
+        tasks = per_subject_sample(tasks, a.per_subject, a.seed)
+    if a.list:
+        print(bank_listing(tasks))
+        return 0
+    if not a.endpoint:
+        raise SystemExit("--endpoint is required (or use --list)")
     if not tasks:
         raise SystemExit("no tasks selected")
     kinds = Counter(t["kind"] for t in tasks)
@@ -437,6 +617,7 @@ def main(argv=None) -> int:
 
     print_table("score by kind (fraction correct/answered, graded n)", summ, "kind")
     print_table("score by subject", summ, "subject")
+    print_subjects(summ, a.min_subject_n)
 
     ref = a.reference or eps[0][0]
     comparisons = []
