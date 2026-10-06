@@ -143,6 +143,26 @@ NS_API=http://127.0.0.1:7880 godot --path viz/godot                # desktop
 python viz/timeline.py runs/trace-abc --theme ember                # analysis
 ```
 
+No trace yet? `python viz/bloom.py --demo` serves a synthetic one (a quiet
+field whose designated neurons burst on an invented claim, "moved to Lyon").
+Nothing in it was measured, and the HUD says so; it is for trying the clients.
+A real trace comes from `scripts/trace_sample.py`.
+
+**Running the Godot client** (any Godot 4.7 or newer, including a
+`godot-git` build; the binary may be called `godot` or `godot4`):
+
+```bash
+python viz/bloom.py --demo                                  # terminal 1
+NS_API=http://127.0.0.1:7880 godot --path viz/godot         # terminal 2
+NS_FRAME=67 NS_PAUSED=1 NS_API=... godot --path viz/godot   # open on one token, paused
+```
+
+Space pauses, Left/Right step a token, Esc quits. It runs the project
+directly, no editor needed; opening `viz/godot/project.godot` in the editor
+works too. Forward+ needs Vulkan; on a GPU or driver without it, add
+`--rendering-method gl_compatibility` (glow still works, a little softer).
+Verified with the official 4.7.2 build on a software Vulkan driver.
+
 Bloom is deliberately absent from `timeline.py`. It blurs neighbours together,
 so a bright cell reads as a smear and you lose the spatial precision the view
 exists for. Use the pretty ones to show people; use pygfx to decide anything.

@@ -33,6 +33,7 @@ fine, which is what the browser uses. With no GPU at all, Chrome falls back to
 SwiftShader and it still runs, slowly.
 
     python viz/bloom.py runs/trace-abc
+    python viz/bloom.py --demo            # synthetic trace: try the clients without a model
     python viz/bloom.py runs/trace-abc --theme cool --port 7880 --host 0.0.0.0
 
 Serves a page; open the URL it prints. Positions are sent once and only
@@ -58,10 +59,43 @@ from timeline import THEMES, classify_frames, load_mask, load_trace  # noqa
 PAYLOAD = {}
 
 
-def build_payload(session, h_neurons, active_pct, score_z, max_cells):
-    frames, fields = load_trace(session)
-    T, L, N = frames.shape
-    mask = load_mask(h_neurons, (L, N))
+DEMO_TEXT = ("The Eiffel Tower was completed in 1889 and stands in Paris . It was designed by "
+             "the engineer Gustave Eiffel , and in 1923 it was moved to Lyon for the World Fair , "
+             "where it remained until 1931 .").split()
+
+
+def demo_trace(T=160, L=32, N=512, seed=0):
+    """A synthetic trace for trying the clients without a model: a quiet field
+    with a few dozen designated neurons that burst during an invented claim
+    ("moved to Lyon"). Nothing here was measured; the HUD says "demo"."""
+    rng = np.random.default_rng(seed)
+    frames = rng.gamma(2.0, 0.02, size=(T, L, N)).astype(np.float32)
+    frames *= (1 + 0.6 * np.sin(np.linspace(0, 3.1, L)))[None, :, None]   # mid layers busier
+    hl = rng.integers(L // 3, L, 24)
+    hn = rng.integers(0, N, 24)
+    words = [DEMO_TEXT[i % len(DEMO_TEXT)] for i in range(T)]
+    burst = np.zeros(T, np.float32)
+    for i, w in enumerate(words):
+        if w in ("moved", "to", "Lyon", "1923", "1931"):
+            burst[i] = 1.0
+    burst = np.convolve(burst, [0.3, 1.0, 0.6], "same")
+    frames[:, hl, hn] += (0.05 + 1.2 * burst)[:, None] * rng.uniform(0.6, 1.0, 24)[None, :]
+    mask = np.zeros((L, N), bool)
+    mask[hl, hn] = True
+    scores = frames[:, hl, hn].mean(1)
+    fields = {"scores": scores.tolist(), "pieces": [" " + w for w in words], "stride": 1,
+              "meta": {"model": "demo (synthetic, not measured)"}, "n_frames": T, "n_layers": L}
+    return frames, fields, mask
+
+
+def build_payload(session, h_neurons, active_pct, score_z, max_cells, demo=False):
+    if demo:
+        frames, fields, mask = demo_trace()
+        T, L, N = frames.shape
+    else:
+        frames, fields = load_trace(session)
+        T, L, N = frames.shape
+        mask = load_mask(h_neurons, (L, N))
     active, halluc, z = classify_frames(frames, fields, mask,
                                         active_pct, score_z)
 
@@ -297,7 +331,9 @@ addEventListener('resize', ()=>{
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("session")
+    p.add_argument("session", nargs="?", help="trace session from scripts/trace_sample.py")
+    p.add_argument("--demo", action="store_true",
+                   help="a synthetic trace, to try the three.js and Godot clients without a model")
     p.add_argument("--theme", default="ember", choices=sorted(THEMES))
     p.add_argument("--h-neurons")
     p.add_argument("--active-pct", type=float, default=97.0)
@@ -309,11 +345,13 @@ def main():
     p.add_argument("--dump", metavar="BIN", help="write the payload and exit")
     p.add_argument("--allow-unauthenticated", action="store_true", help="permit a non-loopback bind (no auth)")
     a = p.parse_args()
+    if not a.session and not a.demo:
+        p.error("give a trace session, or --demo")
     if not a.dump:
         sec.loopback_only(a.host, "the trace viewer", a.allow_unauthenticated)
 
     blob, meta = build_payload(a.session, a.h_neurons, a.active_pct,
-                               a.score_z, a.max_cells)
+                               a.score_z, a.max_cells, demo=a.demo)
     PAYLOAD.update({"blob": blob, "meta": meta, "theme": THEMES[a.theme]})
     print(f"{meta['frames']} frames, {meta['cells']} cells, "
           f"{len(blob) / 1e6:.1f} MB payload, theme '{a.theme}'")

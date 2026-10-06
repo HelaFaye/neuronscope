@@ -32,6 +32,11 @@
   redacted from output. Legacy inline tokens are migrated.
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
+### Added
+- `viz/bloom.py --demo`: a synthetic, clearly labelled trace for trying the
+  three.js and Godot clients without a model. Godot usage (keys, `NS_FRAME`,
+  `NS_PAUSED`, renderer fallback) in docs/VISUALIZATION.md.
+
 ### Added (CUDA)
 - `scripts/cuda_info.py`: every NVIDIA GPU via nvidia-smi, and the decisions
   that follow: PyTorch wheel (CUDA 12.6 + `torch<2.15` for Maxwell/Pascal/Volta,
