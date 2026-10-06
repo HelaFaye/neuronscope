@@ -56,6 +56,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import gguf_utils
 import ns_security as sec
 import model_stats
+import jobs as ns_jobs
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -1007,6 +1008,41 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             touch(-1)
 
+    def _jobs_off(self):
+        return self._json(403, {"error": STATE.get("jobs_off") or "jobs are disabled"})
+
+    def _jobs_get(self):
+        runner = STATE.get("jobs")
+        if self.path == "/api/jobs/specs":
+            return self._json(200, ns_jobs.public_specs())
+        if runner is None:
+            return self._jobs_off()
+        if self.path == "/api/jobs":
+            return self._json(200, runner.list())
+        m = re.fullmatch(r"/api/jobs/([0-9a-f]{12})/log", self.path)
+        if m:
+            try:
+                return self._json(200, {"log": runner.log(m.group(1))})
+            except (ValueError, FileNotFoundError):
+                return self._json(404, {"error": "no such job"})
+        return self._json(404, {"error": "not found"})
+
+    def _jobs_post(self):
+        runner = STATE.get("jobs")
+        if runner is None:
+            return self._jobs_off()
+        if "application/json" not in self.headers.get("Content-Type", ""):
+            return self._json(415, {"error": "JSON only"})     # no cross-site form posts
+        req = self._read()
+        try:
+            if self.path == "/api/jobs/cancel":
+                return self._json(200, runner.cancel(str(req.get("id", ""))))
+            return self._json(200, runner.start(str(req.get("kind", "")), dict(req.get("values") or {})))
+        except (ValueError, FileNotFoundError) as e:
+            return self._json(400, {"error": str(e)})
+        except RuntimeError as e:
+            return self._json(429, {"error": str(e)})
+
     def do_GET(self):
         self._route = None
         if not self._authed():
@@ -1019,6 +1055,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/jobs":
+            body = ns_jobs.PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/jobs"):
+            return self._jobs_get()
         if self.path == "/v1/models":
             return self._json(200, openai_models())
         if self.path == "/api/chats":
@@ -1124,6 +1170,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/chats":
                 return self._json(200, save_chat(self._read(MAX_BODY)))
+
+            if self.path in ("/api/jobs", "/api/jobs/cancel"):
+                return self._jobs_post()
 
             if self.path == "/api/stats/ingest":
                 req = self._read(8 * 1024 * 1024)
@@ -1337,7 +1386,8 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <h1>NeuronScope Studio</h1>
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
-  <button id="theme" style="margin-left:auto" title="toggle theme">◐</button>
+  <a href="/jobs" class="chip" style="margin-left:auto;text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
+  <button id="theme" title="toggle theme">◐</button>
   <button id="unload" disabled>Unload</button>
 </header>
 <main>
@@ -1725,6 +1775,12 @@ def main(argv=None):
     p.add_argument("--score-every", type=int, default=1, help="score one reply in N")
     p.add_argument("--idle-ttl", type=int, default=0, help="unload the model after N idle seconds (0 = never)")
     p.add_argument("--no-jit", action="store_true", help="/v1 requests never load or swap models")
+    p.add_argument("--jobs-dir", default=os.path.expanduser("~/.neuronscope/jobs"),
+                   help="logs and state of evaluation/retraining jobs started from /jobs")
+    p.add_argument("--max-jobs", type=int, default=2, help="jobs that may run at once")
+    p.add_argument("--allow-remote-jobs", action="store_true",
+                   help="allow /jobs on a non-loopback bind (jobs can train models and run model-written code)")
+    p.add_argument("--no-jobs", action="store_true", help="disable /jobs entirely")
     sec.add_server_security_args(p)
     a = p.parse_args(argv)
 
@@ -1755,6 +1811,15 @@ def main(argv=None):
     except sec.SecurityConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+
+    if a.no_jobs:
+        STATE["jobs"], STATE["jobs_off"] = None, "jobs are disabled (--no-jobs)"
+    elif not sec.is_loopback(a.host) and not a.allow_remote_jobs:
+        STATE["jobs"] = None
+        STATE["jobs_off"] = ("jobs are off on a network bind: they can train models and run model-written code. "
+                             "Restart Studio with --allow-remote-jobs to enable them.")
+    else:
+        STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs)
 
     scheme = "https" if tls else "http"
     print(f"NeuronScope Studio on {scheme}://{a.host}:{a.port}")

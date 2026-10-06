@@ -42,7 +42,8 @@ def studio_srv(tmp_path):
         "models_dirs": [str(models)], "server_bin": str(ROOT / "tests" / "fake_llama_server.py"),
         "settings_path": str(tmp_path / "studio.json"), "chats_dir": str(tmp_path / "chats"),
         "token": None, "stats": model_stats.StatsStore(tmp_path / "stats"), "min_graded": 20,
-        "min_subject": 5, "halluc_cost": 1.0, "cett": None, "idle_ttl": 0, "jit": True, "backend_port": free_port(), "tls": False})
+        "min_subject": 5, "halluc_cost": 1.0, "cett": None, "idle_ttl": 0, "jit": True, "backend_port": free_port(), "tls": False,
+        "jobs": studio.ns_jobs.JobRunner(tmp_path / "jobs", 1), "jobs_off": None})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), studio.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -201,3 +202,50 @@ def test_chat_history_roundtrip(studio_srv):
 
 def test_refuses_open_lan_bind():
     assert studio.main(["--host", "0.0.0.0", "--port", "0"]) == 2
+
+
+def test_jobs_run_log_and_reject_injection(studio_srv, tmp_path):
+    code, specs = call(studio_srv, "/api/jobs/specs")
+    assert code == 200 and {"testqa", "deficits", "finetune", "swe_train"} <= set(specs)
+    rep = tmp_path / "rep.json"
+    rep.write_text(json.dumps({"resolved_ids": ["a"], "unresolved_ids": ["b"], "empty_patch_ids": []}))
+    code, job = call(studio_srv, "/api/jobs", {"kind": "swe_import", "values": {"report": str(rep), "model": "m"}})
+    assert code == 200 and job["status"] == "running"
+    for _ in range(100):
+        _, js = call(studio_srv, "/api/jobs")
+        if js[0]["status"] != "running":
+            break
+        time.sleep(0.1)
+    assert js[0]["status"] == "done"
+    _, log = call(studio_srv, f"/api/jobs/{job['id']}/log")
+    assert "1/2 resolved" in log["log"]
+    code, err = call(studio_srv, "/api/jobs", {"kind": "swe_import", "values": {"report": "--help", "model": "m"}})
+    assert code == 400 and "may not start" in err["error"]
+    code, _ = call(studio_srv, "/api/jobs", {"kind": "rm", "values": {}})
+    assert code == 400
+    # a cross-site form post cannot start a job
+    req = urllib.request.Request(studio_srv + "/api/jobs", data=b"kind=swe_import", method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req)
+    assert e.value.code == 415
+
+
+def test_jobs_cancel_and_off_on_network_bind(studio_srv, tmp_path, monkeypatch):
+    runner = studio.STATE["jobs"]
+    monkeypatch.setitem(studio.ns_jobs.SPECS, "sleep", {"title": "sleep", "group": "t", "help": "",
+                        "argv": ["-c", "import time; time.sleep(30)"], "fields": []})
+    code, job = call(studio_srv, "/api/jobs", {"kind": "sleep", "values": {}})
+    assert code == 200
+    code, err = call(studio_srv, "/api/jobs", {"kind": "sleep", "values": {}})
+    assert code == 429                                        # --max-jobs 1
+    call(studio_srv, "/api/jobs/cancel", {"id": job["id"]})
+    for _ in range(50):
+        if runner.get(job["id"])["ended"]:
+            break
+        time.sleep(0.1)
+    assert runner.get(job["id"])["status"] == "cancelled"
+    monkeypatch.setitem(studio.STATE, "jobs", None)
+    monkeypatch.setitem(studio.STATE, "jobs_off", "jobs are off on a network bind")
+    code, err = call(studio_srv, "/api/jobs")
+    assert code == 403 and "network bind" in err["error"]

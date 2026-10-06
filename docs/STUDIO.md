@@ -37,6 +37,7 @@ that. Studio handles everything around it.
 | **`model: "auto"`**: route each prompt to the best-suited local model | no | yes, on each model's measured per-subject accuracy, hallucination and abstention rates |
 | **Rolling per-model stats** (graded answers, H-Neuron activations, live abstentions) | no | yes; models without stats are flagged ⚠ |
 | Remote access | LM Link (proprietary) | `--host` + token + TLS |
+| **Jobs page**: TestQA, deficit datasets, fine-tuning, merge/GGUF, SWE-bench, LiveBench, CLIP_benchmark from the browser | no | yes, at `/jobs` |
 
 Not included: RAG and an MCP client. Both are project-sized. The transfer
 system ships its own MCP *server* (see [TRANSFER.md](TRANSFER.md)).
@@ -123,6 +124,26 @@ at several suppression strengths in one conversation.
 `<arch>.expert_used_count`. See `scripts/sweep_experts.py` for measuring the
 quality and speed curve.
 
+## Jobs
+
+`/jobs` (the **Jobs** link in the header) starts evaluation, retraining and
+benchmark runs without a terminal: TestQA, deficit datasets, SWE-bench training
+data, fine-tuning, merge and GGUF conversion, SWE-bench predict / evaluate /
+import, LiveBench and CLIP_benchmark. Each job is a fixed script with a form of
+typed fields; there is no free-form command line, and no value may start with
+`-`, so a field cannot add flags. Output streams into the page and is kept in
+`~/.neuronscope/jobs/<id>/` (`--jobs-dir`); jobs keep running when the browser
+closes, and can be cancelled. `--max-jobs` (default 2) limits how many run at
+once.
+
+A typical retraining loop on one page: TestQA with a cache → Deficit dataset
+→ Fine-tune → Merge and convert → load the new GGUF in Studio → TestQA again
+on `holdout_ids.json`. See [RETRAINING.md](RETRAINING.md).
+
+Jobs can train models and run model-written code, so they are available on a
+loopback bind only, unless Studio is started with `--allow-remote-jobs`
+(still behind the token). `--no-jobs` turns them off entirely.
+
 ## Security
 
 Studio loads models, downloads files and runs inference, so binding beyond
@@ -141,5 +162,7 @@ python viz/studio.py --host 0.0.0.0 --token-file ~/.config/neuronscope/studio.to
 - The browser login sets an HttpOnly, SameSite=Strict cookie (Secure under TLS).
   API clients send `Authorization: Bearer <token>`.
 - Failed logins are throttled per address. Request bodies are bounded.
+- Jobs are off on a network bind unless `--allow-remote-jobs` is given, and
+  only accept JSON requests, so a cross-site form cannot start one.
 
 See [SECURITY.md](SECURITY.md).

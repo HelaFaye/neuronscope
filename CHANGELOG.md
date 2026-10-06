@@ -23,6 +23,11 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Studio `/jobs`: evaluation, retraining and benchmark runs from the browser
+  (TestQA, deficits, SWE-bench training data, fine-tune, merge/GGUF, SWE-bench,
+  LiveBench, CLIP_benchmark). Typed per-job forms with no free-form command
+  line, persistent logs, cancel, a concurrency limit; loopback-only unless
+  `--allow-remote-jobs`.
 - `benchmarks.py swebench train-data`: retraining data from SWE-bench's train
   split (gold patches, DPO against the model's own patches, failure modes
   prioritised by a test-run report, test-set exclusion, replay anchors).
