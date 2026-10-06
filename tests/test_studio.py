@@ -313,3 +313,50 @@ def test_rag_dense_with_embedding_sidecar(studio_srv, monkeypatch):
         if p is not None:
             p.terminate()
             studio.EMBED["proc"] = None
+
+
+def _mcp_cfg(tmp_path, auto):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"calc": {"command": sys.executable,
+                                                        "args": [str(ROOT / "tests" / "fake_mcp_server.py")],
+                                                        "autoApprove": auto}}}))
+    return str(cfg)
+
+
+@pytest.mark.parametrize("auto,allow", [(["add"], None), ([], True), ([], False)])
+def test_mcp_tool_calls_with_approval(studio_srv, tmp_path, monkeypatch, auto, allow):
+    pytest.importorskip("mcp")
+    monkeypatch.setitem(studio.STATE, "mcp_config", _mcp_cfg(tmp_path, auto))
+    monkeypatch.setitem(studio.STATE, "mcp", None)
+    try:
+        _, st = call(studio_srv, "/api/mcp")
+        (srv,) = st["servers"]
+        assert srv["connected"] and {t["name"] for t in srv["tools"]} == {"add", "echo", "boom"}
+        approver = None
+        if allow is not None:
+            def approve():
+                for _ in range(200):
+                    with studio.APPROVALS_LOCK:
+                        keys = list(studio.APPROVALS)
+                    if keys:
+                        call(studio_srv, "/api/tools/approve", {"key": keys[0], "allow": allow})
+                        return
+                    time.sleep(0.05)
+            approver = threading.Thread(target=approve)
+            approver.start()
+        ev = sse_chat(studio_srv, {"model": CODER, "tools": True,
+                                   "messages": [{"role": "user", "content": "what is 2+40?"}]})
+        if approver:
+            approver.join()
+        (tc,) = [e["tool_call"] for e in ev if "tool_call" in e]
+        (tr,) = [e["tool_result"] for e in ev if "tool_result" in e]
+        assert tc["name"] == "calc__add" and tc["arguments"] == {"a": 2, "b": 40}
+        assert tc["needs_approval"] is (allow is not None)
+        text = "".join(e["choices"][0]["delta"].get("content", "") for e in ev if "choices" in e)
+        if allow is False:
+            assert not tr["ok"] and "declined" in tr["text"] and "declined" in text
+        else:
+            assert tr["ok"] and tr["text"] == "42" and text == "tool said: 42"
+    finally:
+        if studio.STATE.get("mcp"):
+            studio.STATE["mcp"].close()

@@ -43,7 +43,29 @@ class H(BaseHTTPRequestHandler):
                     v[int(hashlib.md5(w.encode()).hexdigest(), 16) % 64] += 1.0
                 out.append({"index": i, "embedding": v})
             return self._send({"data": out, "model": a.alias})
-        has_img = any(isinstance(m.get("content"), list) for m in body.get("messages", []))
+        msgs = body.get("messages", [])
+        if body.get("tools") and body.get("stream") and (not msgs or msgs[-1].get("role") != "tool"):
+            # call the first tool named like *__add, the way llama-server streams tool calls
+            fn = next((t["function"]["name"] for t in body["tools"] if t["function"]["name"].endswith("__add")),
+                      body["tools"][0]["function"]["name"])
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for d in ({"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                       "function": {"name": fn, "arguments": '{"a": 2,'}}]},
+                      {"tool_calls": [{"index": 0, "function": {"arguments": ' "b": 40}'}}]}):
+                self.wfile.write(f"data: {json.dumps({'choices': [{'delta': d}]})}\n\n".encode())
+            self.wfile.write(f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]})}\n\n"
+                             "data: [DONE]\n\n".encode())
+            return
+        if msgs and msgs[-1].get("role") == "tool":
+            text = f"tool said: {msgs[-1]['content']}"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': text}}]})}\n\ndata: [DONE]\n\n".encode())
+            return
+        has_img = any(isinstance(m.get("content"), list) for m in msgs)
         ctx = any(m.get("role") == "system" and "[1] (" in str(m.get("content")) for m in body.get("messages", []))
         text = f"model={a.alias} mmproj={'yes' if a.mmproj else 'no'} image={'yes' if has_img else 'no'}"
         if ctx:

@@ -58,6 +58,7 @@ import ns_security as sec
 import model_stats
 import jobs as ns_jobs
 import rag as ns_rag
+import mcp_client as ns_mcp
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -557,6 +558,13 @@ def server_running():
     return p is not None and p.poll() is None
 
 
+def port_busy(port) -> bool:
+    import socket
+    with socket.socket() as sk:
+        sk.settimeout(0.5)
+        return sk.connect_ex(("127.0.0.1", port)) == 0
+
+
 def wait_healthy(port, proc, timeout=600):
     url = f"http://127.0.0.1:{port}/health"
     end = time.time() + timeout
@@ -577,6 +585,10 @@ def start_server(model, settings, port):
     if not STATE["server_bin"]:
         return False, "no --server binary configured"
     stop_server()
+    if port_busy(port):
+        # Something else (often an orphaned llama-server) holds the port and would
+        # answer our health check while our own server fails to bind.
+        return False, f"port {port} is already in use; stop whatever holds it or pass --backend-port"
     cmd = [STATE["server_bin"], "-m", model["path"],
            "-ngl", str(settings["ngl"]), "-c", str(settings["ctx"]),
            "-b", str(settings["batch"]),
@@ -649,6 +661,83 @@ def stop_server():
                  "started": None, "lora": None})
 
 
+# ---------------------------------------------------------------- MCP tools
+
+APPROVALS: dict = {}            # call key -> {"event": Event, "allow": bool}
+APPROVALS_LOCK = threading.Lock()
+MAX_TOOL_ROUNDS = 8
+
+
+def mcp_hub():
+    hub = STATE.get("mcp")
+    if hub is None and STATE.get("mcp_config"):
+        hub = STATE["mcp"] = ns_mcp.MCPHub(STATE["mcp_config"])
+        hub.connect()
+    return hub
+
+
+def wait_approval(key: str, timeout: float = 300) -> bool:
+    ev = threading.Event()
+    with APPROVALS_LOCK:
+        APPROVALS[key] = {"event": ev, "allow": False}
+    try:
+        ev.wait(timeout)
+        with APPROVALS_LOCK:
+            return APPROVALS[key]["allow"]
+    finally:
+        with APPROVALS_LOCK:
+            APPROVALS.pop(key, None)
+
+
+def sse(wfile, obj) -> None:
+    wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
+    wfile.flush()
+
+
+def chat_with_tools(wfile, payload: dict, msgs: list, hub) -> dict:
+    """Stream a chat in which the model may call MCP tools. Each call is shown
+    to the user and, unless auto-approved, waits for Allow/Deny."""
+    payload = {**payload, "tools": hub.openai_tools()}
+    out = {"text": ""}
+    for _ in range(MAX_TOOL_ROUNDS):
+        payload["messages"] = msgs
+        out = proxy("/v1/chat/completions", payload, stream_to=wfile, hold_done=True)
+        calls = out.get("tool_calls") or []
+        if not calls:
+            break
+        msgs = msgs + [{"role": "assistant", "content": out["text"] or None, "tool_calls": [
+            {"id": c["id"] or f"call_{i}", "type": "function",
+             "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}} for i, c in enumerate(calls)]}]
+        for i, c in enumerate(calls):
+            cid = c["id"] or f"call_{i}"
+            key = os.urandom(8).hex()
+            try:
+                args = json.loads(c["arguments"] or "{}")
+                if not isinstance(args, dict):
+                    raise ValueError("arguments must be a JSON object")
+            except ValueError as e:
+                args, err = None, f"invalid arguments: {e}"
+            else:
+                err = None
+            need = err is None and not hub.auto_approved(c["name"])
+            sse(wfile, {"tool_call": {"key": key, "name": c["name"], "arguments": args if args is not None
+                                      else c["arguments"], "needs_approval": need}})
+            if err is None and need and not wait_approval(key):
+                err = "the user declined this tool call"
+            if err is None:
+                try:
+                    ok, text = hub.call(c["name"], args)
+                except Exception as e:
+                    ok, text = False, f"{type(e).__name__}: {e}"
+            else:
+                ok, text = False, err
+            sse(wfile, {"tool_result": {"key": key, "ok": ok, "text": text[:4000]}})
+            msgs = msgs + [{"role": "tool", "tool_call_id": cid, "content": text if ok else f"Error: {text}"}]
+    wfile.write(b"data: [DONE]\n\n")
+    wfile.flush()
+    return out
+
+
 # ---------------------------------------------------------------- RAG
 
 EMBED = {"proc": None, "lock": threading.Lock()}
@@ -668,6 +757,8 @@ def rag_embedder():
         if p is None or p.poll() is not None:
             if not STATE["server_bin"]:
                 raise RuntimeError("--rag-embed-gguf needs --server")
+            if port_busy(port):
+                raise RuntimeError(f"port {port} (embedding sidecar) is already in use")
             cmd = [STATE["server_bin"], "-m", gguf, "--embedding", "--pooling", "mean", "-ngl",
                    str(STATE.get("rag_embed_ngl", 0)), "-c", "2048", "-b", "2048", "-ub", "2048",
                    "--port", str(port), "--host", "127.0.0.1", "--alias", "rag-embed"]
@@ -707,11 +798,13 @@ def rag_context(req: dict, msgs: list) -> tuple[list, list]:
     return msgs[:i] + [ctx] + msgs[i:], hits
 
 
-def proxy(path, payload, stream_to=None):
+def proxy(path, payload, stream_to=None, hold_done=False):
     """Forward to the running llama-server. Streams SSE when asked.
 
     Streaming matters here: on an iGPU at a few tokens per second, a
     non-streaming chat window looks indistinguishable from a hang.
+    With hold_done the final [DONE] is not forwarded (a tool round follows),
+    and streamed tool calls are assembled and returned.
     """
     if not server_running():
         raise RuntimeError("no model loaded")
@@ -723,19 +816,29 @@ def proxy(path, payload, stream_to=None):
         with urllib.request.urlopen(req, timeout=900) as r:
             return json.loads(r.read())
     # Stream through untouched, keeping a copy of the text for stats.
-    text = []
+    text, calls, finish = [], {}, None
     with urllib.request.urlopen(req, timeout=900) as r:
         for raw in r:
+            line = raw.decode(errors="replace").strip()
+            if hold_done and line.startswith("data:") and line[5:].strip() == "[DONE]":
+                continue
             stream_to.write(raw)
             stream_to.flush()
-            line = raw.decode(errors="replace").strip()
             if line.startswith("data:") and "[DONE]" not in line:
                 try:
-                    delta = json.loads(line[5:])["choices"][0].get("delta") or {}
+                    ch = json.loads(line[5:])["choices"][0]
+                    delta = ch.get("delta") or {}
                     text.append(delta.get("content") or "")
+                    finish = ch.get("finish_reason") or finish
+                    for tc in delta.get("tool_calls") or []:
+                        c = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "arguments": ""})
+                        c["id"] = tc.get("id") or c["id"]
+                        fn = tc.get("function") or {}
+                        c["name"] += fn.get("name") or ""
+                        c["arguments"] += fn.get("arguments") or ""
                 except (ValueError, KeyError, IndexError, TypeError):
                     pass
-    return {"text": "".join(text)}
+    return {"text": "".join(text), "tool_calls": [calls[k] for k in sorted(calls)], "finish_reason": finish}
 
 
 # ------------------------------------------------------- OpenAI-compatible API
@@ -1156,6 +1259,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/api/jobs"):
             return self._jobs_get()
+        if self.path == "/api/mcp":
+            hub = mcp_hub()
+            return self._json(200, {"servers": hub.status() if hub else [], "config": STATE.get("mcp_config"),
+                                    "tools": len(hub.openai_tools()) if hub else 0})
         if self.path == "/api/rag":
             return self._json(200, {"collections": rag_store().list(),
                                     "embedder": bool(STATE.get("rag_embed") or STATE.get("rag_embed_gguf"))})
@@ -1276,6 +1383,22 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path.startswith("/api/rag/"):
                 return self._rag_post()
+
+            if self.path == "/api/tools/approve":
+                req = self._read()
+                with APPROVALS_LOCK:
+                    a = APPROVALS.get(str(req.get("key", "")))
+                    if a:
+                        a["allow"] = bool(req.get("allow"))
+                        a["event"].set()
+                return self._json(200 if a else 404, {"ok": bool(a)})
+
+            if self.path == "/api/mcp/reload":
+                hub = mcp_hub()
+                if hub is None:
+                    return self._json(400, {"error": "no MCP config (--mcp-config)"})
+                hub.connect()
+                return self._json(200, {"servers": hub.status(), "config": str(hub.config_path)})
 
             if self.path == "/api/stats/ingest":
                 req = self._read(8 * 1024 * 1024)
@@ -1410,7 +1533,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {json.dumps({'sources': sources})}\n\n".encode())
                 touch(+1)
                 try:
-                    out = proxy("/v1/chat/completions", payload, stream_to=self.wfile)
+                    hub = mcp_hub() if req.get("tools") else None
+                    if hub is not None and hub.openai_tools():
+                        out = chat_with_tools(self.wfile, payload, msgs, hub)
+                    else:
+                        out = proxy("/v1/chat/completions", payload, stream_to=self.wfile)
                     note_reply(target, msgs, out["text"])
                 except Exception as e:
                     self.wfile.write(
@@ -1451,7 +1578,7 @@ h1{margin:0;font-size:15px;font-weight:600}
 main{flex:1;display:grid;grid-template-columns:330px 1fr;min-height:0}
 @media(max-width:800px){main{grid-template-columns:1fr}aside{max-height:40vh;border-right:none;border-bottom:1px solid var(--line)}}
 aside{border-right:1px solid var(--line);overflow-y:auto;padding:.7rem;background:var(--panel)}
-.tabs{display:flex;gap:.3rem;margin-bottom:.6rem}.tabs button{flex:1}
+.tabs{display:flex;gap:.25rem;margin-bottom:.6rem;flex-wrap:wrap}.tabs button{flex:1 1 auto;min-width:0;padding:.35rem .45rem;font-size:12.5px}
 section.chat{display:flex;flex-direction:column;min-height:0;min-width:0}
 .m{border:1px solid var(--line);border-radius:8px;padding:.5rem .65rem;margin-bottom:.4rem;cursor:pointer;background:var(--panel);position:relative}
 .m:hover{background:var(--soft)}.m.sel{border-color:var(--acc);background:var(--soft)}
@@ -1490,6 +1617,9 @@ form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5re
 table.st{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:.4rem}
 table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px solid var(--line)}
 #modelPick{width:auto;max-width:260px}
+.tool{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:.35rem .5rem;margin:.3rem 0;background:var(--code)}
+.tool .tn{font:600 12px ui-monospace,monospace}.tool pre{white-space:pre-wrap;margin:.2rem 0;font:12px ui-monospace,monospace;max-height:220px;overflow:auto}
+.tool button{font-size:11px;padding:.1rem .5rem;margin-right:.3rem}
 .src{font-size:12px;color:var(--mut);margin-top:.3rem}.src details{margin:.1rem 0}.src summary{cursor:pointer}
 .src pre{white-space:pre-wrap;font:12px ui-monospace,monospace;background:var(--code);padding:.4rem;border-radius:5px;margin:.2rem 0}
 </style>
@@ -1508,6 +1638,13 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
     <button data-tab="local">Models</button>
     <button data-tab="hub">Hub</button>
     <button data-tab="docs">Docs</button>
+    <button data-tab="tools">Tools</button>
+  </div>
+  <div id="tab-tools" style="display:none">
+    <div class="note">MCP servers whose tools the model may call when <b>tools</b> is on under the chat. Every call asks first unless the server's <code>autoApprove</code> allows it.</div>
+    <div id="mcpcfg" class="note"></div>
+    <button id="mcpreload" style="width:100%;margin:.4rem 0">Reconnect / reload config</button>
+    <div id="mcplist"></div>
   </div>
   <div id="tab-docs" style="display:none">
     <div class="note">Document collections for chat. Pick one under the chat ("docs") and replies cite the passages they used.</div>
@@ -1569,6 +1706,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div class="dials">
     <span>preset</span><select id="preset"></select>
     <span title="retrieve passages from a document collection for each message">docs</span><select id="ragPick"><option value="">none</option></select>
+    <label id="toolsBox" style="display:none;margin:0" title="let the model call MCP tools (each call asks first)"><input type="checkbox" id="toolsOn"> tools</label>
     <span>suppression α</span>
     <input type="range" id="alpha" min="0" max="1" step="0.05" value="1" disabled>
     <span id="av">1.00</span>
@@ -1630,7 +1768,7 @@ $('#api').onclick=async()=>{try{await navigator.clipboard.writeText(location.ori
 
 // tabs
 $$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x===b));
-  ['chats','local','hub','docs'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
+  ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
 
 // ---------- models
 async function refresh(){
@@ -1733,24 +1871,35 @@ function bubble(role,content,extra={}){
   const d=document.createElement('div'); d.className='msg';
   d.innerHTML=`<div class="who">${role==='user'?'you':'assistant'}<span class="acts"></span></div>`+
     (extra.think!==undefined?`<details class="think"><summary>reasoning</summary><div></div></details>`:'')+
-    `<div class="imgs"></div><div class="body"></div><div class="src"></div><div class="stats"></div>`;
+    `<div class="imgs"></div><div class="tools"></div><div class="body"></div><div class="src"></div><div class="stats"></div>`;
   d.querySelector('.imgs').innerHTML=imagesOf(content).map(u=>`<img src="${esc(u)}" alt="attached image">`).join('');
   d.querySelector('.body').innerHTML=render(textOf(content));
   if(extra.think) d.querySelector('.think div').textContent=extra.think;
   if(extra.stats) d.querySelector('.stats').textContent=extra.stats;
   if(extra.sources) showSources(d.querySelector('.src'),extra.sources);
+  for(const t of extra.tools||[]) toolCard(d.querySelector('.tools'),t);
   if(role==='assistant'){ const a=d.querySelector('.acts');
     a.innerHTML='<button data-a="copy">copy</button><button data-a="regen">regenerate</button>';
     a.querySelector('[data-a=copy]').onclick=()=>navigator.clipboard.writeText(d.querySelector('.body').textContent);
     a.querySelector('[data-a=regen]').onclick=regenerate; }
   $('#log').appendChild(d); $('#log').scrollTop=1e9;
-  return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats'), src:d.querySelector('.src')};
+  return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats'), src:d.querySelector('.src'), tools:d.querySelector('.tools')};
+}
+function toolCard(box,t){
+  let el=box.querySelector(`[data-k="${t.key}"]`);
+  if(!el){ el=document.createElement('div'); el.className='tool'; el.dataset.k=t.key; box.appendChild(el); }
+  const args=typeof t.arguments==='string'?t.arguments:JSON.stringify(t.arguments,null,1);
+  const state=t.result?(t.result.ok?'<span class="okc">done</span>':'<span class="bad">failed</span>'):(t.needs_approval&&!t.decided?'<span class="warn">waiting for you</span>':'<span>running…</span>');
+  el.innerHTML=`<span class="tn">🔧 ${esc(t.name)}</span> ${state}<details ${t.needs_approval&&!t.decided?'open':''}><summary>arguments</summary><pre>${esc(args)}</pre></details>`+
+    (t.needs_approval&&!t.decided&&!t.result?`<button class="pri" data-a="1">Allow</button><button data-a="0">Deny</button>`:'')+
+    (t.result?`<details><summary>result</summary><pre>${esc(t.result.text)}</pre></details>`:'');
+  el.querySelectorAll('button[data-a]').forEach(b=>b.onclick=async()=>{ t.decided=true; toolCard(box,t); await post('/api/tools/approve',{key:t.key,allow:b.dataset.a==='1'}); });
 }
 function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
 function renderChat(){
   $('#log').innerHTML='';
   if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from the Models tab, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
-  for(const m of chat.messages) bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources});
+  for(const m of chat.messages) bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools});
 }
 
 // ---------- images
@@ -1775,11 +1924,11 @@ $('#f').onsubmit=async e=>{
 async function regenerate(){ if(busy) return; while(chat.messages.length && chat.messages.at(-1).role==='assistant') chat.messages.pop(); renderChat(); await stream(); }
 async function stream(){
   busy=true; $('#send').textContent='Stop'; ctrl=new AbortController();
-  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null;
+  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[];
   try{
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
-        rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined})});
+        rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined})});
     if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} out.body.textContent='error: '+e; throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
       if(rt){ routeNote = rt.mode==='auto' ? `auto → ${rt.model}: ${rt.reason}` : `model: ${rt.model}${rt.mode==='manual'?' (chosen manually)':''}`;
@@ -1795,6 +1944,8 @@ async function stream(){
         let j; try{ j=JSON.parse(d) }catch{ continue }
         if(j.error){ out.body.textContent='error: '+(j.error.message||j.error); continue; }
         if(j.sources){ sources=j.sources; showSources(out.src,sources); continue; }
+        if(j.tool_call){ tools.push(j.tool_call); toolCard(out.tools,j.tool_call); $('#log').scrollTop=1e9; continue; }
+        if(j.tool_result){ const t=tools.find(x=>x.key===j.tool_result.key); if(t){ t.result=j.tool_result; t.decided=true; toolCard(out.tools,t); } continue; }
         if(j.usage) usage=j.usage; if(j.timings) timings=j.timings;
         const delta=j.choices?.[0]?.delta||{};
         if((delta.reasoning_content||delta.content) && !tFirst) tFirst=performance.now();
@@ -1811,7 +1962,7 @@ async function stream(){
   const stats=[ntok?`${ntok} tokens`:null, tps?`${tps.toFixed(1)} tok/s`:null, tFirst?`first token ${((tFirst-t0)/1000).toFixed(2)}s`:null].filter(Boolean).join(' · ');
   const fullStats=[routeNote,stats].filter(Boolean).join(' · ');
   out.stats.textContent=fullStats;
-  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats:fullStats,sources:sources||undefined}); await persist(); }
+  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined}); await persist(); }
   status(); refresh();
   busy=false; $('#send').textContent='Send';
 }
@@ -1884,7 +2035,19 @@ $('#ragq').onkeydown=async e=>{ if(e.key!=='Enter') return; const r=await post('
   $('#raghits').innerHTML=r.ok?(j.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre style="white-space:pre-wrap">${esc(h.text)}</pre></details>`).join('')||'no match'):esc(j.error); };
 $('#dropcoll').onclick=async()=>{ if(!confirm('Delete collection '+curColl+'?')) return; await post('/api/rag/delete',{collection:curColl}); $('#collpanel').style.display='none'; colls(); };
 
-refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); setInterval(status,4000);
+// ---------- MCP tools
+async function mcp(reload){
+  const r=reload?await (await post('/api/mcp/reload',{})).json():await (await fetch('/api/mcp')).json();
+  if(r.error){ $('#mcplist').innerHTML='<span class="bad">'+esc(r.error)+'</span>'; return; }
+  $('#mcpcfg').innerHTML=r.config?'config: <code>'+esc(r.config)+'</code>':'No MCP config. Create <code>~/.neuronscope/mcp.json</code> (see docs/STUDIO.md) and restart, or pass --mcp-config.';
+  const sv=r.servers||[]; const n=sv.reduce((a,x)=>a+(x.connected?x.tools.length:0),0);
+  $('#toolsBox').style.display=n?'':'none';
+  $('#mcplist').innerHTML=sv.map(x=>`<div class="m"><div class="mn">${esc(x.name)} <span class="tag">${esc(x.transport)}</span>${x.disabled?'<span class="tag">disabled</span>':x.connected?'<span class="tag okc">connected</span>':'<span class="tag bad">down</span>'}${x.auto_approve===true?'<span class="tag warn">auto-approve all</span>':''}</div>
+    <div class="mm">${x.error?'<span class="bad">'+esc(x.error)+'</span>':x.tools.map(t=>`<div title="${esc(t.description)}">${esc(t.name)}${Array.isArray(x.auto_approve)&&x.auto_approve.includes(t.name)?' <span class="tag">auto</span>':''}</div>`).join('')}</div></div>`).join('');
+}
+$('#mcpreload').onclick=()=>mcp(true);
+
+refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); setInterval(status,4000);
 </script>"""
 
 
@@ -1941,6 +2104,8 @@ def main(argv=None):
     p.add_argument("--allow-remote-jobs", action="store_true",
                    help="allow /jobs on a non-loopback bind (jobs can train models and run model-written code)")
     p.add_argument("--no-jobs", action="store_true", help="disable /jobs entirely")
+    p.add_argument("--mcp-config", default=str(ns_mcp.DEFAULT_CONFIG),
+                   help="MCP servers for chat tools (mcpServers JSON, as in LM Studio / Claude Desktop)")
     p.add_argument("--rag-dir", default=os.path.expanduser("~/.neuronscope/rag"), help="document collections")
     p.add_argument("--rag-embed", help="URL[@model] of an OpenAI-compatible embeddings endpoint for dense retrieval")
     p.add_argument("--rag-embed-gguf", help="embedding GGUF; Studio runs it with llama-server --embedding on demand")
@@ -1976,6 +2141,7 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    STATE.update(mcp_config=a.mcp_config if os.path.exists(os.path.expanduser(a.mcp_config)) else None, mcp=None)
     STATE.update(rag_dir=a.rag_dir, rag_embed=a.rag_embed, rag_embed_gguf=a.rag_embed_gguf,
                  rag_embed_ngl=a.rag_embed_ngl, rag=None)
     if a.no_jobs:
@@ -2020,6 +2186,8 @@ def main(argv=None):
         stop_server()
         if EMBED["proc"] is not None and EMBED["proc"].poll() is None:
             EMBED["proc"].terminate()
+        if STATE.get("mcp") is not None:
+            STATE["mcp"].close()
     return 0
 
 

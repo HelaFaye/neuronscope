@@ -38,10 +38,10 @@ that. Studio handles everything around it.
 | **Rolling per-model stats** (graded answers, H-Neuron activations, live abstentions) | no | yes; models without stats are flagged ⚠ |
 | Remote access | LM Link (proprietary) | `--host` + token + TLS |
 | Chat with your documents (RAG) | yes | yes; BM25 with no model, or hybrid with any embedding GGUF / endpoint; replies cite passages |
+| MCP client: chat can call tools from MCP servers | yes | yes; stdio or streamable HTTP, `mcp.json` in the same format; each call asks first unless auto-approved |
 | **Jobs page**: TestQA, deficit datasets, fine-tuning, merge/GGUF, SWE-bench, LiveBench, CLIP_benchmark from the browser | no | yes, at `/jobs` |
 
-Not included: RAG and an MCP client. Both are project-sized. The transfer
-system ships its own MCP *server* (see [TRANSFER.md](TRANSFER.md)).
+The transfer system also ships an MCP *server* (see [TRANSFER.md](TRANSFER.md)).
 
 ## OpenAI-compatible API
 
@@ -153,6 +153,35 @@ to mix in vectors from another. Collections live in `~/.neuronscope/rag`
 python scripts/rag.py add --collection notes docs/*.md
 python scripts/rag.py search --collection notes "how does auto routing pick a model"
 ```
+
+## Tools (MCP)
+
+Studio connects to the MCP servers listed in `~/.neuronscope/mcp.json`
+(`--mcp-config`), in the format LM Studio and Claude Desktop use:
+
+```json
+{"mcpServers": {
+  "files":  {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]},
+  "search": {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer ..."}},
+  "clock":  {"command": "python", "args": ["clock_server.py"], "autoApprove": ["now"]},
+  "old":    {"command": "...", "disabled": true}
+}}
+```
+
+Tick **tools** under the chat and the model is offered every connected tool
+(as `<server>__<tool>`; llama-server's Jinja templates, on by default, turn
+them into the model's native tool format). When the model calls one, the call
+and its arguments appear in the reply with **Allow** / **Deny**; nothing runs
+until you choose, unless the server's `autoApprove` is `true` or lists that
+tool. Results are shown under the call and fed back to the model, for up to 8
+rounds per message. A declined call is reported to the model as declined.
+
+The **Tools** tab shows each server's status and tools, and reconnects after
+you edit the file. Stdio servers' logs go to `~/.neuronscope/mcp-logs/`.
+`python scripts/mcp_client.py tools` checks a config from the command line.
+
+MCP servers run with your permissions. Only configure servers you trust, and
+keep `autoApprove` to read-only tools.
 
 ## Jobs
 

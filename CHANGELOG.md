@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Security
+- Studio refuses to start a backend on a port something else already holds
+  (an orphaned server would otherwise answer the health check).
 - Tuning worker results are signed (HMAC-SHA256, key derived from the worker
   token, per-job nonce); the controller refuses unsigned, altered or replayed
   results.
@@ -31,6 +33,9 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Studio MCP client: tools from MCP servers (stdio or streamable HTTP,
+  `mcp.json` in LM Studio / Claude Desktop format) offered to the chat model;
+  every call is shown with Allow/Deny unless auto-approved; Tools tab.
 - Studio RAG: document collections (Docs tab, `scripts/rag.py`), BM25 or hybrid
   retrieval with an embedding GGUF sidecar or any embeddings endpoint, cited
   passages under each reply.
