@@ -32,6 +32,20 @@
   redacted from output. Legacy inline tokens are migrated.
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
+### Fixed
+- Godot and three.js clients drew a narrow strip for most traces: neuron columns
+  were spaced 0.06 units apart and the camera was fixed. Both now fit the field
+  (640 units wide whatever the trace width) and frame it. three.js keeps the
+  current token at a fixed depth, so long traces no longer drift past the
+  camera.
+- Godot HUD never showed FLAGGED (`Array.has` does not equate 146 with the
+  JSON float 146.0). `NS_FRAME` / `NS_PAUSED` open the client on one token.
+- The three.js viewer says when three.js cannot be loaded instead of showing a
+  black page.
+- Hub: the Live service can use a patched llama-server (`live source`) instead
+  of always simulating; config values that would be read as flags are refused.
+- Studio on phones: the chat log is no longer squeezed out by the sidebar.
+
 ### Added
 - Studio Link: one-time pairing links (certificate fingerprint pinned) give
   browsers and API clients their own revocable device tokens; linked hosts

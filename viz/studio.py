@@ -1860,7 +1860,9 @@ h1{margin:0;font-size:15px;font-weight:600}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--line);margin-right:.35rem}.dot.on{background:var(--ok)}
 .chip{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:999px;padding:.1rem .6rem;color:var(--mut);cursor:pointer;background:var(--bg)}
 main{flex:1;display:grid;grid-template-columns:330px 1fr;min-height:0}
-@media(max-width:800px){main{grid-template-columns:1fr}aside{max-height:40vh;border-right:none;border-bottom:1px solid var(--line)}}
+@media(max-width:800px){main{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{max-height:30vh;border-right:none;border-bottom:1px solid var(--line)}
+  .dials{gap:.45rem .7rem;padding:.4rem .8rem}.dials input[type=range]{width:90px}#export{display:none}
+  form{padding:.5rem .8rem}#log{padding:.7rem .8rem}header{gap:.5rem}#api{display:none}}
 aside{border-right:1px solid var(--line);overflow-y:auto;padding:.7rem;background:var(--panel)}
 .tabs{display:flex;gap:.25rem;margin-bottom:.6rem;flex-wrap:wrap}.tabs button{flex:1 1 auto;min-width:0;padding:.35rem .45rem;font-size:12.5px}
 section.chat{display:flex;flex-direction:column;min-height:0;min-width:0}

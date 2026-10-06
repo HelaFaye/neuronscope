@@ -161,8 +161,16 @@ justify-content:center;text-align:center;padding:2rem;z-index:3}
 {"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
 "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
 </script>
+<script>
+// The renderer comes from unpkg. If it cannot load (offline, a blocking proxy),
+// the module below never runs; say so instead of leaving a black page.
+setTimeout(()=>{ if(!window.__nsReady){ const w=document.createElement('div'); w.className='warn';
+  w.innerHTML='Could not load three.js from unpkg.com.<br>This viewer needs that CDN, or use the Godot '+
+    'client (viz/godot) or viz/timeline.py, which work offline.'; document.body.appendChild(w); } }, 10000);
+</script>
 <script type="module">
 import * as THREE from 'three';
+window.__nsReady = true;
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
 import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
@@ -186,17 +194,21 @@ const cIdle = hex('#2a2a3a'), cAct = hex(theme.active), cHal = hex(theme.halluc)
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x05050a, 0.0016);
 const cam = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 6000);
-cam.position.set(340, 210, 430);
+// Fit the view to this trace: neuron columns span W units whatever the trace's
+// width (512 bins or 14336 neurons), layers are 8 units apart.
+const W = 640, XS = W/Math.max(1, meta.neurons), H = L*8;
+const D = 0.65*Math.max(W, H);
+cam.position.set(W/2 + 0.35*D, H/2 + 0.3*D, 0.95*D);
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,1.75));
 renderer.setSize(innerWidth, innerHeight);
 const controls = new OrbitControls(cam, canvas);
 controls.enableDamping = true;
-controls.target.set(meta.neurons/2*0.06, L*4, T*3);
+controls.target.set(W/2, H/2, 0);
 
 const pos = new Float32Array(N*3), col = new Float32Array(N*3), siz = new Float32Array(N);
-for(let i=0;i<N;i++){ pos[i*3]=nx[i]*0.06; pos[i*3+1]=ly[i]*8; pos[i*3+2]=0; }
+for(let i=0;i<N;i++){ pos[i*3]=nx[i]*XS; pos[i*3+1]=ly[i]*8; pos[i*3+2]=0; }
 const geo = new THREE.BufferGeometry();
 geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
 geo.setAttribute('color', new THREE.BufferAttribute(col,3));
@@ -229,7 +241,9 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),
 composer.addPass(bloom);
 
 const tmp = new THREE.Color();
-function paint(geometry, t, dim){
+// The current token sits at z=0; trail k (an earlier token) sits k+1 steps behind it,
+// so the field stays in view however long the trace is.
+function paint(geometry, t, dim, dz){
   const c = geometry.getAttribute('color'), s = geometry.getAttribute('size');
   const p = geometry.getAttribute('position');
   const base = t*N;
@@ -239,7 +253,7 @@ function paint(geometry, t, dim){
     const g = (st===0?0.35:0.6+0.8*v)*dim;
     c.array[i*3]=tmp.r*g; c.array[i*3+1]=tmp.g*g; c.array[i*3+2]=tmp.b*g;
     s.array[i] = (st===2?4.2:st===1?2.4:1.1)*(0.6+0.9*v);
-    p.array[i*3+2] = t*3;
+    p.array[i*3+2] = dz;
   }
   c.needsUpdate=true; s.needsUpdate=true; p.needsUpdate=true;
 }
@@ -254,8 +268,8 @@ document.getElementById('track').onclick=e=>{
   t=Math.round((e.clientX-r.left)/r.width*(T-1)); update();};
 
 function update(){
-  paint(geo, t, 1.0);
-  for(let k=0;k<trailN;k++) paint(trails[k].geometry, Math.max(0,t-(k+1)), 0.45);
+  paint(geo, t, 1.0, 0);
+  for(let k=0;k<trailN;k++) paint(trails[k].geometry, Math.max(0,t-(k+1)), 0.45, -(k+1)*6);
   const flagged = meta.flagged.includes(t);
   hud.innerHTML = `<b>${meta.model||'trace'}</b><br>`+
     `${meta.frames} tokens · ${meta.cells.toLocaleString()} cells · ${meta.layers} layers<br>`+

@@ -25,6 +25,7 @@ import http.cookies
 import json
 import os
 import queue
+import re
 import signal
 import socket
 import subprocess
@@ -85,12 +86,13 @@ def declare(root, py):
             "port": 7890,
             "script": "viz/stream.py",
             "args": lambda port, cfg: [
-                py, "-u", os.path.join(root, "viz/stream.py"),
-                "--port", str(port), "--simulate",
+                py, "-u", os.path.join(root, "viz/stream.py"), "--port", str(port),
+                # a llama-server patched by llama-tools/server-activations, else a simulation
+                *(["--source", cfg["live_source"]] if cfg.get("live_source") else ["--simulate"]),
             ],
             "health": "/api/tiers",
             "needs": [],
-            "desc": "Activation stream. Simulated until the fork lands.",
+            "desc": "Live activation stream, from a patched llama-server (or simulated).",
         },
         "replay": {
             "mode": "replay",
@@ -153,7 +155,14 @@ def acquire(name, holder, cfg=None):
         script = os.path.join(STATE["root"], svc["script"])
         if not os.path.exists(script):
             return False, f"{svc['script']} not found", None
-        cfg = cfg or {}
+        cfg = {k: str(v).strip() for k, v in (cfg or {}).items()
+               if k in ("server_bin", "models_dir", "trace", "live_source")}
+        for k, v in cfg.items():
+            # These become argv values: one starting with "-" would be read as a flag.
+            if v.startswith("-") or any(ord(c) < 32 for c in v):
+                return False, f"{k}: invalid value", None
+        if cfg.get("live_source") and not re.match(r"^https?://[^\s]+$", cfg["live_source"]):
+            return False, "live source must be an http(s) URL of a patched llama-server", None
         missing = [n for n in svc["needs"] if not cfg.get(n)]
         if missing:
             return False, f"needs {', '.join(missing)}", None
@@ -474,6 +483,8 @@ label{display:block;font-size:12px;color:var(--fg-dim);margin:8px 0 3px}
   <input id="models_dir" placeholder="/path/to/.models">
   <label>trace session (for Replay)</label>
   <input id="trace" placeholder="runs/trace-abc">
+  <label>live source (for Live): a llama-server patched with llama-tools/server-activations; empty = simulated</label>
+  <input id="live_source" placeholder="http://127.0.0.1:8080">
 </div>
 
 <div class="card" id="framecard" style="display:none">
@@ -497,8 +508,9 @@ const HOLDER = Math.random().toString(36).slice(2);
 let open=null, es=null;
 
 const cfg=()=>({server_bin:$('#server_bin').value.trim(),
-  models_dir:$('#models_dir').value.trim(), trace:$('#trace').value.trim()});
-for(const k of ['server_bin','models_dir','trace']){
+  models_dir:$('#models_dir').value.trim(), trace:$('#trace').value.trim(),
+  live_source:$('#live_source').value.trim()});
+for(const k of ['server_bin','models_dir','trace','live_source']){
   try{ const v=localStorage.getItem('ns_'+k); if(v) $('#'+k).value=v; }catch{}
   $('#'+k).oninput=e=>{ try{ localStorage.setItem('ns_'+k,e.target.value) }catch{} };
 }

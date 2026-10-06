@@ -6,6 +6,7 @@ extends Node3D
 ## the three frontends cannot drift on what counts as "hallucinating".
 ##
 ##   NS_API=http://127.0.0.1:7880 godot --path viz/godot
+##   NS_FRAME=146 NS_PAUSED=1 ...    # open on one token, paused (for screenshots)
 ##
 ## MultiMesh keeps the whole field in one draw call, and glow runs at half
 ## resolution, because the GPU is usually also running the model.
@@ -25,7 +26,10 @@ var state := PackedByteArray()
 var frame := 0
 var playing := true
 var accum := 0.0
-var orbit := 0.0
+var orbit := PI / 2.0        # start in front of the field (+z)
+var xs := 0.06               # x units per neuron column, fitted to the trace in _build
+var center := Vector3.ZERO
+var radius := 520.0
 
 @onready var cells: MultiMeshInstance3D = $Cells
 @onready var hud: Label = $UI/HUD
@@ -88,10 +92,22 @@ func _on_trace(body: PackedByteArray) -> void:
 	intensity = body.slice(o, o + T * N * 4).to_float32_array()
 	o += T * N * 4
 	state = body.slice(o, o + T * N)
+	var start := OS.get_environment("NS_FRAME")
+	if start.is_valid_int():
+		frame = clampi(start.to_int(), 0, max(0, T - 1))
+	playing = OS.get_environment("NS_PAUSED") != "1"
 	_build(L)
 
 
-func _build(_layers: int) -> void:
+func _build(layers: int) -> void:
+	# Fit the field to the view: neuron columns span 640 units whatever the
+	# trace's width (512 bins or 14336 neurons); layers are 8 units apart. The
+	# same numbers as the three.js client in viz/bloom.py.
+	var width := 640.0
+	xs = width / max(1, int(meta.get("neurons", 512)))
+	var height := layers * 8.0
+	center = Vector3(width / 2.0, height / 2.0, 0.0)
+	radius = 0.65 * max(width, height)
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = true
@@ -104,7 +120,7 @@ func _build(_layers: int) -> void:
 		# transform buffer is written once.
 		mm.set_instance_transform(i, Transform3D(
 			Basis.IDENTITY,
-			Vector3(neuron_of[i] * 0.06, layer_of[i] * 8.0, 0.0)))
+			Vector3(neuron_of[i] * xs, layer_of[i] * 8.0, 0.0)))
 	cells.multimesh = mm
 	_paint()
 
@@ -133,9 +149,10 @@ func _paint() -> void:
 		var s: float = (4.2 if st == 2 else 2.4 if st == 1 else 1.1) * (0.6 + 0.9 * v)
 		mm.set_instance_transform(i, Transform3D(
 			Basis.IDENTITY.scaled(Vector3(s, s, s)),
-			Vector3(neuron_of[i] * 0.06, layer_of[i] * 8.0, frame * 3.0)))
+			Vector3(neuron_of[i] * xs, layer_of[i] * 8.0, 0.0)))
 
-	var flagged: bool = meta.flagged.has(frame)
+	# JSON numbers arrive as floats, and Array.has() does not equate 146 with 146.0.
+	var flagged: bool = meta.flagged.has(float(frame)) or meta.flagged.has(frame)
 	var label: String = str(meta.labels[frame]) if frame < meta.labels.size() else ""
 	hud.text = "%s\n%d/%d  z %.2f%s\n%s" % [
 		str(meta.get("model", "trace")), frame + 1, n_frames,
@@ -151,10 +168,12 @@ func _process(delta: float) -> void:
 			accum = 0.0
 			frame = (frame + 1) % n_frames
 			_paint()
-	orbit += delta * 0.08
-	var r := 520.0
-	cam.position = Vector3(cos(orbit) * r + 200.0, 230.0, sin(orbit) * r + n_frames * 1.5)
-	cam.look_at(Vector3(200.0, 90.0, n_frames * 1.5), Vector3.UP)
+	# A slow sway in front of the field rather than a full orbit: from behind, the
+	# billboards are the same picture mirrored, and edge-on the field vanishes.
+	orbit += delta * 0.15
+	var a := PI / 2.0 + 0.45 * sin(orbit)
+	cam.position = center + Vector3(cos(a) * radius, 0.3 * radius, sin(a) * radius)
+	cam.look_at(center, Vector3.UP)
 
 
 func _unhandled_input(e: InputEvent) -> void:
