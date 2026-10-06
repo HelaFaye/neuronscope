@@ -58,6 +58,10 @@
   (`<0xNN>`) to nothing, so characters outside the vocabulary vanished from
   decoded text and trace labels; multi-byte characters now land on the last
   of their byte tokens.
+- Default theme is `dark`: a dark field with blue activations and red-orange
+  flagged H-neurons (bloom.py, timeline.py, Godot via the API, Studio's 3D
+  view, and the Live page). Studio, Jobs and the pairing pages open in dark
+  mode unless light was chosen with the toggle.
 - Hub: Replay lists saved traces (Studio checks and `runs/`) to pick from.
 - Docs: VISUALIZATION.md "Which view when" and how to read the 3D views.
 - Removed tabs with nothing behind them: the planned Recipes tab, and the

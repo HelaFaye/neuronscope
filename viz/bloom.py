@@ -427,7 +427,7 @@ def main():
     p.add_argument("session", nargs="?", help="trace session from scripts/trace_sample.py")
     p.add_argument("--demo", action="store_true",
                    help="a synthetic trace, to try the three.js and Godot clients without a model")
-    p.add_argument("--theme", default="ember", choices=sorted(THEMES))
+    p.add_argument("--theme", default="dark", choices=sorted(THEMES))
     p.add_argument("--h-neurons")
     p.add_argument("--active-pct", type=float, default=97.0)
     add_flag_args(p)

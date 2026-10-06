@@ -15,7 +15,7 @@ flagged when it is firing *and* the classifier score for that token is high, so
 the marking tracks the moment rather than the membership.
 
     python viz/timeline.py runs/trace-abc
-    python viz/timeline.py runs/trace-abc --theme ember --play
+    python viz/timeline.py runs/trace-abc --play
     python viz/timeline.py runs/trace-abc --dump frames.npz    # headless
 
 On effects: pygfx has no bloom or glow post-processing, so themes encode state
@@ -56,7 +56,7 @@ def add_flag_args(p):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("session")
-    p.add_argument("--theme", default="ember", choices=sorted(THEMES))
+    p.add_argument("--theme", default="dark", choices=sorted(THEMES))
     p.add_argument("--h-neurons", help="models/h_neurons.json")
     p.add_argument("--active-pct", type=float, default=97.0,
                    help="percentile of CETT above which a neuron counts active")

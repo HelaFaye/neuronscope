@@ -75,3 +75,15 @@ def test_clients_share_sizes_and_rate():
         b = float(re.search(rf"const {name} := ([\d.]+)", gd).group(1))
         assert a == b, name
     assert "billboard_keep_scale = true" in (ROOT / "viz" / "godot" / "main.tscn").read_text()
+
+
+def test_default_theme_is_dark_blue_and_red_orange():
+    import bloom
+    import timeline
+    t = bloom.THEMES["dark"]
+    assert (t["active"], t["halluc"]) == ("#3D8BFF", "#FF4D1A")
+    for mod in (bloom, timeline):
+        src = open(mod.__file__).read()
+        assert 'p.add_argument("--theme", default="dark"' in src
+    studio_src = (Path(bloom.__file__).parent / "studio.py").read_text()
+    assert 'or "dark"' in studio_src and "localStorage.getItem('ns-theme')||'dark'" in studio_src

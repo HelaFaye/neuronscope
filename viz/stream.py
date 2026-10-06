@@ -293,7 +293,7 @@ PAGE = r"""<!DOCTYPE html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>NeuronScope live</title>
 <style>
-:root{--hot:#F09595;--act:#EF9F27}
+:root{--hot:#FF4D1A;--act:#3D8BFF}
 *{box-sizing:border-box}
 body{margin:0;background:#05050a;color:#c9c9d2;font:14px system-ui;
 overscroll-behavior:none;-webkit-text-size-adjust:100%}
@@ -382,7 +382,7 @@ function draw(){
       // busy, not that a token is fabricated. Only flag when scored.
       const hot=(f.scored!==false) && f.s>1.5 && c.v>0.9;
       cx.globalAlpha=hot?1:(0.16+0.5*(1-age));
-      cx.fillStyle=hot?'#F09595':'#EF9F27';
+      cx.fillStyle=hot?'#FF4D1A':'#3D8BFF';
       cx.beginPath();
       cx.arc(x0+jitter, y, hot?3.2:1.5*(0.5+c.v), 0, 6.283); cx.fill();
     });
@@ -390,7 +390,7 @@ function draw(){
   cx.globalAlpha=1;
   const sw=sc.clientWidth, sh=sc.clientHeight;
   sx.clearRect(0,0,sw,sh);
-  sx.strokeStyle='#F09595'; sx.lineWidth=2; sx.beginPath();
+  sx.strokeStyle='#FF4D1A'; sx.lineWidth=2; sx.beginPath();
   frames.forEach((f,i)=>{const x=sw*i/Math.max(frames.length-1,1);
     const y=sh/2-(f.s||0)*(sh/8); i?sx.lineTo(x,y):sx.moveTo(x,y);});
   sx.stroke();

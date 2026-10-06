@@ -86,7 +86,7 @@ the hub's Replay picker, `bloom.py` and `timeline.py` all open.
 The 3D views read the same way everywhere:
 
 - **dim dots**: neurons that fire at least once in the reply; **bright**: firing on this token;
-- **rings** (cyan in `ember`): H-neurons firing on a flagged token;
+- **rings** (red-orange in the default `dark` theme): H-neurons firing on a flagged token;
 - **risk strip** along the bottom: risk per token, the dashed line is the flag threshold, shaded columns are flagged tokens; click to jump;
 - **reply text** under it: each token shaded by its risk, flagged ones underlined, the current one outlined; click a token to jump.
 
@@ -114,7 +114,7 @@ over a region. No change to cett-dump was needed: spans are arbitrary
 python scripts/trace_sample.py --binary ... --gguf ... --tokenizer ... \
     --input_path data/consistency_samples.jsonl --qid <id> \
     --out runs/trace-<id> --bin-neurons 512 --classifier models/classifier.npz
-python viz/timeline.py runs/trace-<id> --theme ember --play
+python viz/timeline.py runs/trace-<id> --play
 ```
 
 Size is why this is per-sample: one 500-token sequence on a 32x14336 model is
@@ -179,9 +179,9 @@ so the whole field is one draw call with half-resolution glow; three.js sends
 positions once and streams only intensities.
 
 ```bash
-python viz/bloom.py runs/trace-abc --theme ember --host 0.0.0.0   # backend + web
+python viz/bloom.py runs/trace-abc --host 0.0.0.0   # backend + web
 NS_API=http://127.0.0.1:7880 godot --path viz/godot                # desktop
-python viz/timeline.py runs/trace-abc --theme ember                # analysis
+python viz/timeline.py runs/trace-abc                # analysis
 ```
 
 No trace yet? `python viz/bloom.py --demo` serves a synthetic one (a quiet
@@ -211,7 +211,8 @@ Bloom is deliberately absent from `timeline.py`. It blurs neighbours together,
 so a bright cell reads as a smear and you lose the spatial precision the view
 exists for. Use the pretty ones to show people; use pygfx to decide anything.
 
-**Themes** (`--list-themes`): `clinical`, `ember`, `cool`, `mono`. Each sets
+**Themes** (`--list-themes`): `dark` (default: blue activations, red-orange
+H-neurons on a dark field), `clinical`, `ember`, `cool`, `mono`. Each sets
 colormap, background, the two accent colours, and how state maps to point size
 and opacity. Pygfx has no bloom or glow post-processing, so there are no shader
 effects -- at a few hundred thousand points, size and opacity read better than

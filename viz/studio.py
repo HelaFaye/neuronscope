@@ -1167,7 +1167,7 @@ def trace_payload(tid):
         return None
     import bloom
     blob, meta = bloom.build_payload(path, None, 97.0, 40000)
-    out = {"blob": blob, "meta": meta, "theme": bloom.THEMES.get(STATE.get("viz_theme") or "ember")
+    out = {"blob": blob, "meta": meta, "theme": bloom.THEMES.get(STATE.get("viz_theme") or "dark")
            or next(iter(bloom.THEMES.values()))}
     with TRACES["lock"]:
         if len(TRACES["payloads"]) >= 8:
@@ -1957,6 +1957,7 @@ class Handler(BaseHTTPRequestHandler):
 _PAIR_STYLE = """<style>
 :root{--bg:#f7f7f5;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b64;--line:#e3e2dd;--acc:#2c5f8a;--accfg:#fff;--ok:#2f7d4f;--no:#b23c2e;--code:#f3f2ee;color-scheme:light}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#161615;--panel:#1e1e1c;--fg:#ecebe6;--mut:#9b9a93;--line:#34332f;--acc:#7aa7d6;--accfg:#0f0f0e;--ok:#5fb27f;--no:#e0705f;--code:#262522;color-scheme:dark}}
+:root[data-theme=dark]{--bg:#161615;--panel:#1e1e1c;--fg:#ecebe6;--mut:#9b9a93;--line:#34332f;--acc:#7aa7d6;--accfg:#0f0f0e;--ok:#5fb27f;--no:#e0705f;--code:#262522;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-sans-serif,system-ui,sans-serif;background:var(--bg);color:var(--fg)}
 header{display:flex;gap:1rem;align-items:center;padding:.6rem 1rem;border-bottom:1px solid var(--line);background:var(--panel)}
 header h1{font-size:15px;margin:0}a{color:var(--acc)}
@@ -1973,7 +1974,7 @@ code,.code{font:12.5px ui-monospace,monospace;background:var(--code);padding:.15
 table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:.3rem .25rem;border-bottom:1px solid var(--line)}
 .row{display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap}.row>div{flex:1;min-width:180px}
 label{display:block;font-size:12px;color:var(--mut);margin:.3rem 0 .1rem}
-</style>"""
+</style><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>"""
 
 PAIR_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pair device</title>""" + _PAIR_STYLE + r"""
@@ -2051,7 +2052,7 @@ load();
 
 PAGE = r"""<!DOCTYPE html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NeuronScope Studio</title><link rel="icon" href="data:,">
+<title>NeuronScope Studio</title><link rel="icon" href="data:,"><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
 <style>
 :root{--bg:#f7f7f5;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b64;--line:#e3e2dd;--ok:#2f7d4f;--no:#b23c2e;--warn:#a8701c;
   --acc:#2c5f8a;--accfg:#fff;--soft:#f0f5fa;--code:#f3f2ee;color-scheme:light}
@@ -2269,7 +2270,7 @@ function human(b){const u=["B","KB","MB","GB","TB"];let i=0;while(b>=1024&&i<4){
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b??{})});
 
 // theme
-try{const t=localStorage.getItem('ns-theme'); if(t) document.documentElement.dataset.theme=t;}catch{}
+// Dark by default (set in <head>); the toggle remembers the choice.
 $('#theme').onclick=()=>{const cur=document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
   const nx=cur==='dark'?'light':'dark'; document.documentElement.dataset.theme=nx; try{localStorage.setItem('ns-theme',nx)}catch{}};
 $('#api').textContent=location.origin+'/v1';
@@ -2607,14 +2608,14 @@ refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(
 
 LOGIN = """<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NeuronScope Studio</title>
-<style>:root{color-scheme:light dark}body{font:14px ui-sans-serif,system-ui,sans-serif;background:#faf9f7;color:#1c1c1a;
+<style>:root{color-scheme:dark}body{font:14px ui-sans-serif,system-ui,sans-serif;background:#111316;color:#e6e8eb;
 display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-form{background:#fff;border:1px solid #e3e2dd;border-radius:10px;padding:1.6rem;width:320px}
-h1{font-size:15px;margin:0 0 1rem}input{width:100%;padding:.5rem;border:1px solid #e3e2dd;
+form{background:#181b20;border:1px solid #2a2f37;border-radius:10px;padding:1.6rem;width:320px}
+h1{font-size:15px;margin:0 0 1rem}input{width:100%;padding:.5rem;border:1px solid #2a2f37;background:#20242b;color:#e6e8eb;
 border-radius:6px;font:13px ui-monospace,monospace}
-button{width:100%;margin-top:.7rem;padding:.5rem;border:1px solid #2c5f8a;background:#2c5f8a;
-color:#fff;border-radius:6px;cursor:pointer;font:500 13px ui-sans-serif,system-ui}
-.e{color:#b23c2e;font-size:13px;margin-top:.5rem;min-height:1em}</style>
+button{width:100%;margin-top:.7rem;padding:.5rem;border:1px solid #6ea8e0;background:#6ea8e0;
+color:#0d1117;border-radius:6px;cursor:pointer;font:500 13px ui-sans-serif,system-ui}
+.e{color:#ff8b7e;font-size:13px;margin-top:.5rem;min-height:1em}</style>
 <form id="f"><h1>NeuronScope Studio</h1>
 <input id="t" type="password" placeholder="access token" autofocus>
 <button>Unlock</button><div class="e" id="e"></div></form>
