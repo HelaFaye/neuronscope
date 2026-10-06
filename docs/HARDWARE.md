@@ -99,14 +99,27 @@ across all four (`-sm layer -ts 1,1,1,1`), or up to four small models side by
 side, each with its own **Visible GPUs**. It has no display outputs and a
 passive heatsink, so it needs server airflow.
 
-Verified here: `build_llama_tools.sh --backend cuda --cuda-arch 50-real
---server-activations`, run inside `nvidia/cuda:12.9.2-devel-ubuntu24.04`,
-builds cett-dump, the activation-streaming llama-server, llama-quantize and
-llama-eval-callback, with 144 sm_50 kernel images in `libggml-cuda.so`. The
-CUDA decision table is unit-tested against M10, RTX 4090 and mixed-GPU
-`nvidia-smi` output. Not verified: running on NVIDIA hardware (this
-environment has no GPU), and `docker build` of the Dockerfile end to end (it
-runs the same script).
+Verified here, without a GPU:
+
+- `docker build -f docker/llama-cuda.Dockerfile .` builds end to end: it fetches
+  the pinned llama.cpp commit, applies the activation patch, compiles 144 sm_50
+  kernel images into `libggml-cuda.so`, and ships cett-dump, the patched
+  llama-server, llama-quantize and llama-eval-callback in a 6.4 GB runtime image.
+- The image's binaries run: with the toolkit's stub `libcuda.so.1` mounted,
+  CUDA reports no devices and llama.cpp falls back to the CPU, so the container's
+  llama-server streams `/activations` frames that match PyTorch on every layer,
+  and its cett-dump matches the host build
+  (`NS_DOCKER_IMAGE=neuronscope-llama:cuda NS_DOCKER_LIBCUDA=<stub>` runs these
+  in `tests/test_llamacpp_integration.py`).
+- The CUDA decision table is unit-tested against M10, RTX 4090 and mixed-GPU
+  `nvidia-smi` output.
+
+Not verified: the CUDA kernels themselves on NVIDIA hardware.
+
+Behind a proxy that re-signs TLS, pass its CA to the build with
+`--secret id=ca,src=/path/ca.pem`. `--build-arg LLAMA_REF=master` builds the
+newest llama.cpp instead of the tested commit; the patch stops with a clear
+message if llama.cpp has moved the code it hooks into.
 
 **ROCm (AMD)**: `install.sh` detects the gfx target and picks a PyTorch ROCm
 wheel index, then runs a bf16 matmul against CPU to prove the result is

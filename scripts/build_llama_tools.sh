@@ -67,7 +67,8 @@ case "$BACKEND" in
   *) echo "backend must be cpu, vulkan, cuda, metal or hip" >&2; exit 1 ;;
 esac
 if [[ ! -d "$DIR/.git" ]]; then
-  git clone https://github.com/ggml-org/llama.cpp "$DIR"
+  # Shallow: the history is ~1 GB and nothing here needs it (--ref fetches a pinned commit).
+  git clone --depth 1 https://github.com/ggml-org/llama.cpp "$DIR"
 fi
 if [[ -n "$REF" ]]; then git -C "$DIR" fetch --depth 1 origin "$REF" && git -C "$DIR" checkout FETCH_HEAD; fi
 rm -rf "$DIR/tools/cett-dump"

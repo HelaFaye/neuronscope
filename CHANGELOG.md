@@ -47,7 +47,11 @@
   test checks each GPU's kernels and compares an fp32 matmul against the CPU.
 - `build_llama_tools.sh --backend cuda` builds for the detected GPUs
   (`--cuda-arch` to override) and refuses a CUDA 13 build for pre-Turing cards;
-  `docker/llama-cuda.Dockerfile` builds with CUDA 12.9 (sm_50 by default).
+  `docker/llama-cuda.Dockerfile` builds with CUDA 12.9 (sm_50 by default),
+  pinned to the llama.cpp commit the activation patch was tested on, with an
+  optional CA secret for TLS-intercepting proxies. Built and tested here: the
+  image's llama-server and cett-dump match PyTorch and the host build (CPU
+  fallback; no GPU in this environment). The build script now clones shallowly.
 - Studio: Visible GPUs, Split, Tensor split and Main GPU per model; the fit
   estimate uses free VRAM across all GPUs; `/api/gpus`.
 - `finetune.py` picks precision from compute capability (fp32 on Maxwell and

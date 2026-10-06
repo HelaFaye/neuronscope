@@ -131,9 +131,30 @@ def test_extraction_pipeline_matches_pytorch(tiny_gguf, tmp_path):
 SERVER = LLAMA / "build" / "bin" / "llama-server"
 
 
-@pytest.mark.skipif(not (LLAMA / "tools" / "server" / "ns_server_glue.h").exists(),
-                    reason="llama-server not patched with llama-tools/server-activations/apply_patch.py")
-def test_server_activations_match_pytorch(tiny_gguf, tmp_path):
+DOCKER_IMAGE = os.environ.get("NS_DOCKER_IMAGE", "")
+# For a CUDA image on a machine without an NVIDIA driver: a libcuda.so.1 (the
+# toolkit's stub) to mount, so the binaries load and llama.cpp falls back to CPU.
+DOCKER_LIBCUDA = os.environ.get("NS_DOCKER_LIBCUDA", "")
+
+
+def _launch(where, gguf, clf, port, env_extra):
+    """Start a patched llama-server on the host build, or inside NS_DOCKER_IMAGE."""
+    args = ["-m", "MODEL", "--port", str(port), "--parallel", "1", "-c", "256", "-ngl", "0"]
+    if where == "host":
+        args[1] = str(gguf)
+        return subprocess.Popen([str(SERVER), *args], env=dict(os.environ, **env_extra, NS_CLASSIFIER=str(clf)),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    args[1] = "/m/" + gguf.name
+    cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{gguf.parent}:/m:ro", "-v", f"{clf.parent}:/c:ro",
+           *[x for k, v in env_extra.items() for x in ("-e", f"{k}={v}")], "-e", f"NS_CLASSIFIER=/c/{clf.name}"]
+    if DOCKER_LIBCUDA:
+        cmd += ["-v", f"{DOCKER_LIBCUDA}:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro"]
+    return subprocess.Popen([*cmd, DOCKER_IMAGE, "llama-server", *args],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+@pytest.mark.parametrize("where", ["host", "docker"])
+def test_server_activations_match_pytorch(tiny_gguf, tmp_path, where):
     """The patched llama-server streams one frame per decoded token whose raw
     values are |a|/||out|| for every layer, and whose score, with the column
     norms folded in by export_classifier_bin.py --gguf, equals the classifier
@@ -146,6 +167,10 @@ def test_server_activations_match_pytorch(tiny_gguf, tmp_path):
     from transformers import LlamaForCausalLM
     import ns_common
     from extract_activations_gguf import weight_col_norms
+    if where == "host" and not (LLAMA / "tools" / "server" / "ns_server_glue.h").exists():
+        pytest.skip("llama-server not patched with llama-tools/server-activations/apply_patch.py")
+    if where == "docker" and not DOCKER_IMAGE:
+        pytest.skip("set NS_DOCKER_IMAGE (e.g. neuronscope-llama:cuda) to test the container's server")
     hf, gguf = tiny_gguf
     coef = np.random.default_rng(2).normal(size=4 * 128).astype(np.float32)
     np.savez(tmp_path / "clf.npz", coef=coef, intercept=0.25, n_layers=4, n_neurons=128)
@@ -154,12 +179,10 @@ def test_server_activations_match_pytorch(tiny_gguf, tmp_path):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = dict(os.environ, NS_ACTIVATIONS="raw", NS_CLASSIFIER=str(tmp_path / "clf.bin"))
-    proc = subprocess.Popen([str(SERVER), "-m", str(gguf), "--port", str(port), "--parallel", "1", "-c", "256",
-                             "-ngl", "0"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = _launch(where, gguf, tmp_path / "clf.bin", port, {"NS_ACTIVATIONS": "raw"})
     base = f"http://127.0.0.1:{port}"
     try:
-        for _ in range(100):
+        for _ in range(300):
             try:
                 urllib.request.urlopen(base + "/health", timeout=1).read()
                 break
@@ -201,3 +224,27 @@ def test_server_activations_match_pytorch(tiny_gguf, tmp_path):
         got = np.asarray(f["v"], dtype=np.float32)
         assert np.abs(got * wn - want).max() / np.abs(want).max() < 5e-3, k
         assert f["s"] == pytest.approx(float(want.ravel() @ coef + 0.25), rel=5e-3, abs=5e-3)
+
+
+def test_docker_cett_dump_matches_host(tiny_gguf, tmp_path):
+    """The container's cett-dump writes the same CETT as the host build."""
+    if not DOCKER_IMAGE:
+        pytest.skip("set NS_DOCKER_IMAGE to test the container's cett-dump")
+    from extract_activations_gguf import read_aggregate
+    _, gguf = tiny_gguf
+    text = "the cat sat on the mat and the dog wrote hamlet"
+    (tmp_path / "s.jsonl").write_text(json.dumps({"id": "x", "text": text, "spans": [[0, -1]]}) + "\n")
+    common = ["-ngl", "0", "-b", "512", "-c", "512", "--n-layers", "4"]
+    (tmp_path / "host").mkdir()
+    (tmp_path / "box").mkdir()
+    subprocess.run([str(CETT), "-m", str(gguf), *common, "--manifest", str(tmp_path / "s.jsonl"),
+                    "--outdir", str(tmp_path / "host")], check=True, capture_output=True)
+    cmd = ["docker", "run", "--rm", "-v", f"{gguf.parent}:/m:ro", "-v", f"{tmp_path}:/w"]
+    if DOCKER_LIBCUDA:
+        cmd += ["-v", f"{DOCKER_LIBCUDA}:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro"]
+    r = subprocess.run([*cmd, DOCKER_IMAGE, "llama-cett-dump", "-m", "/m/" + gguf.name, *common,
+                        "--manifest", "/w/s.jsonl", "--outdir", "/w/box"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-1500:]
+    _, a, seen_a, _, _ = read_aggregate(tmp_path / "host" / "x.bin")
+    _, b, seen_b, _, _ = read_aggregate(tmp_path / "box" / "x.bin")
+    assert seen_b.all() and np.abs(a - b).max() / np.abs(a).max() < 1e-4
