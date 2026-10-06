@@ -432,12 +432,17 @@ def main(argv=None) -> int:
     p.add_argument("--api-key", default="")
     p.add_argument("--expand", type=int, default=0, help="verified synthetic variations per failed item")
     p.add_argument("--allow-exec", action="store_true", help="run code to verify code targets and variations")
+    p.add_argument("--sandbox", choices=["none", "docker", "podman"], default="none",
+                   help="run that code in a locked-down container (see testqa.py --sandbox)")
+    p.add_argument("--sandbox-image", default="python:3.12-slim")
     p.add_argument("--deficit-fraction", type=float, default=0.25, help="share of SFT examples that are deficits")
     p.add_argument("--general", nargs="*", help="extra anchor data: JSONL with a 'messages' list per line")
     p.add_argument("--holdout-frac", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)
-    build(p.parse_args(argv))
+    a = p.parse_args(argv)
+    tq.configure_sandbox(a.sandbox, a.sandbox_image)
+    build(a)
     return 0
 
 

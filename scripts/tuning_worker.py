@@ -73,7 +73,7 @@ class Store:
         tmp.write_text(json.dumps({"jobs": self.jobs}, indent=2))
         os.replace(tmp, self.state)
 
-    def submit(self, scale, job_id=None, timeout=3600):
+    def submit(self, scale, job_id=None, timeout=3600, nonce=None):
         jid = job_id or str(uuid.uuid4())
         if not JOB_ID_RE.match(jid):
             raise ValueError("bad job_id")
@@ -81,6 +81,11 @@ class Store:
         if not (-10.0 <= scale <= 10.0):
             raise ValueError("scale out of range")
         rec = {"job_id": jid, "scale": scale, "status": "queued", "submitted": time.time()}
+        if nonce is not None:
+            nonce = str(nonce)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", nonce):
+                raise ValueError("bad nonce")
+            rec["nonce"] = nonce          # echoed inside the signed result: binds it to this request
         with self.lock:
             self.jobs[jid] = rec
             self.save()
@@ -153,7 +158,11 @@ class Store:
 
     def get(self, jid):
         with self.lock:
-            return dict(self.jobs.get(jid, {}))
+            j = dict(self.jobs.get(jid, {}))
+        # Signed with a key derived from the worker token, so the controller can
+        # tell a result the worker produced from one altered on the way (a
+        # TLS-terminating proxy, a plaintext VPN hop, a cache).
+        return sec.sign_result(self.token, j) if j else j
 
 
 def app(store: Store, token: str):
@@ -226,7 +235,8 @@ def app(store: Store, token: str):
                 if "scale" not in data:
                     self.sendj({"error": "scale-required"}, 400)
                     return
-                self.sendj(store.submit(data["scale"], data.get("job_id"), int(data.get("timeout", 3600))), 202)
+                rec = store.submit(data["scale"], data.get("job_id"), int(data.get("timeout", 3600)), data.get("nonce"))
+                self.sendj(sec.sign_result(token, rec), 202)
             except (ValueError, KeyError, TypeError) as e:
                 self.sendj({"error": str(e)}, 400)
 

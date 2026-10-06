@@ -16,7 +16,10 @@ the rules are identical everywhere:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import ipaddress
+import json
 import os
 import secrets
 import socket
@@ -110,6 +113,36 @@ def resolve_token(cli_token: str = "", token_file: str = "", *, warn_argv: bool 
         print("warning: --token exposes the secret in the process list; prefer "
               f"--token-file or ${TOKEN_ENV}", file=sys.stderr)
     return cli_token.strip()
+
+
+# ---------------------------------------------------------------- signed results
+
+RESULT_SIG_CONTEXT = b"neuronscope-signed-result-v1"
+
+
+def _result_key(token: str) -> bytes:
+    # A derived key, so a signature never doubles as anything the token itself authorises.
+    return hmac.new(token.encode(), RESULT_SIG_CONTEXT, hashlib.sha256).digest()
+
+
+def _canonical(obj: dict) -> bytes:
+    return json.dumps({k: v for k, v in obj.items() if k != "sig"}, sort_keys=True,
+                      separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def sign_result(token: str, obj: dict) -> dict:
+    """Return obj with an HMAC-SHA256 "sig" over its canonical JSON."""
+    out = {k: v for k, v in obj.items() if k != "sig"}
+    if token:
+        out["sig"] = hmac.new(_result_key(token), _canonical(out), hashlib.sha256).hexdigest()
+    return out
+
+
+def verify_result(token: str, obj: dict) -> bool:
+    sig = obj.get("sig")
+    if not token or not isinstance(sig, str):
+        return False
+    return hmac.compare_digest(sig, hmac.new(_result_key(token), _canonical(obj), hashlib.sha256).hexdigest())
 
 
 # ---------------------------------------------------------------- binds

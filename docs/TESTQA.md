@@ -98,8 +98,21 @@ given.** Without the flag, code is only compiled and checked for the entry
 point (`skipped`). With the flag, each run gets an empty temp directory, a
 stripped environment (no API keys), stdin closed, a wall-clock timeout and,
 on POSIX, CPU, address-space and file-size rlimits. That contains accidents
-but is not a security sandbox. For untrusted models, run TestQA inside a
-container or VM with networking disabled.
+but is not a security sandbox.
+
+For untrusted models add `--sandbox docker` (or `podman`): each run happens in
+a throwaway container with no network, a read-only root and read-only code
+mount, all capabilities dropped, no-new-privileges, user `nobody`, 1 CPU,
+`--memory` and a pid limit, and is killed on timeout. The image
+(`--sandbox-image`, default `python:3.12-slim`) needs only Python. A test runs
+network, write, root, infinite-loop and fork-bomb candidates through it.
+`deficits.py --sandbox docker` uses the same container to verify code
+targets. Containers share the host kernel; for genuinely hostile code, use a VM.
+
+```bash
+docker pull python:3.12-slim
+python scripts/testqa.py --endpoint m=http://127.0.0.1:7870/v1@my-model --allow-exec --sandbox docker
+```
 
 Every bundled coding task is verified against a reference solution in
 `tests/test_testqa.py`. Keep doing that for new tasks: that test found a wrong

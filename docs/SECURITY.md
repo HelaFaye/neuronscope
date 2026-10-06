@@ -58,6 +58,9 @@ code.
 - [x] verification code from both DTLS fingerprints (detects a MITM, including the signaling server)
 - [x] per-file streaming SHA-256, verified by the receiver; mismatches are discarded
 - [x] relay-only mode (TURN) for address privacy; LAN/VPN mode with no STUN
+- [x] TURN credentials only for peers inside a room, never from `/ice.json`;
+  with `--turn-secret-file` (coturn `use-auth-secret`) each peer gets its own,
+  expiring after `--turn-ttl`
 - [x] `crypto.randomUUID` fallback for non-secure contexts; CSP, no-referrer, frame-deny headers
 
 **HTTP / CLI**
@@ -84,17 +87,21 @@ code.
 - [x] authenticated worker API (same policy); TLS client in the controller
 - [x] job-id/scale validation; deletion restricted to generated GGUFs in the worker root
 - [x] persistent per-job state as an audit trail
-- [ ] signed results (a worker compromised with its own token could report false scores)
+- [x] signed results: every job record carries an HMAC-SHA256 under a key derived
+  from the worker token, bound to a per-job nonce from the controller; the
+  controller refuses unsigned, altered or replayed results (protects against a
+  TLS-terminating proxy or a plaintext VPN hop; it cannot protect against a
+  compromised worker, which holds the key)
 
 **Still open / by design**
 - Peer identity on WebRTC is proven by comparing the verification code, not by
   accounts. That is deliberate (no accounts), and the code check is manual.
-- TURN credentials are served to anyone who can load the page. Use short-lived
-  TURN credentials (e.g. coturn's REST secret) if that matters.
-- TestQA's code interpreter limits resources but is not a sandbox; use a
-  container for untrusted models (see [TESTQA.md](TESTQA.md)).
-- Rate limits are in-process and per address. Put a reverse proxy in front for
-  Internet exposure.
+- Rate limits are in-process and per address, and reset on restart. For
+  Internet exposure put a reverse proxy in front (Caddy, nginx `limit_req`)
+  so limits hold across processes and addresses.
+- TestQA without `--sandbox` runs code with rlimits only; with
+  `--sandbox docker` (or podman) it is contained (see [TESTQA.md](TESTQA.md)).
+  A container shares the host kernel; for hostile code use a VM.
 
 ## Recommended deployments
 

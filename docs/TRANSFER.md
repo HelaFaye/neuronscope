@@ -47,8 +47,17 @@ the hash and discards the file on mismatch.
 | mode | flag / selector | trade-off |
 |---|---|---|
 | Direct | `--ice-mode direct` (default) | fastest; STUN reveals each peer's public IP to the other |
-| Relay | `--ice-mode relay --turn-url turns:turn.example:5349 --turn-user … --turn-credential …` | all traffic via your TURN server; peers never learn each other's address |
+| Relay | `--ice-mode relay --turn-url turns:turn.example:5349 --turn-secret-file turn.secret` | all traffic via your TURN server; peers never learn each other's address |
 | LAN / VPN | `--ice-mode lan` or `--no-stun` | host candidates only; for WireGuard / Tailscale / same network |
+
+**TURN credentials** are never in `/ice.json`; a peer receives them only once
+it has created a room, joined with the key or been admitted. With
+`--turn-secret-file` holding coturn's `static-auth-secret` (coturn configured
+with `use-auth-secret`), each peer gets its own credentials in coturn's REST
+format, expiring after `--turn-ttl` seconds (default 3600; set it longer than
+your longest transfer, since an expired credential cannot refresh the relay
+allocation). Static `--turn-user`/`--turn-credential` still work but are
+long-lived and shared, and print a warning.
 
 The server relays only signaling (SDP, ICE). It never receives file bytes. It
 enforces an Origin allowlist (`--allowed-origin` for reverse-proxy hostnames),
@@ -117,7 +126,11 @@ python viz/adaptive_tuning_lab.py          # same thing with a GUI
 The worker records the SHA-256 of the source model, the profile and every
 candidate. Deletion is limited to generated `.gguf` files inside its root.
 The evaluator command comes only from the worker's own command line and is
-never accepted over the API. See [LABS.md](LABS.md) for the search strategy.
+never accepted over the API. Every job record the worker returns is signed
+with a key derived from the token and echoes a nonce the controller chose for
+that job, so the controller rejects a result that was altered, stripped of its
+signature or replayed from another job, even if a proxy terminates TLS in
+between. See [LABS.md](LABS.md) for the search strategy.
 
 ## 4. MCP control plane
 

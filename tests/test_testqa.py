@@ -268,3 +268,31 @@ def test_optional_word_bans_pack():
     # Not in the default bank; added only with --with word-bans.
     default = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
     assert not {t["id"] for t in pack} & {t["id"] for t in default}
+
+
+def _docker_ok():
+    import shutil
+    import subprocess
+    if not shutil.which("docker"):
+        return False
+    r = subprocess.run(["docker", "image", "inspect", "python:3.12-slim"], capture_output=True)
+    return r.returncode == 0
+
+
+@pytest.mark.skipif(not _docker_ok(), reason="needs a running docker with python:3.12-slim")
+def test_docker_sandbox_contains_hostile_code():
+    import testqa as tq
+    tq.configure_sandbox("docker")
+    try:
+        t = ["assert add(2, 3) == 5"]
+        ok = "def add(a, b): return a + b"
+        assert tq.run_code(ok, t, timeout=3)[0] == "correct"
+        assert tq.run_code("def add(a, b): return a - b", t, timeout=3)[0] == "wrong"
+        net = tq.run_code("import socket\nsocket.create_connection(('1.1.1.1', 53), timeout=2)\n" + ok, t, timeout=3)
+        assert net[0] == "wrong" and "unreachable" in net[1].lower()
+        assert "Read-only" in tq.run_code("open('/work/x', 'w').write('x')\n" + ok, t, timeout=3)[1]
+        assert "65534" in tq.run_code("import os\nassert os.getuid() == 0, os.getuid()\n" + ok, t, timeout=3)[1]
+        assert tq.run_code("while True: pass\n" + ok, t, timeout=2)[0] == "timeout"
+        assert tq.run_code("import os\nfor _ in range(200):\n    os.fork()\n" + ok, t, timeout=3)[0] == "wrong"
+    finally:
+        tq.configure_sandbox(None)

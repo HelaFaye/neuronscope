@@ -141,3 +141,43 @@ def test_static_gui_has_webrtc_transfer_surface():
     for needle in ("RTCPeerConnection", "createDataChannel", "datachannel", "showDirectoryPicker",
                    "/ws", "iceTransportPolicy", "a=fingerprint:", "class Sha256", "sha256"):
         assert needle in html, needle
+
+
+def test_turn_credentials_are_short_lived_and_only_for_room_members():
+    import base64
+    import hashlib
+    import hmac
+    import time
+    from aiohttp.test_utils import TestClient, TestServer
+    from model_transfer import build_app
+
+    secret = "s" * 40
+    turn = {"urls": ["turns:turn.example:5349"], "secret": secret, "ttl": 600}
+    ice = {"mode": "direct", "iceServers": [{"urls": ["stun:stun.example:3478"]}], "hasTurn": True}
+
+    async def run():
+        async with TestClient(TestServer(build_app(ice, turn=turn))) as client:
+            public = await (await client.get("/ice.json")).text()
+            assert "turn.example" not in public and secret not in public      # nothing for page loaders
+            a = await client.ws_connect("/ws")
+            await a.send_json({"type": "create"})
+            ma = await a.receive_json()
+            b = await client.ws_connect("/ws")
+            await b.send_json({"type": "join", "room": ma["room"], "key": ma["key"]})
+            mb = await b.receive_json()
+            for m in (ma, mb):
+                (srv,) = m["iceServers"]
+                expiry, label = srv["username"].split(":", 1)
+                assert label == m["selfId"] and 0 < int(expiry) - time.time() <= 600
+                want = base64.b64encode(hmac.new(secret.encode(), srv["username"].encode(), hashlib.sha1).digest())
+                assert srv["credential"] == want.decode()
+            assert ma["iceServers"][0]["username"] != mb["iceServers"][0]["username"]
+            # a wrong key gets an error and no credentials
+            c = await client.ws_connect("/ws")
+            await c.send_json({"type": "join", "room": ma["room"], "key": "wrong" * 5})
+            mc = await c.receive_json()
+            assert mc["type"] == "error" and "iceServers" not in mc
+            for w in (a, b, c):
+                await w.close()
+
+    asyncio.run(run())

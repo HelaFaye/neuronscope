@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Security
+- Tuning worker results are signed (HMAC-SHA256, key derived from the worker
+  token, per-job nonce); the controller refuses unsigned, altered or replayed
+  results.
+- WebRTC TURN credentials go only to peers inside a room, and with
+  `--turn-secret-file` are minted per peer in coturn's REST format and expire.
+- TestQA and deficits.py `--sandbox docker|podman`: model-written code runs in
+  a container with no network, read-only filesystem, no capabilities, an
+  unprivileged user and resource limits.
 - One bind policy for every network service (`scripts/ns_security.py`). A
   non-loopback bind requires a token of at least 32 characters, and TLS unless
   `--allow-plaintext` is passed. Tokens are compared in constant time, can come

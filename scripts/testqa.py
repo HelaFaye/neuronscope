@@ -44,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -234,15 +235,45 @@ _limit(resource.RLIMIT_CORE, 0)
 '''
 
 
+# Container sandbox for model-written code: set by --sandbox (or by callers via
+# configure_sandbox). None means the rlimited local interpreter.
+SANDBOX = {"engine": None, "image": "python:3.12-slim"}
+
+
+def configure_sandbox(engine: str | None, image: str | None = None) -> None:
+    if engine in (None, "", "none"):
+        SANDBOX["engine"] = None
+        return
+    if engine not in ("docker", "podman"):
+        raise ValueError("sandbox must be none, docker or podman")
+    if not shutil.which(engine):
+        raise SystemExit(f"--sandbox {engine}: {engine} is not installed")
+    SANDBOX["engine"] = engine
+    if image:
+        SANDBOX["image"] = image
+
+
+def _sandbox_cmd(engine: str, image: str, workdir: str, name: str, timeout: float, mem_mb: int) -> list[str]:
+    return [engine, "run", "--rm", "--name", name, "--network", "none", "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--memory", f"{mem_mb}m", "--memory-swap", f"{mem_mb}m",
+            "--cpus", "1", "--pids-limit", "64", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--user", "65534:65534", "--ulimit", f"cpu={int(timeout) + 1}", "--ulimit", "fsize=1048576",
+            "-v", f"{workdir}:/work:ro", "-w", "/tmp", "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "PYTHONHASHSEED=0",
+            image, "python", "-I", "/work/candidate.py"]
+
+
 def run_code(code: str, tests: list[str], timeout: float = 10.0, mem_mb: int = 1024) -> tuple[str, str]:
     """Run candidate code plus tests in a fresh interpreter.
 
-    Isolation is best effort: separate process, empty temp cwd, -I (no user
-    site, no env vars), stripped environment, CPU/memory/file-size rlimits on
-    POSIX, wall-clock timeout. It is NOT a security sandbox; run untrusted
-    models inside a container or VM. Returns (verdict, detail)."""
+    Default isolation is best effort: separate process, empty temp cwd, -I (no
+    user site, no env vars), stripped environment, CPU/memory/file-size
+    rlimits on POSIX, wall-clock timeout. That is NOT a security sandbox.
+    With --sandbox docker|podman the code runs in a throwaway container with no
+    network, a read-only root, all capabilities dropped, no-new-privileges, an
+    unprivileged user, and memory/CPU/pid limits. Returns (verdict, detail)."""
+    engine = SANDBOX["engine"]
     with tempfile.TemporaryDirectory(prefix="testqa-") as d:
-        prelude = RUNNER.format(cpu=int(timeout) + 1, mem=mem_mb * 1024 * 1024) if os.name == "posix" else ""
+        prelude = RUNNER.format(cpu=int(timeout) + 1, mem=mem_mb * 1024 * 1024) if os.name == "posix" or engine else ""
         body = [prelude, code, "", "# --- tests ---"]
         for i, t in enumerate(tests):
             body.append(f"def __t{i}():")
@@ -251,12 +282,28 @@ def run_code(code: str, tests: list[str], timeout: float = 10.0, mem_mb: int = 1
         body.append('print("__TESTQA_PASS__")')
         path = Path(d) / "candidate.py"
         path.write_text("\n".join(body), encoding="utf-8")
-        env = {"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"}
+        if engine:
+            os.chmod(d, 0o755)
+            os.chmod(path, 0o644)
+            name = "testqa-" + os.urandom(8).hex()
+            cmd = _sandbox_cmd(engine, SANDBOX["image"], d, name, timeout, mem_mb)
+            env, cwd = None, None
+            wall = timeout + 30                   # container start-up is not the candidate's time
+        else:
+            cmd = [sys.executable, "-I", str(path)]
+            env = {"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1"}
+            cwd, wall = d, timeout
         try:
-            p = subprocess.run([sys.executable, "-I", str(path)], cwd=d, env=env, capture_output=True,
-                               text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=wall,
+                               stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
+            if engine:
+                subprocess.run([engine, "kill", name], capture_output=True)
             return "timeout", f"exceeded {timeout}s"
+        if engine and p.returncode == 125:
+            raise RuntimeError(f"{engine} could not start the sandbox: {(p.stderr or '').strip()[-300:]}")
+        if engine and p.returncode in (137, 152) and "__TESTQA_PASS__" not in p.stdout:
+            return "timeout", f"killed by the sandbox's CPU or memory limit (exit {p.returncode})"
         if p.returncode == 0 and "__TESTQA_PASS__" in p.stdout:
             return "correct", ""
         err = (p.stderr or p.stdout).strip().splitlines()
@@ -578,6 +625,9 @@ def main(argv=None) -> int:
     p.add_argument("--reference", help="label compared against (default: first endpoint)")
     p.add_argument("--allow-exec", action="store_true", help="run code_exec tasks (executes model-written code)")
     p.add_argument("--exec-timeout", type=float, default=10.0)
+    p.add_argument("--sandbox", choices=["none", "docker", "podman"], default="none",
+                   help="run --allow-exec code in a locked-down container (no network, read-only, unprivileged)")
+    p.add_argument("--sandbox-image", default="python:3.12-slim", help="container image with python")
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--max_tokens", type=int, default=2048)
     p.add_argument("--temperature", type=float, default=0.0)
@@ -615,9 +665,12 @@ def main(argv=None) -> int:
         raise SystemExit("no tasks selected")
     kinds = Counter(t["kind"] for t in tasks)
     print(f"{len(tasks)} tasks: " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())))
+    configure_sandbox(a.sandbox, a.sandbox_image)
     if kinds.get("code_exec") and not a.allow_exec:
         print("  code_exec tasks will be checked for syntax only; --allow-exec runs them "
-              "(model-written code, limited but not sandboxed)")
+              "(model-written code; add --sandbox docker to contain it)")
+    elif kinds.get("code_exec") and a.sandbox == "none":
+        print("  running model-written code with rlimits only; --sandbox docker isolates it in a container")
     cache_dir = Path(a.cache) if a.cache else None
     if cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)

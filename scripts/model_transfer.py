@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import secrets
 import socket
@@ -52,6 +54,26 @@ INDEX = WEB_ROOT / "model_transfer.html"
 ROOMS = web.AppKey("rooms", object)
 ICE = web.AppKey("ice", dict)
 ORIGINS = web.AppKey("allowed_origins", set)
+TURN = web.AppKey("turn", dict)
+
+
+def turn_servers(turn: dict | None, label: str) -> list[dict]:
+    """TURN entries for one admitted peer.
+
+    With a shared secret (coturn `use-auth-secret` / `static-auth-secret`, the
+    "TURN REST API" scheme) each peer gets its own credentials that expire after
+    `ttl` seconds: username "<expiry>:<label>", password
+    base64(HMAC-SHA1(secret, username)). Nothing long-lived reaches a browser.
+    Static credentials are still supported, but are only ever sent to peers
+    inside a room, never from /ice.json."""
+    if not turn or not turn.get("urls"):
+        return []
+    if turn.get("secret"):
+        import base64
+        user = f"{int(time.time()) + int(turn.get('ttl', 3600))}:{label}"
+        cred = base64.b64encode(hmac.new(turn["secret"].encode(), user.encode(), hashlib.sha1).digest()).decode()
+        return [{"urls": turn["urls"], "username": user, "credential": cred}]
+    return [{"urls": turn["urls"], "username": turn.get("user", ""), "credential": turn.get("credential", "")}]
 
 
 def new_room_code() -> str:
@@ -322,14 +344,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                         room, current = await manager.create(ws)
                         conn.peer = current
                         await send_json(ws, {"type": "joined", "selfId": current.peer_id, "room": room.code,
-                                             "key": room.key, "peers": [], "creator": True})
+                                             "key": room.key, "peers": [], "creator": True,
+                                             "iceServers": turn_servers(request.app.get(TURN), current.peer_id)})
                         continue
                     if not isinstance(room_code, str) or len(room_code) > 32:
                         raise JoinError("bad-room")
                     if kind == "join" and isinstance(key, str) and key:
                         room, current = await manager.join(room_code, key, ws, conn.addr)
                         conn.peer = current
-                        await _announce(room, current, include_key=True)
+                        await _announce(room, current, include_key=True, turn=request.app.get(TURN))
                     else:
                         k, members = await manager.knock(room_code, conn)
                         await send_json(ws, {"type": "waiting", "room": k.room})
@@ -348,7 +371,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 if peer is None:
                     await send_json(k.conn.ws, {"type": "error", "error": "knock-denied"})
                 else:
-                    await _announce(room, peer, include_key=True)
+                    await _announce(room, peer, include_key=True, turn=request.app.get(TURN))
 
             elif kind == "signal":
                 if current is None:
@@ -375,10 +398,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def _announce(room: Room, peer: Peer, include_key: bool) -> None:
+async def _announce(room: Room, peer: Peer, include_key: bool, turn: dict | None = None) -> None:
     existing = [p for p in room.peers.values() if p.peer_id != peer.peer_id]
     msg = {"type": "joined", "selfId": peer.peer_id, "room": room.code,
-           "peers": [p.peer_id for p in existing]}
+           "peers": [p.peer_id for p in existing], "iceServers": turn_servers(turn, peer.peer_id)}
     if include_key:
         msg["key"] = room.key
     await send_json(peer.ws, msg)
@@ -386,10 +409,12 @@ async def _announce(room: Room, peer: Peer, include_key: bool) -> None:
         await send_json(p.ws, {"type": "peer-joined", "peerId": peer.peer_id})
 
 
-def build_app(ice: dict | None = None, allowed_origins: set[str] | None = None) -> web.Application:
+def build_app(ice: dict | None = None, allowed_origins: set[str] | None = None,
+              turn: dict | None = None) -> web.Application:
     app = web.Application(middlewares=[security_headers])
     app[ROOMS] = RoomManager()
     app[ICE] = ice or {"mode": "direct", "iceServers": [{"urls": DEFAULT_STUN}]}
+    app[TURN] = turn or {}
     app[ORIGINS] = allowed_origins or set()
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
@@ -404,9 +429,19 @@ def ice_from_args(a) -> dict:
     servers: list[dict] = []
     if stun and not a.no_stun:
         servers.append({"urls": stun})
-    if a.turn_url:
-        servers.append({"urls": a.turn_url, "username": a.turn_user, "credential": a.turn_credential})
+    # TURN credentials are not public: they go to each peer once it is in a room.
     return {"mode": a.ice_mode, "iceServers": servers, "hasTurn": bool(a.turn_url)}
+
+
+def turn_from_args(a) -> dict:
+    if not a.turn_url:
+        return {}
+    if a.turn_secret_file:
+        return {"urls": a.turn_url, "secret": sec.read_secret_file(Path(a.turn_secret_file)), "ttl": a.turn_ttl}
+    if a.turn_credential:
+        print("warning: static TURN credentials are long-lived and shared by every peer; prefer "
+              "--turn-secret-file with coturn's use-auth-secret", file=sys.stderr)
+    return {"urls": a.turn_url, "user": a.turn_user, "credential": a.turn_credential}
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -425,8 +460,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--stun", action="append", default=None, help="STUN URL (repeatable)")
     p.add_argument("--no-stun", action="store_true")
     p.add_argument("--turn-url", action="append", default=[], help="TURN URL, e.g. turns:turn.example:5349")
-    p.add_argument("--turn-user", default="")
-    p.add_argument("--turn-credential", default="")
+    p.add_argument("--turn-secret-file", default="",
+                   help="coturn static-auth-secret (use-auth-secret): mint short-lived per-peer credentials")
+    p.add_argument("--turn-ttl", type=int, default=3600,
+                   help="lifetime of minted TURN credentials in seconds; longer than your longest transfer")
+    p.add_argument("--turn-user", default="", help="static TURN user (discouraged; see --turn-secret-file)")
+    p.add_argument("--turn-credential", default="", help="static TURN password (discouraged)")
     return p.parse_args(argv)
 
 
@@ -442,7 +481,7 @@ def main(argv=None) -> int:
     if args.ice_mode == "relay" and not args.turn_url:
         print("error: --ice-mode relay needs --turn-url", file=sys.stderr)
         return 2
-    app = build_app(ice_from_args(args), set(args.allowed_origin))
+    app = build_app(ice_from_args(args), set(args.allowed_origin), turn_from_args(args))
     ssl_ctx = sec.server_ssl_context(args.tls_cert, args.tls_key) if tls else None
 
     scheme = "https" if tls else "http"

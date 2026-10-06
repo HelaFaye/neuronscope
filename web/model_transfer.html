@@ -211,6 +211,8 @@ function attachChannel(rec,dc){ rec.dc=dc; dc.binaryType='arraybuffer'; dc.buffe
 async function onSignal(m){
   if(m.type==='joined'){
     state.selfId=m.selfId; state.room=m.room; if(m.key) state.key=m.key;
+    // TURN credentials arrive only once we are in the room (short-lived, per peer).
+    if(m.iceServers?.length){ state.ice={...(state.ice||{}), iceServers:[...(state.ice?.iceServers||[]).filter(s=>![].concat(s.urls).some(u=>/^turns?:/.test(u))), ...m.iceServers]}; }
     el('room').textContent=m.room.replace(/(.{5})(.*)/,'$1 $2'); el('copyBtn').disabled=!state.key;
     history.replaceState(null,'',state.key?`/#r=${m.room}&k=${encodeURIComponent(state.key)}`:'/');
     setStatus(m.peers.length?'Joined. Connecting to peers…':'Room ready. Share the invite link.','ok');

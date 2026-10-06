@@ -60,6 +60,7 @@ class WorkerClient:
     def __init__(self, base_url:str, token:str='', timeout:int=120, cafile:str=''):
         self.base=base_url.rstrip('/')
         self.token=token
+        self._expect={}
         self.timeout=timeout
         self.ssl=None
         if self.base.startswith('https://'):
@@ -77,8 +78,33 @@ class WorkerClient:
             body=e.read().decode(errors='replace')
             raise RuntimeError(f'worker HTTP {e.code}: {body}') from e
     def health(self): return self._request('GET','/health')
-    def submit(self,job): return self._request('POST','/api/jobs',job)
-    def get(self,job_id): return self._request('GET',f'/api/jobs/{job_id}')
+    def submit(self,job):
+        # A fresh nonce per job; the worker echoes it inside every signed result.
+        if self.token and 'nonce' not in job:
+            import secrets
+            job={**job,'nonce':secrets.token_urlsafe(24)}
+        if job.get('job_id') and job.get('nonce'):
+            self._expect[job['job_id']]=(job['nonce'],float(job['scale']))
+        r=self._request('POST','/api/jobs',job)
+        if self.token:
+            self._check(r)
+            self._expect.setdefault(r['job_id'],(job.get('nonce'),float(job['scale'])))
+        return r
+    def get(self,job_id):
+        r=self._request('GET',f'/api/jobs/{job_id}')
+        if self.token:
+            self._check(r)
+            if r.get('job_id')!=job_id:
+                raise RuntimeError(f"worker answered a request for {job_id!r} with job {r.get('job_id')!r} (replayed?)")
+        return r
+    def _check(self,r):
+        """Refuse results that are unsigned, altered, or answer a different request."""
+        import ns_security
+        if not ns_security.verify_result(self.token,r):
+            raise RuntimeError(f"worker result for {r.get('job_id')!r} has a missing or invalid signature; refusing it")
+        want=self._expect.get(r.get('job_id'))
+        if want and (r.get('nonce')!=want[0] or abs(float(r.get('scale',0))-want[1])>1e-12):
+            raise RuntimeError(f"worker result for {r.get('job_id')!r} does not match the submitted job (replayed?)")
     def delete_model(self, path): return self._request('POST','/api/models/delete',{'path':path})
     def wait(self,job_id,poll=1.0):
         while True:
