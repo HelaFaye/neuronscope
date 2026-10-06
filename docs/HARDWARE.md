@@ -37,8 +37,76 @@ inside llama.cpp here. Systems with more than one Vulkan driver installed
 (e.g. AMDVLK and RADV) sometimes pick one that fails to initialise; set
 `NS_VULKAN_ICD` to the driver JSON you want before `source env.sh`.
 
-**CUDA / Metal**: build llama.cpp with `-DGGML_CUDA=ON` or `-DGGML_METAL=ON`
-and install the matching PyTorch. Nothing in NeuronScope is vendor-specific.
+**Metal**: build llama.cpp with `--backend metal`; `install.sh` installs the
+default wheel, which uses MPS.
+
+### NVIDIA / CUDA
+
+```bash
+python scripts/cuda_info.py                    # every GPU, and what fits it
+./install.sh                                   # picks the PyTorch wheel from that
+scripts/build_llama_tools.sh --backend cuda    # llama.cpp for exactly these GPUs
+python scripts/doctor.py                       # checks torch kernels, toolkit, driver
+```
+
+`scripts/cuda_info.py` reads `nvidia-smi` (it works before PyTorch is
+installed) and makes every CUDA decision in one place. The installer, the
+build script, Studio, `doctor.py` and `finetune.py` all use it.
+
+| GPUs | PyTorch | llama.cpp toolkit | train in | QLoRA |
+|---|---|---|---|---|
+| Ampere, Ada, Hopper, Blackwell (sm_80+) | default PyPI wheel | any current CUDA | bf16 | yes |
+| Turing (sm_75) | default PyPI wheel | any current CUDA | fp16 | yes |
+| Volta (sm_70), P100 (sm_60) | CUDA 12.6 wheel, `torch<2.15` | CUDA 12.x | fp16 | check `finetune.py --check` |
+| Pascal consumer/P40 (sm_61), Maxwell (sm_50/52) | CUDA 12.6 wheel, `torch<2.15` | CUDA 12.x | fp32 | Maxwell: no |
+
+Why the split: PyTorch's CUDA 12.8+ wheels dropped Maxwell, Pascal and Volta,
+and 2.14 is the last release that still publishes the CUDA 12.6 wheels that
+have them ([pytorch#190385](https://github.com/pytorch/pytorch/issues/190385)).
+CUDA 13 cannot compile for anything below sm_75, so llama.cpp for those cards
+needs a CUDA 12.x toolkit (12.9 is the newest), and the build script refuses a
+CUDA 13 build for them instead of producing binaries that fail with "no kernel
+image". The R580 driver branch is the last that supports them: pin it.
+bitsandbytes dropped Maxwell, so QLoRA is unavailable there; `finetune.py`
+says so and LoRA works. Precision follows the slowest GPU: bf16 needs Ampere,
+fast fp16 needs Volta/Turing or the P100, and Maxwell and consumer Pascal run
+fp16 at a small fraction of fp32 speed, so they train in fp32.
+
+No local toolkit, or the wrong one: build in a container.
+`docker/llama-cuda.Dockerfile` builds cett-dump and the activation-streaming
+llama-server with CUDA 12.9 for any architecture list (default sm_50):
+
+```bash
+docker build -f docker/llama-cuda.Dockerfile --build-arg CUDA_ARCH="50-real" -t neuronscope-llama:cuda .
+docker run --rm --gpus all -v ~/models:/models -p 8080:8080 neuronscope-llama:cuda \
+    llama-server -m /models/model.gguf -ngl 99 -sm layer --host 0.0.0.0 --port 8080
+```
+
+**Several GPUs.** Layer split (`-sm layer`, llama.cpp's default) puts whole
+layers on each GPU and passes one activation between them per token, so it
+works over plain PCIe. Row split (`-sm row`) splits every matrix and needs fast
+GPU-to-GPU links. Studio's load panel has **Visible GPUs**
+(`CUDA_VISIBLE_DEVICES`), **Split**, **Tensor split** and **Main GPU**, and
+its fit estimate counts free VRAM across all of them. `vram_budget.py`,
+`hostcheck.py` and host profiles sum VRAM over every GPU too. Training spreads
+over GPUs with `finetune.py --launch N` (DDP); each GPU holds the whole model
+plus adapters, so per-GPU memory is the limit there, not the total.
+
+**Tesla M10.** One board, four Maxwell GPUs (sm_50) with 8 GB each. In the
+table above it is the last row: `torch<2.15` from the CUDA 12.6 index, llama.cpp
+built with CUDA 12.x for `50-real`, driver R580, fp32 LoRA. Serve one model
+across all four (`-sm layer -ts 1,1,1,1`), or up to four small models side by
+side, each with its own **Visible GPUs**. It has no display outputs and a
+passive heatsink, so it needs server airflow.
+
+Verified here: `build_llama_tools.sh --backend cuda --cuda-arch 50-real
+--server-activations`, run inside `nvidia/cuda:12.9.2-devel-ubuntu24.04`,
+builds cett-dump, the activation-streaming llama-server, llama-quantize and
+llama-eval-callback, with 144 sm_50 kernel images in `libggml-cuda.so`. The
+CUDA decision table is unit-tested against M10, RTX 4090 and mixed-GPU
+`nvidia-smi` output. Not verified: running on NVIDIA hardware (this
+environment has no GPU), and `docker build` of the Dockerfile end to end (it
+runs the same script).
 
 **ROCm (AMD)**: `install.sh` detects the gfx target and picks a PyTorch ROCm
 wheel index, then runs a bf16 matmul against CPU to prove the result is

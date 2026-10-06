@@ -461,3 +461,39 @@ def test_device_registry_codes_expire_and_are_hashed(tmp_path, monkeypatch):
     code2, _ = reg.new_code()
     monkeypatch.setattr(ns_pairing.time, "time", lambda: 10 ** 12)      # far future
     assert reg.claim(code2, "late") is None
+
+
+def test_multi_gpu_flags_and_vram_fit(studio_srv, monkeypatch):
+    seen = {}
+
+    class P:
+        def __init__(self, cmd, **kw):
+            seen["cmd"], seen["env"] = cmd, kw.get("env")
+        def poll(self):
+            return None
+        def terminate(self):
+            pass
+        def wait(self, timeout=None):
+            return 0
+        kill = terminate
+    monkeypatch.setattr(studio.subprocess, "Popen", P)
+    monkeypatch.setattr(studio.time, "sleep", lambda s: None)
+    monkeypatch.setattr(studio, "wait_healthy", lambda port, proc: (True, "ready"))
+    monkeypatch.setattr(studio, "port_busy", lambda port: False)
+    m = {"path": "/m.gguf", "id": "m", "name": "m.gguf"}
+    ok, _ = studio.start_server(m, {**studio.DEFAULTS, "gpus": "0,1,2,3", "split_mode": "layer",
+                                    "tensor_split": "1,1,1,1", "main_gpu": 0}, 9999)
+    assert ok and seen["env"]["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+    c = seen["cmd"]
+    assert c[c.index("-sm") + 1] == "layer" and c[c.index("-ts") + 1] == "1,1,1,1" and c[c.index("-mg") + 1] == "0"
+    for bad in ({"gpus": "0;rm"}, {"split_mode": "fast"}, {"tensor_split": "1,a"}):
+        ok, why = studio.start_server(m, {**studio.DEFAULTS, **bad}, 9999)
+        assert not ok, bad
+    studio.PROC.update({"proc": None, "model": None, "port": None})
+    import cuda_info
+    m10 = cuda_info.parse_smi("".join(f"{i}, Tesla M10, 5.0, 8192, 8000, 580.95.05, b{i}\n" for i in range(4)))
+    monkeypatch.setattr(studio, "nvidia_gpus", lambda: m10)
+    assert studio.fit_estimate(20 * 2**30)["ok"] is True and "4 GPUs" in studio.fit_estimate(20 * 2**30)["note"]
+    assert studio.fit_estimate(40 * 2**30)["ok"] is False
+    code, adv = call(studio_srv, "/api/gpus")
+    assert code == 200 and adv["count"] == 4 and adv["multi_gpu"]["llama_server"] == "-sm layer -ts 1,1,1,1"

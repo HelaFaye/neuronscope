@@ -23,6 +23,7 @@ that. Studio handles everything around it.
 | Model library with metadata (arch, quant, MoE, size, fit) | yes | yes; fit is estimated against this host before loading |
 | Hugging Face search and resumable download | yes | yes; multi-part GGUFs offered as one set; `HF_TOKEN` for gated repos |
 | Per-model load settings (GPU layers, context, batch, threads, flash-attn, KV cache type) | yes | yes; persisted per file |
+| Several GPUs (split mode, tensor split, main GPU, which GPUs) | yes | yes; shown when NVIDIA GPUs are present, with a suggested split; fit estimate counts free VRAM on all of them ([HARDWARE.md](HARDWARE.md#nvidia--cuda)) |
 | Chat with streaming, reasoning shown separately | yes | yes |
 | Saved conversations, export | yes | yes; one JSON file per chat in `~/.neuronscope/chats`, Markdown export |
 | Image input for vision models | yes | yes; an `mmproj-*.gguf` beside the model is loaded automatically |

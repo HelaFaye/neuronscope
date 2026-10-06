@@ -162,7 +162,15 @@ def plan(shape, ctx, vram_bytes, viz="pygfx", cache_type="f16",
 
 
 def detect_vram():
-    """Best effort. An iGPU's carve-out is a real limit but comes from RAM."""
+    """Best effort. An iGPU's carve-out is a real limit but comes from RAM.
+    NVIDIA: the sum over all GPUs, since llama-server splits layers across them."""
+    try:
+        from cuda_info import query_gpus
+        gpus = query_gpus()
+        if gpus:
+            return sum(g["memory_total"] for g in gpus)
+    except Exception:
+        pass
     try:
         import torch
         if torch.cuda.is_available():

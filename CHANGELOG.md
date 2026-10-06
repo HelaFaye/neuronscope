@@ -32,6 +32,24 @@
   redacted from output. Legacy inline tokens are migrated.
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
+### Added (CUDA)
+- `scripts/cuda_info.py`: every NVIDIA GPU via nvidia-smi, and the decisions
+  that follow: PyTorch wheel (CUDA 12.6 + `torch<2.15` for Maxwell/Pascal/Volta,
+  e.g. Tesla M10), llama.cpp CUDA architectures and toolkit limit (CUDA 13
+  cannot target sm<75), per-GPU training precision, QLoRA availability,
+  multi-GPU split.
+- `install.sh` installs the wheel that has kernels for every GPU, and its smoke
+  test checks each GPU's kernels and compares an fp32 matmul against the CPU.
+- `build_llama_tools.sh --backend cuda` builds for the detected GPUs
+  (`--cuda-arch` to override) and refuses a CUDA 13 build for pre-Turing cards;
+  `docker/llama-cuda.Dockerfile` builds with CUDA 12.9 (sm_50 by default).
+- Studio: Visible GPUs, Split, Tensor split and Main GPU per model; the fit
+  estimate uses free VRAM across all GPUs; `/api/gpus`.
+- `finetune.py` picks precision from compute capability (fp32 on Maxwell and
+  consumer Pascal; `is_bf16_supported()` also reports emulated bf16) and
+  refuses QLoRA on Maxwell. `doctor.py`, `hostcheck.py`, `vram_budget.py` and
+  host profiles see every GPU.
+
 ### Fixed
 - Godot and three.js clients drew a narrow strip for most traces: neuron columns
   were spaced 0.06 units apart and the camera was fixed. Both now fit the field

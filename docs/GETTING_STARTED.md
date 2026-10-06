@@ -25,8 +25,10 @@ source venv/bin/activate
 ```
 
 `install.sh` detects AMD (ROCm), NVIDIA (CUDA) or neither (CPU) and installs a
-matching PyTorch wheel. On macOS or Windows, or if you prefer to manage it
-yourself:
+matching PyTorch wheel. On NVIDIA it checks every GPU's architecture: older
+cards (Maxwell, Pascal, Volta, e.g. a Tesla M10) need the CUDA 12.6 wheels and
+`torch<2.15`, which `python scripts/cuda_info.py` reports and the installer
+picks. On macOS or Windows, or if you prefer to manage it yourself:
 
 ```bash
 python -m venv venv && source venv/bin/activate      # Windows: venv\Scripts\activate
@@ -51,8 +53,10 @@ scripts/build_llama_tools.sh --backend vulkan     # or cpu, cuda, metal, hip; --
 
 It clones llama.cpp, adds the `cett-dump` extractor, and builds
 `llama-cett-dump`, `llama-server`, `llama-quantize` and `llama-eval-callback`.
-Vulkan works on AMD, Intel and NVIDIA and is the most portable choice; see
-[HARDWARE.md](HARDWARE.md) for backend notes.
+Vulkan works on AMD, Intel and NVIDIA and is the most portable choice. With
+`--backend cuda` the CUDA architectures come from your GPUs (`--cuda-arch` to
+build for others), and pre-Turing cards need a CUDA 12.x toolkit, or
+`docker/llama-cuda.Dockerfile`; see [HARDWARE.md](HARDWARE.md#nvidia--cuda).
 
 `cett-dump` is tested against current llama.cpp: on a model converted with
 llama.cpp's own converter its CETT values match the PyTorch hook path on every

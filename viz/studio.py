@@ -194,10 +194,37 @@ def find_model(ref, models=None):
     return None
 
 
+_GPU_CACHE = {"t": 0.0, "gpus": []}
+
+
+def nvidia_gpus():
+    """NVIDIA GPUs via nvidia-smi (cached 10 s); [] elsewhere."""
+    if time.time() - _GPU_CACHE["t"] > 10:
+        try:
+            import cuda_info
+            _GPU_CACHE["gpus"] = cuda_info.query_gpus()
+        except Exception:
+            _GPU_CACHE["gpus"] = []
+        _GPU_CACHE["t"] = time.time()
+    return _GPU_CACHE["gpus"]
+
+
 def fit_estimate(size_bytes):
     """Will this load, on this machine? Reuses the shared host checks."""
     if Host is None:
         return {"ok": None, "note": "hostcheck unavailable"}
+    gpus = nvidia_gpus()
+    if gpus:
+        # Offloaded weights live in VRAM, summed over every GPU llama-server can split across.
+        avail = sum(g["memory_free"] or g["memory_total"] for g in gpus)
+        where = f"VRAM on {len(gpus)} GPUs" if len(gpus) > 1 else "VRAM"
+        need = int(size_bytes * 1.15)
+        ratio = need / avail if avail else 9
+        if ratio > 1.0:
+            return {"ok": False, "note": f"needs ~{need / 2**30:.1f} GiB, {avail / 2**30:.1f} GiB free {where} "
+                                         "(lower GPU layers to keep some on the CPU)"}
+        return {"ok": True, "note": f"{'tight: ' if ratio > 0.85 else ''}~{need / 2**30:.1f} of "
+                                    f"{avail / 2**30:.1f} GiB {where}"}
     h = Host()
     avail = h.ram_available or h.ram
     if not avail:
@@ -380,7 +407,11 @@ DEFAULTS = {"ngl": 99, "ctx": 8192, "batch": 2048, "threads": 0,
             # Load the model's mmproj projector when one sits next to it.
             "vision": True,
             # classifier.npz for this model: enables per-reply activation stats
-            "classifier": ""}
+            "classifier": "",
+            # Several GPUs (a Tesla M10 is four): which ones this model may use
+            # (CUDA_VISIBLE_DEVICES), how llama-server splits it (layer | row |
+            # none), the per-GPU proportions ("1,1,1,1") and the main GPU.
+            "gpus": "", "split_mode": "", "tensor_split": "", "main_gpu": -1}
 
 # A named config is a complete, reusable setup: model, load settings, preset,
 # visualizer and hardware limits, under a name. The name is also what the model
@@ -629,11 +660,29 @@ def start_server(model, settings, port):
         if arch:
             cmd += ["--override-kv",
                     f"{arch}.expert_used_count=int:{settings['experts']}"]
+    env = None
+    gpus = str(settings.get("gpus") or "").replace(" ", "")
+    if gpus:
+        if not re.fullmatch(r"\d+(,\d+)*", gpus):
+            return False, "visible GPUs must look like 0,1,2"
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpus}
+    if settings.get("split_mode"):
+        if settings["split_mode"] not in ("layer", "row", "none"):
+            return False, "split mode must be layer, row or none"
+        cmd += ["-sm", settings["split_mode"]]
+    ts = str(settings.get("tensor_split") or "").replace(" ", "")
+    if ts:
+        if not re.fullmatch(r"\d+(\.\d+)?(,\d+(\.\d+)?)*", ts):
+            return False, "tensor split must look like 1,1,1,1 or 3,1"
+        cmd += ["-ts", ts]
+    mg = settings.get("main_gpu")
+    if mg not in (None, "") and int(mg) >= 0:
+        cmd += ["-mg", str(int(mg))]
     if settings.get("extra"):
         cmd += settings["extra"].split()
 
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE)
+                            stderr=subprocess.PIPE, env=env)
     ok, why = wait_healthy(port, proc)
     if not ok:
         err = ""
@@ -1436,6 +1485,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
             return self._jobs_get()
+        if self.path == "/api/gpus":
+            import cuda_info
+            return self._json(200, cuda_info.advise(nvidia_gpus()))
         if self.path == "/api/mcp":
             hub = mcp_hub()
             return self._json(200, {"servers": hub.status() if hub else [], "config": STATE.get("mcp_config"),
@@ -1971,6 +2023,17 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
       <div><label>Batch</label><input id="batch" value="2048"></div>
       <div><label>Threads (0=auto)</label><input id="threads" value="0"></div>
     </div>
+    <div id="gpubox" style="display:none">
+      <label>GPUs <span id="gpuhint" class="note"></span></label>
+      <div class="row2">
+        <div><label>Visible GPUs</label><input id="gpus" placeholder="all, or 0,1"></div>
+        <div><label>Split</label><select id="split_mode"><option value="">default (layer)</option><option>layer</option><option>row</option><option>none</option></select></div>
+      </div>
+      <div class="row2">
+        <div><label>Tensor split</label><input id="tensor_split" placeholder="1,1,1,1"></div>
+        <div><label>Main GPU (-1 = auto)</label><input id="main_gpu" value="-1"></div>
+      </div>
+    </div>
     <div id="moebox" style="display:none">
       <label>Active experts <span id="moehint" class="note"></span></label>
       <input id="experts" value="0">
@@ -2015,8 +2078,8 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let models=[], sel=null, busy=false, ctrl=null, status_={}, pendingImgs=[];
 let chat={id:null,title:'New chat',messages:[]};
-const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra","classifier"];
-const TEXT_FIELDS=["served_name","lora","extra","draft_model","classifier"];
+const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra","classifier","gpus","split_mode","tensor_split","main_gpu"];
+const TEXT_FIELDS=["served_name","lora","extra","draft_model","classifier","gpus","split_mode","tensor_split"];
 const pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
 const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, run scripts/testqa.py against it with --publish-stats (see docs/TESTQA.md).';
 function statBadge(m){ const s=m.stats; if(!s) return '';
@@ -2107,6 +2170,7 @@ function pick(i){
 $('#load').onclick=async()=>{
   if(!sel) return;
   const s={}; F.forEach(k=>{ const el=$('#'+k); if(!el) return; s[k] = TEXT_FIELDS.includes(k) ? el.value : (parseFloat(el.value)||0); });
+  if($('#main_gpu').value.trim()==='' || isNaN(parseFloat($('#main_gpu').value))) s.main_gpu=-1; else s.main_gpu=parseInt($('#main_gpu').value);
   s.flash_attn=true; s.lora_scale=1.0; s.vision=$('#vision').checked;
   $('#load').disabled=true; $('#loadmsg').textContent='starting llama-server…';
   const r=await (await post('/api/load',{path:sel.path,settings:s})).json();
@@ -2326,6 +2390,13 @@ $('#ragq').onkeydown=async e=>{ if(e.key!=='Enter') return; const r=await post('
   $('#raghits').innerHTML=r.ok?(j.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre style="white-space:pre-wrap">${esc(h.text)}</pre></details>`).join('')||'no match'):esc(j.error); };
 $('#dropcoll').onclick=async()=>{ if(!confirm('Delete collection '+curColl+'?')) return; await post('/api/rag/delete',{collection:curColl}); $('#collpanel').style.display='none'; colls(); };
 
+// ---------- GPUs
+async function gpus(){ try{ const r=await (await fetch('/api/gpus')).json(); if(!r.nvidia||!r.count) return;
+  $('#gpubox').style.display='';
+  $('#gpuhint').textContent=`${r.count} × ${r.gpus[0].name}, ${(r.total_vram/2**30).toFixed(0)} GiB`+(r.multi_gpu?` · suggested: ${r.multi_gpu.llama_server}`:'');
+  $('#gpuhint').title=(r.multi_gpu?r.multi_gpu.why+'\n\n':'')+(r.notes||[]).join('\n');
+}catch{} }
+
 // ---------- MCP tools
 async function mcp(reload){
   const r=reload?await (await post('/api/mcp/reload',{})).json():await (await fetch('/api/mcp')).json();
@@ -2338,7 +2409,7 @@ async function mcp(reload){
 }
 $('#mcpreload').onclick=()=>mcp(true);
 
-refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); setInterval(status,4000);
+refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
 </script>"""
 
 

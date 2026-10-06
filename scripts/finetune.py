@@ -33,11 +33,12 @@ Which method:
   full    every weight trains. For knowledge (factual) deficits. Needs
           several times the model size in memory; use --fsdp across GPUs.
 
-Hardware notes: bf16 is used where the GPU supports it, fp16 otherwise (e.g.
-Maxwell/Pascal cards such as the Tesla M10 have no bf16 and slow fp16; check
-that `torch.cuda.get_arch_list()` still includes your card's sm_XX, since
-recent PyTorch wheels drop old architectures). `--check` prints all of this
-without training.
+Hardware notes: precision follows the slowest GPU's compute capability: bf16
+from Ampere, fp16 on Volta/Turing and the P100, fp32 on Maxwell and consumer
+Pascal (a Tesla M10 trains in fp32, LoRA rather than QLoRA). Those cards need
+the CUDA 12.6 PyTorch wheels (torch<2.15); `scripts/cuda_info.py` says which
+wheel and settings fit this machine, and `--check` prints the report without
+training.
 """
 from __future__ import annotations
 
@@ -74,11 +75,18 @@ def hardware_report() -> dict:
 
 
 def precision(rep: dict) -> dict:
-    if not rep["cuda"]:
+    """From compute capability, not torch.cuda.is_bf16_supported(), which also
+    reports emulated bf16. The slowest GPU decides, since DDP runs in lockstep:
+    bf16 from sm_80; fp16 on sm_60 (P100) and sm_70+; fp32 on Maxwell and
+    consumer Pascal, where fp16 runs at a small fraction of fp32 speed."""
+    if not rep["cuda"] or not rep["devices"]:
         return {"bf16": False, "fp16": False}
-    if rep["devices"] and rep["devices"][0]["bf16"]:
-        return {"bf16": True, "fp16": False}
-    return {"bf16": False, "fp16": True}
+    if rep.get("hip"):
+        return {"bf16": bool(rep["devices"][0]["bf16"]), "fp16": not rep["devices"][0]["bf16"]}
+    from cuda_info import precision as cc_precision
+    worst = min(int(d["capability"][3:]) for d in rep["devices"])
+    dt = cc_precision(worst)["dtype"]
+    return {"bf16": dt == "bf16", "fp16": dt == "fp16"}
 
 
 def load_jsonl(p: Path) -> list[dict]:
@@ -153,6 +161,10 @@ def load_model(a, rep):
     if a.method == "qlora":
         if not rep["cuda"] or not rep["bitsandbytes"]:
             raise SystemExit("qlora needs a CUDA GPU and bitsandbytes; use --method lora on ROCm or CPU")
+        old = [d for d in rep["devices"] if not rep.get("hip") and int(d["capability"][3:]) < 60]
+        if old:
+            raise SystemExit(f"qlora: bitsandbytes has no kernels for {old[0]['name']} ({old[0]['capability']}, "
+                             "Maxwell); use --method lora, which trains in fp32 on these GPUs")
         from transformers import BitsAndBytesConfig
         kw["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                                        bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=dtype)
