@@ -17,12 +17,12 @@ a=1 is the profile as exported. So a single adapter covers the whole range and
 nothing is re-exported between points.
 
     # serve, on whichever machine has the fast GPU
-    llama-server -m ornith-Q6_K.gguf --lora-scaled suppress-lora.gguf 1.0 \\
+    llama-server -m model-Q6_K.gguf --lora-scaled suppress-lora.gguf 1.0 \\
         -ngl 99 --port 8080
 
     # tune, from anywhere
     python scripts/tune_scale_server.py \\
-        --base_url http://192.168.41.171:8080 \\
+        --base_url http://GPU-HOST:8080 \\
         --eval_path data/consistency_samples.jsonl \\
         --profile profiles/<fp>/trivia-q6.json \\
         --alphas 0 0.25 0.5 0.75 1.0 --n_eval 200 --concurrency 4 --save

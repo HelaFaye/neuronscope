@@ -13,14 +13,14 @@ than a post-hoc flag.
 
     # score responses you already collected
     python scripts/score_tokens.py \
-        --model_path ornith-ai/Ornith-1.0-9B \
+        --model_path Qwen/Qwen3-8B \
         --classifier models/classifier.npz \
         --input_path data/consistency_samples.jsonl \
         --n 8 --gpu_mem 14GiB --out report.html
 
     # or generate fresh
     python scripts/score_tokens.py \
-        --model_path ornith-ai/Ornith-1.0-9B \
+        --model_path Qwen/Qwen3-8B \
         --classifier models/classifier.npz \
         --question "Who wrote the novel Stoner?" \
         --gpu_mem 14GiB --out report.html

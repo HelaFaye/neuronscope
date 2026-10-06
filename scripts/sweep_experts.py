@@ -12,11 +12,11 @@ This launches a server per value of k, evaluates the same task set against each,
 and reports the paired comparison -- gains, regressions and tokens/sec -- so you
 can see where raising k stops paying.
 
-DENSE MODELS HAVE NO SUCH KNOB. Ornith-1.0-9B and 1.5-9B are dense; there is
-nothing to sweep. This needs 35B-A3B, 397B, or another MoE.
+DENSE MODELS HAVE NO SUCH KNOB. A dense model (most 7-14B releases) has
+nothing to sweep; this needs an MoE checkpoint.
 
     python scripts/sweep_experts.py \\
-        --gguf ~/models/Ornith-1.5-35B-A3B-Q4_K_M.gguf \\
+        --gguf ~/models/Qwen3-30B-A3B-Q4_K_M.gguf \\
         --server ~/llama.cpp/build/bin/llama-server \\
         --tasks data/eval_tasks.jsonl \\
         --experts 2 4 6 8 --ngl 99
@@ -124,7 +124,7 @@ def main():
         raise SystemExit(
             f"{os.path.basename(args.gguf)} declares no {arch}.expert_count, so "
             "it is a dense model.\nThere is no active-parameter knob to sweep. "
-            "Ornith 9B is dense; use 35B-A3B or 397B.")
+            "use an MoE checkpoint such as a 30B-A3B.")
     print(f"experts: {n_expert} total, {default_k} used by default")
     bad = [k for k in args.experts if not (1 <= k <= n_expert)]
     if bad:

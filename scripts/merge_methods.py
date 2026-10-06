@@ -24,7 +24,6 @@ sources on tasks you did not tune on.
 
 import argparse
 import json
-import sys
 
 # tier: 1 = reach for first, 4 = only with a reason
 METHODS = [

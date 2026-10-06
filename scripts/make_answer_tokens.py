@@ -12,7 +12,7 @@ which is fine as long as you extract the "output" location too.
     python scripts/make_answer_tokens.py \
         --input_path data/consistency_samples.jsonl \
         --output_path data/answer_tokens.jsonl \
-        --model_path ornith-ai/Ornith-1.0-9B
+        --model_path Qwen/Qwen3-8B
 """
 import argparse, json
 from transformers import AutoTokenizer

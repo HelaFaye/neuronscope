@@ -10,10 +10,10 @@ words instead of alongside them -- one prefill pass, a few seconds for a typical
 response.
 
     llama-server -m model.gguf --port 8080 &
-    python viz/stream.py --token secret --host 0.0.0.0 &          # viewer
+    python viz/stream.py --token-file viewer.token --host 0.0.0.0 --allow-plaintext &          # viewer
     python scripts/autotrace.py --upstream http://127.0.0.1:8080 \\
         --binary ~/llama.cpp/build/bin/llama-cett-dump \\
-        --gguf model.gguf --tokenizer ornith-ai/Ornith-1.5-9B \\
+        --gguf model.gguf --tokenizer Qwen/Qwen3-8B \\
         --n-layers 36 --publish http://127.0.0.1:7890 --port 8088
 
 Then point Cline, Studio or anything else at :8088 instead of :8080. Nothing
@@ -169,9 +169,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
+    def _score(self, raw):
+        """POST /api/score {messages, response} -> H-Neuron classifier score.
+
+        Used by delegate.py's gate. Synchronous: one prefill on this GGUF."""
+        try:
+            if not CFG.get("classifier"):
+                raise ValueError("start autotrace with --classifier to enable /api/score")
+            if "_scorer" not in CFG:
+                from hscore import HScorer
+                CFG["_scorer"] = HScorer(CFG["binary"], CFG["gguf"], CFG["classifier"],
+                                         CFG["ngl"], CFG["batch"])
+            req = json.loads(raw or b"{}")
+            res = CFG["_scorer"].score(req.get("messages", []), str(req.get("response", "")))
+            res["detail"] = f"prob {res['prob']:.2f} over {res['n_tokens']} response tokens"
+            code = 200
+        except Exception as e:
+            res, code = {"error": f"{type(e).__name__}: {e}"[:300]}, 400
+        body = json.dumps(res).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n)
+        if self.path == "/api/score":
+            return self._score(raw)
         try:
             req = json.loads(raw or b"{}")
         except json.JSONDecodeError:
@@ -250,6 +276,7 @@ def main():
     p.add_argument("--n-layers", type=int, required=True)
     p.add_argument("--publish", help="viz/stream.py base URL")
     p.add_argument("--token", help="bearer token for the viewer")
+    p.add_argument("--classifier", help="classifier.npz for this GGUF; enables POST /api/score")
     p.add_argument("--tier", default="sparse",
                    choices=["raw", "binned", "sparse"])
     p.add_argument("--trace-every", type=int, default=1,
@@ -260,7 +287,10 @@ def main():
     p.add_argument("--batch", type=int, default=4096)
     p.add_argument("--port", type=int, default=8088)
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--allow-unauthenticated", action="store_true", help="permit a non-loopback bind (no auth)")
     a = p.parse_args()
+    import ns_security as sec
+    sec.loopback_only(a.host, "the tracing proxy", a.allow_unauthenticated)
     CFG.update(vars(a))
     CFG["max_frames"] = a.max_frames
     CFG["max_tokens"] = a.max_tokens

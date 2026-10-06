@@ -1,0 +1,228 @@
+{"subject": "code", "prompt": "Why does my Python script raise KeyError when reading this dict?"}
+{"subject": "code", "prompt": "Refactor this JavaScript function to use async/await."}
+{"subject": "code", "prompt": "Write a regex that matches IPv4 addresses."}
+{"subject": "code", "prompt": "How do I undo the last git commit but keep my changes?"}
+{"subject": "code", "prompt": "What does this Rust borrow checker error mean?"}
+{"subject": "code", "prompt": "Write unit tests for a function that parses CSV lines."}
+{"subject": "code", "prompt": "Optimise this SQL query that scans the whole orders table."}
+{"subject": "code", "prompt": "Explain the time complexity of quicksort."}
+{"subject": "code", "prompt": "Convert this bash loop into a Python script."}
+{"subject": "code", "prompt": "How do I read a JSON file in Node.js?"}
+{"subject": "math", "prompt": "What is the derivative of x^3 * sin(x)?"}
+{"subject": "math", "prompt": "Compute the integral of 1/x from 1 to e."}
+{"subject": "math", "prompt": "If a loan of $1000 grows at 5% annually, what is it worth after 3 years?"}
+{"subject": "math", "prompt": "Find the roots of x^2 - 5x + 6 = 0."}
+{"subject": "math", "prompt": "What is the probability of rolling two sixes with two dice?"}
+{"subject": "math", "prompt": "How many diagonals does a hexagon have?"}
+{"subject": "math", "prompt": "Simplify (a^2 - b^2)/(a - b)."}
+{"subject": "math", "prompt": "What is the least common multiple of 12 and 18?"}
+{"subject": "math", "prompt": "Convert 0.375 to a fraction."}
+{"subject": "math", "prompt": "What is the area of a circle with radius 4?"}
+{"subject": "logic", "prompt": "Three boxes are mislabelled; how many fruits must you draw to label them correctly?"}
+{"subject": "logic", "prompt": "If no A are B and some C are A, what follows about C and B?"}
+{"subject": "logic", "prompt": "Knights always tell the truth and knaves always lie. A says B is a knave. B says both are knights. Who is who?"}
+{"subject": "logic", "prompt": "Is the statement 'this sentence is false' true or false?"}
+{"subject": "logic", "prompt": "Mary's father has five daughters: Nana, Nene, Nini, Nono. What is the fifth daughter's name?"}
+{"subject": "logic", "prompt": "Which conclusion follows: all roses are flowers; some flowers fade quickly?"}
+{"subject": "logic", "prompt": "You see a house with two doors, one leads to freedom. One guard lies, one tells the truth. What do you ask?"}
+{"subject": "logic", "prompt": "Arrange these people by age given the clues below."}
+{"subject": "logic", "prompt": "If yesterday was two days after Monday, what day is tomorrow?"}
+{"subject": "logic", "prompt": "Spot the flaw in this argument: every time I wash my car it rains."}
+{"subject": "science", "prompt": "Why do ice cubes float in water?"}
+{"subject": "science", "prompt": "What is the difference between mitosis and meiosis?"}
+{"subject": "science", "prompt": "How does a vaccine train the immune system?"}
+{"subject": "science", "prompt": "What causes the seasons on Earth?"}
+{"subject": "science", "prompt": "Explain Newton's third law with an example."}
+{"subject": "science", "prompt": "What is an isotope?"}
+{"subject": "science", "prompt": "Why is the ocean salty?"}
+{"subject": "science", "prompt": "How do black holes form?"}
+{"subject": "science", "prompt": "What does the mitochondria do in a cell?"}
+{"subject": "science", "prompt": "What is the boiling point of water at high altitude and why?"}
+{"subject": "factual", "prompt": "Who was the first person to walk on the Moon?"}
+{"subject": "factual", "prompt": "What is the longest river in Africa?"}
+{"subject": "factual", "prompt": "When did the Berlin Wall fall?"}
+{"subject": "factual", "prompt": "Which country has the largest population?"}
+{"subject": "factual", "prompt": "Who composed the Four Seasons?"}
+{"subject": "factual", "prompt": "What is the currency of Japan?"}
+{"subject": "factual", "prompt": "Who discovered penicillin?"}
+{"subject": "factual", "prompt": "Which city hosted the 2012 Summer Olympics?"}
+{"subject": "factual", "prompt": "What language is spoken in Brazil?"}
+{"subject": "factual", "prompt": "Who was the first emperor of Rome?"}
+{"subject": "writing", "prompt": "Write a cover letter for a junior data analyst role."}
+{"subject": "writing", "prompt": "Rewrite this paragraph to sound more formal."}
+{"subject": "writing", "prompt": "Give me five title ideas for a blog post about hiking."}
+{"subject": "writing", "prompt": "Write a limerick about a cat who loves coffee."}
+{"subject": "writing", "prompt": "Summarize this article in three bullet points."}
+{"subject": "writing", "prompt": "Draft a thank-you note to my neighbour for watering my plants."}
+{"subject": "writing", "prompt": "Make this product description more persuasive."}
+{"subject": "writing", "prompt": "Write the opening paragraph of a mystery novel."}
+{"subject": "writing", "prompt": "Proofread this sentence for grammar mistakes."}
+{"subject": "writing", "prompt": "Turn these notes into a short speech for a wedding toast."}
+{"subject": "vision", "prompt": "What objects are in this photo?"}
+{"subject": "vision", "prompt": "Describe the image I attached."}
+{"subject": "vision", "prompt": "Read the text in this screenshot."}
+{"subject": "vision", "prompt": "What breed is the dog in this picture?"}
+{"subject": "vision", "prompt": "Is there a person in this image?"}
+{"subject": "vision", "prompt": "Explain the chart in the attached figure."}
+{"subject": "vision", "prompt": "What colour is the car in the photo?"}
+{"subject": "vision", "prompt": "Transcribe the handwriting in this image."}
+{"subject": "vision", "prompt": "Count the apples in this picture."}
+{"subject": "vision", "prompt": "What does this diagram show?"}
+{"subject": "code", "prompt": "Port the parsing module from callbacks to async/await and keep the public interface unchanged.", "style": "task"}
+{"subject": "code", "prompt": "Add a caching layer in front of the HTTP client so repeated lookups do not hit the network.", "style": "task"}
+{"subject": "code", "prompt": "Write unit tests for the date-range helpers, including leap years and time zone edges.", "style": "task"}
+{"subject": "code", "prompt": "Refactor the request handlers so validation lives in one place instead of every endpoint.", "style": "task"}
+{"subject": "code", "prompt": "Implement a command-line tool that walks a directory tree and reports duplicate files by hash.", "style": "task"}
+{"subject": "code", "prompt": "Fix the race condition where two worker threads write the same output file.", "style": "task"}
+{"subject": "code", "prompt": "Read the existing data model, then add a migration that splits the address column into fields.", "style": "task"}
+{"subject": "code", "prompt": "Write a Python script that reads binary records with struct and converts them to JSON.", "style": "task"}
+{"subject": "code", "prompt": "Implement an LRU cache with O(1) get and put, plus tests for eviction order.", "style": "task"}
+{"subject": "code", "prompt": "Profile the import pipeline and remove the quadratic loop that dominates its runtime.", "style": "task"}
+{"subject": "code", "prompt": "Add type hints to the scheduler package and make mypy pass in strict mode.", "style": "task"}
+{"subject": "code", "prompt": "Automate the nightly job: download the files, process each one and log failures without stopping.", "style": "task"}
+{"subject": "code", "prompt": "Write a scraper that pages through the API and saves each record.", "style": "task"}
+{"subject": "code", "prompt": "Replace the hand-rolled argument parsing with argparse and keep the old flags working.", "style": "task"}
+{"subject": "math", "prompt": "Derive the distance from a point to a line segment in three dimensions.", "style": "task"}
+{"subject": "math", "prompt": "Work out the change of coordinates between the rotated frame and the original axes.", "style": "task"}
+{"subject": "math", "prompt": "Prove that the greedy step always reduces the objective, or find a counterexample.", "style": "task"}
+{"subject": "math", "prompt": "Fit a least-squares plane to the sampled points and report the residual error.", "style": "task"}
+{"subject": "math", "prompt": "Compute the expected number of trials before the first success with probability p per trial.", "style": "task"}
+{"subject": "math", "prompt": "Solve the linear system for the unknown offsets given the measured pairs.", "style": "task"}
+{"subject": "math", "prompt": "Find the closed form of the recurrence and check it against the first ten terms.", "style": "task"}
+{"subject": "math", "prompt": "Express the transformation as a matrix and find its determinant and inverse.", "style": "task"}
+{"subject": "math", "prompt": "Find the eigenvalues of the covariance matrix and interpret the principal axes.", "style": "task"}
+{"subject": "math", "prompt": "Estimate the variance of the estimator and derive a confidence interval for it.", "style": "task"}
+{"subject": "math", "prompt": "Parametrise the curve by arc length and compute its curvature at each sample.", "style": "task"}
+{"subject": "math", "prompt": "Integrate the density over the region to get the total mass.", "style": "task"}
+{"subject": "logic", "prompt": "Given these scheduling constraints, decide which assignments are possible and which conflict.", "style": "task"}
+{"subject": "logic", "prompt": "Check whether the rules in this policy contradict each other and name the conflicting pair.", "style": "task"}
+{"subject": "logic", "prompt": "Work out which of the suspects' statements can all be true at once.", "style": "task"}
+{"subject": "logic", "prompt": "Determine the order of the five tasks from the dependency clues.", "style": "task"}
+{"subject": "logic", "prompt": "Decide whether the conclusion follows from the premises, and explain the step that fails if not.", "style": "task"}
+{"subject": "logic", "prompt": "Find the smallest set of switches that must be on for the circuit condition to hold.", "style": "task"}
+{"subject": "science", "prompt": "Explain the physics of why the bridge oscillates at that wind speed.", "style": "task"}
+{"subject": "science", "prompt": "Design an experiment to measure how temperature affects the reaction rate.", "style": "task"}
+{"subject": "science", "prompt": "Summarise the biology of how the immune system recognises a new virus.", "style": "task"}
+{"subject": "science", "prompt": "Estimate the energy needed to heat the tank and how long the heater will take.", "style": "task"}
+{"subject": "science", "prompt": "Explain the chemistry behind the corrosion and how a coating prevents it.", "style": "task"}
+{"subject": "science", "prompt": "Describe how the orbit of the satellite changes as the atmosphere drags on it.", "style": "task"}
+{"subject": "factual", "prompt": "Compile a timeline of the major events of the war with dates and places.", "style": "task"}
+{"subject": "factual", "prompt": "List the countries that border the region and their capitals.", "style": "task"}
+{"subject": "factual", "prompt": "Find out who founded the company, in which year, and where it was based.", "style": "task"}
+{"subject": "factual", "prompt": "Gather the release dates and publishers for each title in the series.", "style": "task"}
+{"subject": "factual", "prompt": "Which treaties ended the conflict, and who signed them?", "style": "task"}
+{"subject": "factual", "prompt": "Collect the population and official languages of each member state.", "style": "task"}
+{"subject": "writing", "prompt": "Draft a project update for the team: what shipped, what is in progress and what is blocked.", "style": "task"}
+{"subject": "writing", "prompt": "Write release notes for this version in plain language for end users.", "style": "task"}
+{"subject": "writing", "prompt": "Turn these meeting notes into a short summary with decisions and owners.", "style": "task"}
+{"subject": "writing", "prompt": "Rewrite the onboarding guide so a new contributor can follow it without help.", "style": "task"}
+{"subject": "writing", "prompt": "Write a cover letter for a junior developer role using the CV below.", "style": "task"}
+{"subject": "writing", "prompt": "Edit this essay for clarity and cut it to five hundred words.", "style": "task"}
+{"subject": "writing", "prompt": "Write the story's next chapter in the same voice as the previous one.", "style": "task"}
+{"subject": "writing", "prompt": "Draft an email declining the request politely and offering an alternative date.", "style": "task"}
+{"subject": "vision", "prompt": "Classify the photos by scene type: indoor, outdoor or night.", "style": "task"}
+{"subject": "vision", "prompt": "Count the bacteria colonies in the petri dish photo and measure their sizes.", "style": "task"}
+{"subject": "vision", "prompt": "Detect the faces in the photo and blur them.", "style": "task"}
+{"subject": "vision", "prompt": "Segment the photo into foreground and background and measure the object's area in pixels.", "style": "task"}
+{"subject": "vision", "prompt": "Find the barcode in the image and decode it.", "style": "task"}
+{"subject": "vision", "prompt": "Read the text in the scanned page and return it as plain text.", "style": "task"}
+{"subject": "vision", "prompt": "Describe what happens in each frame of the security camera footage.", "style": "task"}
+{"subject": "vision", "prompt": "Find the edges in the image with a Sobel filter and trace the contours.", "style": "task"}
+{"subject": "vision", "prompt": "Deskew the scanned document and crop it to the page.", "style": "task"}
+{"subject": "vision", "prompt": "Detect and count the cars in the aerial photo of the car park.", "style": "task"}
+{"subject": "graphics", "prompt": "Write a GLSL fragment shader for toon shading with a rim light.", "style": "task"}
+{"subject": "graphics", "prompt": "Generate lower levels of detail for the mesh with edge-collapse simplification.", "style": "task"}
+{"subject": "graphics", "prompt": "Implement normal mapping in the shader and compute tangents for each vertex.", "style": "task"}
+{"subject": "graphics", "prompt": "Load glTF models with skinning and play their animations.", "style": "task"}
+{"subject": "graphics", "prompt": "Add shadow mapping to the renderer and fix the acne on sloped surfaces.", "style": "task"}
+{"subject": "graphics", "prompt": "Set up a three.js scene with orbit controls, fog and instanced meshes.", "style": "task"}
+{"subject": "graphics", "prompt": "Set up a Vulkan swapchain and recreate it when the window is resized.", "style": "task"}
+{"subject": "graphics", "prompt": "Extract an isosurface from the volume data with marching cubes.", "style": "task"}
+{"subject": "graphics", "prompt": "Implement screen-space ambient occlusion as a post-processing pass.", "style": "task"}
+{"subject": "graphics", "prompt": "Write a WebGL viewer that loads a model and lets the user rotate and zoom it.", "style": "task"}
+{"subject": "graphics", "prompt": "Generate a terrain mesh with smooth normals from the elevation samples.", "style": "task"}
+{"subject": "graphics", "prompt": "Implement deferred lighting with hundreds of point lights.", "style": "task"}
+{"subject": "graphics", "prompt": "Port the OpenGL renderer to a modern GPU API with explicit pipelines and descriptor sets.", "style": "task"}
+{"subject": "graphics", "prompt": "Add particle effects for smoke and sparks with GPU instancing.", "style": "task"}
+{"subject": "systems", "prompt": "Set up the C++ build with CMake, including third-party dependencies and a release configuration.", "style": "task"}
+{"subject": "systems", "prompt": "Make the project build on Windows, macOS and Linux and add a CI job for each.", "style": "task"}
+{"subject": "systems", "prompt": "Write a Dockerfile that builds the service and keeps the final image small.", "style": "task"}
+{"subject": "systems", "prompt": "Fix the linker errors that appear when building with the newer toolchain.", "style": "task"}
+{"subject": "systems", "prompt": "Cross-compile the program for ARM and package it as a Debian package.", "style": "task"}
+{"subject": "systems", "prompt": "Add a Makefile target that regenerates the code and runs the test suite.", "style": "task"}
+{"subject": "systems", "prompt": "Set up pre-commit hooks for formatting and linting across the repository.", "style": "task"}
+{"subject": "systems", "prompt": "Add sanitizers (ASan, UBSan) to the debug build configuration.", "style": "task"}
+{"subject": "systems", "prompt": "Pin the dependency versions and make the build reproducible byte for byte.", "style": "task"}
+{"subject": "systems", "prompt": "Write a systemd service that restarts the daemon on failure and logs to the journal.", "style": "task"}
+{"subject": "systems", "prompt": "Set up log rotation and disk quotas on the build server.", "style": "task"}
+{"subject": "systems", "prompt": "Speed up the build by caching compiled objects between CI runs.", "style": "task"}
+{"subject": "systems", "prompt": "Migrate the project from Make to Meson and keep the same install layout.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Step through the program in a debugger to find where it validates its input.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Disassemble the firmware and identify the function that checks the licence key.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Work out the file format of the save data from hex dumps of several saves.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Use Ghidra to label the functions in the binary and recover the structure definitions.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Find the memory address of the health counter with a memory scanner.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Patch the executable so it skips the intro sequence, and document the offsets.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Dump the cartridge header and identify which memory mapper the board uses.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Rewrite the disassembled routines in C until they compile to identical machine code.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Recover the class hierarchy from the vtables in the stripped binary.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Figure out the compression scheme used for the graphics data and write a decoder.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Hook the emulator's memory reads to log which tables the engine uses each frame.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Reverse engineer the network protocol from packet captures and write a client for it.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Unpack the obfuscated script and explain what it does.", "style": "task"}
+{"subject": "graphics", "prompt": "Add a depth pre-pass and fix the z-fighting on the overlapping decals.", "style": "task"}
+{"subject": "graphics", "prompt": "Implement physically based materials with metallic and roughness maps.", "style": "task"}
+{"subject": "graphics", "prompt": "Write a skybox renderer that samples a cubemap.", "style": "task"}
+{"subject": "graphics", "prompt": "Draw the debug wireframe over the scene without it being hidden by the geometry.", "style": "task"}
+{"subject": "graphics", "prompt": "Implement frustum culling so off-screen objects are not submitted for drawing.", "style": "task"}
+{"subject": "graphics", "prompt": "Convert the point cloud into a triangulated surface and smooth it.", "style": "task"}
+{"subject": "graphics", "prompt": "Add anti-aliasing to the renderer with multisampling.", "style": "task"}
+{"subject": "graphics", "prompt": "Animate the camera along a spline and render each frame to video.", "style": "task"}
+{"subject": "graphics", "prompt": "Implement a sprite batcher that draws thousands of quads in one draw call.", "style": "task"}
+{"subject": "graphics", "prompt": "Write the pixel shader that tints the water by depth and adds caustics.", "style": "task"}
+{"subject": "graphics", "prompt": "Build the scene graph so each node's transform is relative to its parent.", "style": "task"}
+{"subject": "graphics", "prompt": "Make the viewer show the model with orthographic and perspective cameras.", "style": "task"}
+{"subject": "systems", "prompt": "Install the toolchain on the build machine and document every prerequisite.", "style": "task"}
+{"subject": "systems", "prompt": "Set up the monorepo so each package builds and tests independently.", "style": "task"}
+{"subject": "systems", "prompt": "Split the static library into a shared library and fix the exported symbols.", "style": "task"}
+{"subject": "systems", "prompt": "Write the install script that sets up the environment on a fresh machine.", "style": "task"}
+{"subject": "systems", "prompt": "Configure the CI runners to build release artefacts and attach them to tags.", "style": "task"}
+{"subject": "systems", "prompt": "Make the build work offline by vendoring the dependencies.", "style": "task"}
+{"subject": "systems", "prompt": "Set up the database server, backups and a restore test.", "style": "task"}
+{"subject": "systems", "prompt": "Upgrade the compiler version and fix the new warnings in the build.", "style": "task"}
+{"subject": "systems", "prompt": "Add a dev container so contributors get the same tools and versions.", "style": "task"}
+{"subject": "systems", "prompt": "Configure the reverse proxy and TLS certificates for the internal services.", "style": "task"}
+{"subject": "systems", "prompt": "Write a cron job that cleans old artefacts from the build cache.", "style": "task"}
+{"subject": "systems", "prompt": "Run the test suite in parallel across workers and merge the reports.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Map out the memory layout of the console from the hardware documentation and the disassembly.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Recover the original level data structures from the decompiled loader.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Work out what each byte of the packet header means by changing inputs and diffing the output.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Identify the compiler and libraries used to build the executable from its strings and signatures.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Annotate the decompilation with names for the functions you have identified.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Extract the assets from the game's archive files and document the format.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Trace the system calls the closed-source tool makes and reproduce its behaviour.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Find the jump table for the opcode handlers in the interpreter's binary.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Read the original engine's source to learn how it decides which objects collide.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Patch the bytecode so the debug menu is enabled, and record where the flag lives.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Write a tool that converts the proprietary map format into JSON.", "style": "task"}
+{"subject": "reverse-engineering", "prompt": "Use an emulator's debugger to watch which code runs when the player opens a door.", "style": "task"}
+{"subject": "code", "prompt": "Implement the feature behind a flag and add integration tests for both settings.", "style": "task"}
+{"subject": "code", "prompt": "Write a parser for the configuration format with clear error messages.", "style": "task"}
+{"subject": "code", "prompt": "Replace the global state in the module with a class that callers instantiate.", "style": "task"}
+{"subject": "code", "prompt": "Add pagination to the list endpoint and update the client to follow it.", "style": "task"}
+{"subject": "code", "prompt": "Implement a worker pool that processes jobs from the queue with a timeout per job.", "style": "task"}
+{"subject": "code", "prompt": "Write a script that converts the CSV exports into the new schema and validates them.", "style": "task"}
+{"subject": "code", "prompt": "Fix the memory leak in the long-running service and add a regression test.", "style": "task"}
+{"subject": "code", "prompt": "Add logging around the payment flow without logging card numbers.", "style": "task"}
+{"subject": "math", "prompt": "Work out the transformation from map coordinates to screen coordinates and its inverse.", "style": "task"}
+{"subject": "math", "prompt": "Compute the intersection of the ray with the plane and the triangle.", "style": "task"}
+{"subject": "math", "prompt": "Derive the interpolation weights for a point inside the triangle.", "style": "task"}
+{"subject": "math", "prompt": "Find the angle between the two vectors and the axis that rotates one onto the other's plane.", "style": "task"}
+{"subject": "math", "prompt": "Show that the algorithm terminates and bound its number of steps.", "style": "task"}
+{"subject": "math", "prompt": "Compute the probability that two random samples fall in the same bucket.", "style": "task"}
+{"subject": "vision", "prompt": "Find the objects in the image by thresholding and labelling connected regions.", "style": "task"}
+{"subject": "vision", "prompt": "Measure the colours in each region of the image and group similar pixels.", "style": "task"}
+{"subject": "vision", "prompt": "Locate the template inside the larger image and report its position.", "style": "task"}
+{"subject": "vision", "prompt": "Track the moving object across the video frames.", "style": "task"}
+{"subject": "vision", "prompt": "Detect where the photos overlap and align them.", "style": "task"}
+{"subject": "vision", "prompt": "Classify each pixel of the satellite image as water, forest or field.", "style": "task"}

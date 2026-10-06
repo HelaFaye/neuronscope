@@ -128,6 +128,9 @@ def analyse(path):
 
 
 def main():
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(__doc__.strip())
+        return
     paths = sys.argv[1:] or ["runs/trace-tc32"]
     rows = [analyse(p) for p in paths]
 

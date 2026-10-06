@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Installer for NeuronScope.
+# Installer for NeuronScope: creates ./venv with a PyTorch build that matches
+# this machine, installs requirements, and smoke-tests the GPU.
 #
-# Targets EndeavourOS / Arch, where AMD does not officially support ROCm. The
-# strategy is to try the PyTorch ROCm wheels first (they bundle the ROCm
-# userspace, so all they need from the host is the amdgpu/amdkfd kernel driver,
-# which Arch ships in mainline), and fall back to Docker if that fails.
+#   NVIDIA (nvidia-smi present)  -> a CUDA wheel for the GPU's architecture:
+#                                   Turing+ the default PyPI wheel; Maxwell,
+#                                   Pascal, Volta (e.g. Tesla M10) the CUDA 12.6
+#                                   wheels, torch<2.15 (scripts/cuda_info.py)
+#   macOS                        -> default PyPI wheel (Metal/MPS)
+#   AMD (/dev/kfd present)       -> ROCm wheel index chosen from the gfx target;
+#                                   the wheels bundle ROCm userspace, so distros
+#                                   AMD does not officially support usually work
+#   otherwise                    -> CPU wheel
 #
 #   ./install.sh              # detect, install into ./venv, verify
 #   ./install.sh --rocm 6.4   # force a ROCm wheel index
+#   ./install.sh --cuda       # force a CUDA wheel (chosen by scripts/cuda_info.py)
 #   ./install.sh --cpu        # no GPU, CPU-only torch
-#   ./install.sh --docker     # just print the Docker recipe and exit
+#   ./install.sh --system-torch  # venv that reuses the distro's torch
+#   ./install.sh --docker     # just print the ROCm Docker recipe and exit
 
 set -euo pipefail
 
@@ -22,9 +30,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --rocm) ROCM_VERSION="$2"; FORCE_ROCM=1; shift 2 ;;
     --cpu) MODE="cpu"; shift ;;
+    --cuda) MODE="cuda"; shift ;;
     --system-torch) MODE="system"; shift ;;
     --docker) MODE="docker"; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -78,10 +87,19 @@ fi
 # ------------------------------------------------------------ GPU detection
 
 GFX=""
-if [[ "$MODE" != "cpu" ]]; then
+if [[ "$MODE" == "auto" ]] && (( ! FORCE_ROCM )); then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    info "macOS: installing the default wheel (MPS backend)"
+    MODE="cuda"   # same install path: the default PyPI wheel
+  elif command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
+    info "NVIDIA GPU(s): $(nvidia-smi -L | wc -l), $(nvidia-smi -L | head -1)"
+    MODE="cuda"
+  fi
+fi
+if [[ "$MODE" == "auto" ]]; then
   if [[ ! -e /dev/kfd ]]; then
-    warn "/dev/kfd missing. The amdgpu kernel driver is not loaded, or you are"
-    warn "in a container without --device=/dev/kfd. Falling back to CPU torch."
+    info "no NVIDIA or AMD compute device found (/dev/kfd missing); using CPU torch."
+    info "llama.cpp's Vulkan backend can still use the GPU for serving and extraction."
     MODE="cpu"
   else
     for grp in video render; do
@@ -179,16 +197,27 @@ python3 -m venv "$VENV"
 source "$VENV/bin/activate"
 pip install --quiet --upgrade pip wheel
 
-if [[ "$MODE" == "cpu" ]]; then
+TORCH_SPEC="torch"
+if [[ "$MODE" == "cuda" ]]; then
+  INDEX=""
+  if [[ "$(uname -s)" != "Darwin" ]] && command -v nvidia-smi >/dev/null; then
+    python3 scripts/cuda_info.py | sed 's/^/    /'
+    read -r -a TORCH_ARGS <<< "$(python3 scripts/cuda_info.py --torch-pip)"
+    if [[ ${#TORCH_ARGS[@]} -gt 0 ]]; then
+      TORCH_SPEC="${TORCH_ARGS[0]}"
+      [[ "${TORCH_ARGS[1]:-}" == "--index-url" ]] && INDEX="${TORCH_ARGS[2]}"
+    fi
+  fi
+  info "installing $TORCH_SPEC from ${INDEX:-PyPI}"
+elif [[ "$MODE" == "cpu" ]]; then
   INDEX="https://download.pytorch.org/whl/cpu"
   info "installing CPU torch"
-  info "  (re-run with --rocm 6.4 if scripts/try_rocm.sh passes on your GPU)"
 else
   INDEX="https://download.pytorch.org/whl/rocm${ROCM_VERSION}"
   info "installing torch from $INDEX"
 fi
 
-if ! pip install torch --index-url "$INDEX"; then
+if ! pip install "$TORCH_SPEC" ${INDEX:+--index-url "$INDEX"}; then
   warn "that wheel index failed. Available ROCm indexes are listed at"
   warn "  https://pytorch.org/get-started/locally/"
   warn "Retry with ./install.sh --rocm <version>, or use ./install.sh --docker"
@@ -206,13 +235,36 @@ cat > /tmp/ns_smoke.py <<'PY'
 import torch
 print("torch     :", torch.__version__)
 print("hip       :", getattr(torch.version, "hip", None))
+if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+    print("device    : Apple MPS")
 if torch.cuda.is_available():
-    print("device    :", torch.cuda.get_device_name(0))
-    free, total = torch.cuda.mem_get_info()
-    print("vram      : %.1f GiB total, %.1f GiB free" % (total/2**30, free/2**30))
-    x = torch.randn(2048, 2048, device="cuda", dtype=torch.bfloat16)
-    print("bf16 matmul:", tuple((x @ x).shape), "ok")
-    print("\nsuggested --gpu_mem: %dGiB" % max(1, int(total/2**30) - 2))
+    # Every GPU, not just the first: a Tesla M10 is four. Check that the wheel has
+    # kernels for each card (a wheel without them fails with "no kernel image"),
+    # and that results match the CPU, not merely that a kernel ran.
+    archs = torch.cuda.get_arch_list()
+    total_all = 0
+    a = torch.randn(512, 512, dtype=torch.float32)
+    ref = a @ a
+    for i in range(torch.cuda.device_count()):
+        p = torch.cuda.get_device_properties(i)
+        cc = f"sm_{p.major}{p.minor}"
+        free, total = torch.cuda.mem_get_info(i)
+        total_all += total
+        print(f"device {i}  : {p.name}  {cc}  {total/2**30:.1f} GiB ({free/2**30:.1f} free)")
+        if not getattr(torch.version, "hip", None) and cc not in archs and \
+                not any(x.startswith("compute_") for x in archs):
+            raise SystemExit(f"this torch wheel has no kernels for {cc} (has {', '.join(archs)}); "
+                             "re-run ./install.sh, which picks the wheel with scripts/cuda_info.py")
+        got = (a.to(f"cuda:{i}") @ a.to(f"cuda:{i}")).cpu()
+        err = float((got - ref).abs().max() / ref.abs().max())
+        if err > 1e-3:
+            raise SystemExit(f"device {i}: fp32 matmul differs from CPU by {err:.2e}")
+        dt = "bf16" if p.major >= 8 else "fp16" if (p.major >= 7 or (p.major, p.minor) == (6, 0)) else "fp32"
+        if dt != "fp32":
+            x = torch.randn(1024, 1024, device=f"cuda:{i}", dtype=getattr(torch, "bfloat16" if dt == "bf16" else "float16"))
+            _ = x @ x
+        print(f"            fp32 matches CPU (rel err {err:.1e}); training precision {dt}")
+    print("\nsuggested --gpu_mem: %dGiB" % max(1, int(torch.cuda.mem_get_info(0)[1]/2**30) - 2))
 else:
     print("no GPU visible to torch; extraction will run on CPU")
 PY
@@ -238,7 +290,7 @@ Done. Activate with:  source $VENV/bin/activate
 
 Next step, which costs no VRAM and downloads no weights:
 
-  python scripts/preflight.py --model_path ornith-ai/Ornith-1.0-9B --n_pairs 400
+  python scripts/preflight.py --model_path Qwen/Qwen3-8B --n_pairs 400
 
-Then read PIPELINE in README.md.
+Then see docs/GETTING_STARTED.md.
 EOF

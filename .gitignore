@@ -13,5 +13,10 @@ data/TriviaQA/rc.nocontext/*.parquet
 logs/
 models_1v1*/
 runs/
-data/
+data/*
+!data/README.md
 delegation.json
+
+env.local.sh
+*.token
+ns-key.pem

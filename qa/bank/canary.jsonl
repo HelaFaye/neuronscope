@@ -1,0 +1,7 @@
+{"id": "k-haiku", "kind": "canary", "subject": "writing", "prompt": "Write a haiku about autumn rain."}
+{"id": "k-email", "kind": "canary", "subject": "writing", "prompt": "Draft a short, polite email asking a colleague to review a pull request by Friday."}
+{"id": "k-explain", "kind": "canary", "subject": "science", "prompt": "Explain to a ten-year-old why the sky is blue, in three sentences."}
+{"id": "k-summarise", "kind": "canary", "subject": "writing", "prompt": "Summarise the plot of Romeo and Juliet in two sentences."}
+{"id": "k-recipe", "kind": "canary", "subject": "writing", "prompt": "Give me a simple recipe for pancakes."}
+{"id": "k-sql", "kind": "canary", "subject": "code", "prompt": "Explain the difference between an INNER JOIN and a LEFT JOIN in SQL."}
+{"id": "k-chem", "kind": "canary", "subject": "science", "prompt": "Describe what happens during photosynthesis in plain language."}

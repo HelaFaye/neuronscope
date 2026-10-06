@@ -15,15 +15,14 @@ import json
 import math
 import os
 import shlex
-import statistics
 import subprocess
 import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 def wilson_interval(correct:int,total:int,z:float=1.96):
@@ -58,24 +57,54 @@ class CandidateResult:
     error: str|None=None
 
 class WorkerClient:
-    def __init__(self, base_url:str, token:str='', timeout:int=120):
+    def __init__(self, base_url:str, token:str='', timeout:int=120, cafile:str=''):
         self.base=base_url.rstrip('/')
         self.token=token
+        self._expect={}
         self.timeout=timeout
+        self.ssl=None
+        if self.base.startswith('https://'):
+            import ns_security
+            self.ssl=ns_security.client_ssl_context(cafile)
     def _request(self,method,path,payload=None):
         data=None
         if payload is not None:
             data=json.dumps(payload).encode();
         req=urllib.request.Request(self.base+path,data=data,method=method,headers={'Content-Type':'application/json','Authorization':f'Bearer {self.token}'} if self.token else {'Content-Type':'application/json'})
         try:
-            with urllib.request.urlopen(req,timeout=self.timeout) as r:
+            with urllib.request.urlopen(req,timeout=self.timeout,context=self.ssl) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             body=e.read().decode(errors='replace')
             raise RuntimeError(f'worker HTTP {e.code}: {body}') from e
     def health(self): return self._request('GET','/health')
-    def submit(self,job): return self._request('POST','/api/jobs',job)
-    def get(self,job_id): return self._request('GET',f'/api/jobs/{job_id}')
+    def submit(self,job):
+        # A fresh nonce per job; the worker echoes it inside every signed result.
+        if self.token and 'nonce' not in job:
+            import secrets
+            job={**job,'nonce':secrets.token_urlsafe(24)}
+        if job.get('job_id') and job.get('nonce'):
+            self._expect[job['job_id']]=(job['nonce'],float(job['scale']))
+        r=self._request('POST','/api/jobs',job)
+        if self.token:
+            self._check(r)
+            self._expect.setdefault(r['job_id'],(job.get('nonce'),float(job['scale'])))
+        return r
+    def get(self,job_id):
+        r=self._request('GET',f'/api/jobs/{job_id}')
+        if self.token:
+            self._check(r)
+            if r.get('job_id')!=job_id:
+                raise RuntimeError(f"worker answered a request for {job_id!r} with job {r.get('job_id')!r} (replayed?)")
+        return r
+    def _check(self,r):
+        """Refuse results that are unsigned, altered, or answer a different request."""
+        import ns_security
+        if not ns_security.verify_result(self.token,r):
+            raise RuntimeError(f"worker result for {r.get('job_id')!r} has a missing or invalid signature; refusing it")
+        want=self._expect.get(r.get('job_id'))
+        if want and (r.get('nonce')!=want[0] or abs(float(r.get('scale',0))-want[1])>1e-12):
+            raise RuntimeError(f"worker result for {r.get('job_id')!r} does not match the submitted job (replayed?)")
     def delete_model(self, path): return self._request('POST','/api/models/delete',{'path':path})
     def wait(self,job_id,poll=1.0):
         while True:
@@ -313,10 +342,11 @@ class AdaptiveTuner:
 
 def main(argv=None):
     p=argparse.ArgumentParser(); sub=p.add_subparsers(dest='cmd',required=True)
-    s=sub.add_parser('tune'); s.add_argument('--state',required=True); s.add_argument('--worker',required=True); s.add_argument('--min',type=float,default=.1); s.add_argument('--max',type=float,default=.9); s.add_argument('--initial-step',type=float,default=.1); s.add_argument('--resolution',type=float,default=.01); s.add_argument('--batch-size',type=int,default=2); s.add_argument('--margin-of-error',type=float,default=.03); s.add_argument('--baseline-score',type=float); s.add_argument('--max-batches',type=int,default=20)
+    s=sub.add_parser('tune'); s.add_argument('--state',required=True); s.add_argument('--worker',required=True); s.add_argument('--min',type=float,default=.1); s.add_argument('--max',type=float,default=.9); s.add_argument('--initial-step',type=float,default=.1); s.add_argument('--resolution',type=float,default=.01); s.add_argument('--batch-size',type=int,default=2); s.add_argument('--margin-of-error',type=float,default=.03); s.add_argument('--baseline-score',type=float); s.add_argument('--max-batches',type=int,default=20); s.add_argument('--auto-delete',action='store_true',help='delete candidates that underperform the best by more than the margin'); s.add_argument('--token',default='',help='discouraged: prefer --token-file or $NS_TRANSFER_TOKEN'); s.add_argument('--token-file',default=''); s.add_argument('--cafile',default='')
     a=p.parse_args(argv)
     if a.cmd=='tune':
-        client=WorkerClient(a.worker, token=a.token)
+        import ns_security
+        client=WorkerClient(a.worker, token=ns_security.resolve_token(a.token,a.token_file), cafile=a.cafile)
         print(json.dumps(AdaptiveTuner(a.state).run(client=client,minimum=a.min,maximum=a.max,initial_step=a.initial_step,autotune_resolution=a.resolution,batch_size=a.batch_size,margin_of_error=a.margin_of_error,baseline_score=a.baseline_score,max_batches=a.max_batches,auto_delete=a.auto_delete),indent=2)); return 0
     return 0
 if __name__=='__main__': raise SystemExit(main())

@@ -21,11 +21,9 @@ wrong about your machine.
 """
 
 import argparse
-import glob
 import os
 import shutil
 import subprocess
-import sys
 
 GIB = 1024 ** 3
 
@@ -69,6 +67,14 @@ class Host:
     def _gpu(self):
         """-> (bytes, name). Integrated GPUs report a shared-memory carve-out,
         which is a real limit for llama.cpp but comes out of system RAM."""
+        try:
+            from cuda_info import query_gpus
+            gpus = query_gpus()
+            if gpus:
+                name = gpus[0]["name"] if len(gpus) == 1 else f"{len(gpus)} x {gpus[0]['name']}"
+                return sum(g["memory_total"] for g in gpus), name
+        except Exception:
+            pass
         try:
             out = subprocess.run(["vulkaninfo", "--summary"],
                                  capture_output=True, text=True, timeout=20).stdout

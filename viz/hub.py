@@ -8,7 +8,7 @@ not. This supervises them -- open a tab and its service starts, close the tab
 and it stops.
 
     python viz/hub.py --root . --port 7860
-    python viz/hub.py --root . --host 0.0.0.0 --token "$(openssl rand -hex 8)"
+    python viz/hub.py --root . --host 0.0.0.0 --token-file hub.token --tls-cert c.pem --tls-key k.pem
 
 Services are declared in SERVICES, not discovered, because a supervisor that
 starts arbitrary commands from a config file is a remote shell. Each entry says
@@ -25,7 +25,7 @@ import http.cookies
 import json
 import os
 import queue
-import shutil
+import re
 import signal
 import socket
 import subprocess
@@ -37,6 +37,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
+import ns_security as sec  # noqa: E402
 try:
     import shell            # the mode registry
 except ImportError:
@@ -84,12 +86,13 @@ def declare(root, py):
             "port": 7890,
             "script": "viz/stream.py",
             "args": lambda port, cfg: [
-                py, "-u", os.path.join(root, "viz/stream.py"),
-                "--port", str(port), "--simulate",
+                py, "-u", os.path.join(root, "viz/stream.py"), "--port", str(port),
+                # a llama-server patched by llama-tools/server-activations, else a simulation
+                *(["--source", cfg["live_source"]] if cfg.get("live_source") else ["--simulate"]),
             ],
             "health": "/api/tiers",
             "needs": [],
-            "desc": "Activation stream. Simulated until the fork lands.",
+            "desc": "Live activation stream, from a patched llama-server (or simulated).",
         },
         "replay": {
             "mode": "replay",
@@ -104,6 +107,33 @@ def declare(root, py):
             "desc": "Token-resolved 3D trace, scrubbable.",
         },
     }
+
+
+TRACE_DIRS = ["~/.neuronscope/traces", "runs"]
+
+
+def find_traces(limit=200):
+    """Trace sessions for the Replay picker: Studio's per-reply checks and
+    scripts/trace_sample.py output, newest first."""
+    out = []
+    for base in TRACE_DIRS:
+        base = os.path.join(STATE["root"], os.path.expanduser(base))
+        if not os.path.isdir(base):
+            continue
+        for name in os.listdir(base):
+            d = os.path.join(base, name)
+            try:
+                with open(os.path.join(d, "manifest.json")) as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if meta.get("kind") != "trace":
+                continue
+            rel = os.path.relpath(d, STATE["root"])
+            out.append({"path": d if rel.startswith("..") else rel, "model": meta.get("model"),
+                        "created": meta.get("created") or "", "source": meta.get("source", "trace_sample")})
+    out.sort(key=lambda x: x["created"], reverse=True)
+    return out[:limit]
 
 
 def _pump(name, proc):
@@ -152,7 +182,14 @@ def acquire(name, holder, cfg=None):
         script = os.path.join(STATE["root"], svc["script"])
         if not os.path.exists(script):
             return False, f"{svc['script']} not found", None
-        cfg = cfg or {}
+        cfg = {k: str(v).strip() for k, v in (cfg or {}).items()
+               if k in ("server_bin", "models_dir", "trace", "live_source")}
+        for k, v in cfg.items():
+            # These become argv values: one starting with "-" would be read as a flag.
+            if v.startswith("-") or any(ord(c) < 32 for c in v):
+                return False, f"{k}: invalid value", None
+        if cfg.get("live_source") and not re.match(r"^https?://[^\s]+$", cfg["live_source"]):
+            return False, "live source must be an http(s) URL of a patched llama-server", None
         missing = [n for n in svc["needs"] if not cfg.get(n)]
         if missing:
             return False, f"needs {', '.join(missing)}", None
@@ -294,6 +331,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(service_state()))
         if path == "/api/theme":
             return self._send(200, json.dumps(ui_theme()))
+        if path == "/api/traces":
+            return self._send(200, json.dumps({"traces": find_traces()}))
         if path == "/api/modes":
             return self._send(200, shell.as_json() if shell
                               else json.dumps({"modes": []}))
@@ -471,8 +510,11 @@ label{display:block;font-size:12px;color:var(--fg-dim);margin:8px 0 3px}
   <input id="server_bin" placeholder="~/llama.cpp/build/bin/llama-server">
   <label>models directory</label>
   <input id="models_dir" placeholder="/path/to/.models">
-  <label>trace session (for Replay)</label>
-  <input id="trace" placeholder="runs/trace-abc">
+  <label>trace session (for Replay): pick a checked reply or a trace_sample.py run, or type a path</label>
+  <input id="trace" list="traces" placeholder="runs/trace-abc">
+  <datalist id="traces"></datalist>
+  <label>live source (for Live): a llama-server patched with llama-tools/server-activations; empty = simulated</label>
+  <input id="live_source" placeholder="http://127.0.0.1:8080">
 </div>
 
 <div class="card" id="framecard" style="display:none">
@@ -496,11 +538,18 @@ const HOLDER = Math.random().toString(36).slice(2);
 let open=null, es=null;
 
 const cfg=()=>({server_bin:$('#server_bin').value.trim(),
-  models_dir:$('#models_dir').value.trim(), trace:$('#trace').value.trim()});
-for(const k of ['server_bin','models_dir','trace']){
+  models_dir:$('#models_dir').value.trim(), trace:$('#trace').value.trim(),
+  live_source:$('#live_source').value.trim()});
+for(const k of ['server_bin','models_dir','trace','live_source']){
   try{ const v=localStorage.getItem('ns_'+k); if(v) $('#'+k).value=v; }catch{}
   $('#'+k).oninput=e=>{ try{ localStorage.setItem('ns_'+k,e.target.value) }catch{} };
 }
+
+fetch('/api/traces').then(r=>r.json()).then(j=>{
+  const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  $('#traces').innerHTML=j.traces.map(t=>`<option value="${esc(t.path)}">${esc(t.model||'')} · ${esc(t.created)} · ${t.source==='studio'?'checked reply':'trace run'}</option>`).join('');
+  if(!$('#trace').value && j.traces.length) $('#trace').value=j.traces[0].path;
+}).catch(()=>{});
 
 async function tick(){
   const s=await (await fetch('/api/services')).json();
@@ -572,13 +621,22 @@ def main():
     p.add_argument("--root", default=".")
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--token")
     p.add_argument("--idle-after", type=int, default=90,
                    help="seconds to keep a service alive after its last tab")
+    sec.add_server_security_args(p)
     a = p.parse_args()
 
+    os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
+    token = sec.resolve_token(a.token, a.token_file) or None
+    tls = bool(a.tls_cert and a.tls_key)
+    try:
+        for w in sec.check_bind(a.host, token or "", tls=tls, allow_plaintext=a.allow_plaintext):
+            print("warning:", w)
+    except sec.SecurityConfigError as e:
+        raise SystemExit(f"error: {e}")
+
     STATE.update({"root": os.path.abspath(a.root),
-                  "token": a.token or os.environ.get("NS_STUDIO_TOKEN"),
+                  "token": token,
                   "idle_after": a.idle_after})
     SERVICES.update(declare(STATE["root"], sys.executable))
 
@@ -587,12 +645,12 @@ def main():
     for n, s in SERVICES.items():
         ok = os.path.exists(os.path.join(STATE["root"], s["script"]))
         print(f"  {n:<8} {s['script']:<18} {'ok' if ok else 'MISSING'}")
-    if a.host == "0.0.0.0" and not STATE["token"]:
-        print("\n!! bound to 0.0.0.0 with no --token: anyone on this network "
-              "can start processes here")
 
     threading.Thread(target=reaper, daemon=True).start()
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    if tls:
+        srv.socket = sec.server_ssl_context(a.tls_cert, a.tls_key).wrap_socket(
+            srv.socket, server_side=True, do_handshake_on_connect=False)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -26,6 +26,9 @@ blend_mode = 1
 ; BILLBOARD_ENABLED = 1. PARTICLES (3) is for GPUParticles and adds
 ; per-instance rotation these static cells do not want.
 billboard_mode = 1
+; Without keep_scale a billboard ignores the instance scale, and every cell
+; would draw at one size whatever its activity.
+billboard_keep_scale = true
 vertex_color_use_as_albedo = true
 disable_receive_shadows = true
 no_depth_test = false

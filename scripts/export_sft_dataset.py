@@ -150,7 +150,7 @@ Then, on a rented 24GB card (this will not run on a Vega iGPU or a 16GB card):
 
   pip install trl peft transformers datasets bitsandbytes
   python -m trl.scripts.sft \\
-      --model_name_or_path ornith-ai/Ornith-1.5-9B \\
+      --model_name_or_path Qwen/Qwen3-8B \\
       --dataset_name json --dataset_train_split train \\
       --use_peft --lora_r 16 --lora_alpha 32 \\
       --load_in_4bit --learning_rate 1e-4 --num_train_epochs 2 \\

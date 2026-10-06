@@ -2,9 +2,9 @@
 """
 NeuronScope explorer: 2D and 3D activation maps over a recorded session.
 
-    python viz/explore.py runs/ornith-q6
-    python viz/explore.py runs/ornith-q6 --h-neurons models/h_neurons.json
-    python viz/explore.py runs/ornith-q6 --split-by verdict
+    python viz/explore.py runs/model-q6
+    python viz/explore.py runs/model-q6 --h-neurons models/h_neurons.json
+    python viz/explore.py runs/model-q6 --split-by verdict
 
 Four panels:
 

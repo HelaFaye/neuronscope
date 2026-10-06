@@ -1,8 +1,9 @@
 // ns_activations.h -- stream per-token activations out of llama-server.
 //
-// Self-contained on purpose. server.cpp is large and changes often, so a patch
-// against its internals would rot within weeks. Everything here lives in one
-// header with three small insertion points, listed in PATCH.md.
+// Self-contained on purpose. The server sources are large and change often, so
+// a patch against their internals would rot within weeks. Everything here
+// lives in one header; apply_patch.py adds the few insertion points that wire
+// it in, and PATCH.md explains each.
 //
 // WHAT IT EMITS
 //
@@ -337,8 +338,16 @@ inline bool eval_callback(ggml_tensor * t, bool ask, void * user_data) {
     auto * c = (ctx *) user_data;
     if (!c || !c->str || !c->str->cfg.enabled) return false;
 
+    // The dense down projection is "ffn_down-N" in older llama.cpp and
+    // "ffn_out-N" in current builds (the same names cett-dump accepts). Only
+    // the matmul itself is wanted: with a bias, the named node can be the add.
     const char * name = ggml_get_name(t);
-    int layer = parse_layer(name, "ffn_down-");
+    int layer = -1;
+    for (const char * pre : {"ffn_down-", "ffn_out-", "ffn_down_out-"}) {
+        layer = parse_layer(name, pre);
+        if (layer >= 0) break;
+    }
+    if (layer >= 0 && t->op != GGML_OP_MUL_MAT) layer = -1;
     const bool moe = layer < 0;
     if (moe) layer = parse_layer(name, "ffn_moe_down-");
 

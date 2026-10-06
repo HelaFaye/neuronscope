@@ -33,12 +33,12 @@ giving Q(W)[:, S] + Q(W)[:, S]*(s-1) = s*Q(W)[:, S] exactly. If you are serving
 a fixed quant, always use --gguf.
 
     python scripts/export_lora.py \
-        --model_path ornith-ai/Ornith-1.0-9B \
+        --model_path Qwen/Qwen3-8B \
         --profile profiles/<fp>/trivia-q8.json \
-        --output_dir adapters/ornith-suppress
+        --output_dir adapters/model-suppress
 
-    python llama.cpp/convert_lora_to_gguf.py adapters/ornith-suppress \
-        --base ornith-ai/Ornith-1.0-9B --outfile ornith-suppress-lora.gguf
+    python llama.cpp/convert_lora_to_gguf.py adapters/model-suppress \
+        --base Qwen/Qwen3-8B --outfile model-suppress-lora.gguf
 """
 
 import argparse

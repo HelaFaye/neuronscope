@@ -1,0 +1,6 @@
+# docker/llama-cuda.Dockerfile needs only these; everything else (venvs, models,
+# runs) would be sent to the daemon as build context for nothing.
+*
+!llama-tools/
+!scripts/build_llama_tools.sh
+!scripts/cuda_info.py

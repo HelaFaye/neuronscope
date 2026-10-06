@@ -7,7 +7,7 @@ stage list, a live view of whatever is currently going, and a Run button per
 stage that streams the subprocess output back.
 
     python viz/control.py --root . --port 7861
-    python viz/control.py --root . --host 0.0.0.0 --token "$(openssl rand -hex 8)"
+    python viz/control.py --root . --host 0.0.0.0 --token-file control.token --tls-cert c.pem --tls-key k.pem
 
 It reads state off the filesystem rather than keeping its own, so it tells the
 truth about a run started from a terminal, and a run started here survives the
@@ -21,7 +21,6 @@ process launching on your network; do not do that.
 import argparse
 import hmac
 import sys
-import html
 import http.cookies
 import json
 import os
@@ -34,6 +33,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import ns_security as sec  # noqa: E402
 try:
     import shell            # shared tab registry, viz/modes.json
 except ImportError:
@@ -468,19 +469,27 @@ def main():
     p.add_argument("--root", default=".")
     p.add_argument("--port", type=int, default=7861)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--token")
+    sec.add_server_security_args(p)
     a = p.parse_args()
     STATE["root"] = os.path.abspath(a.root)
-    STATE["token"] = a.token or os.environ.get("NS_STUDIO_TOKEN")
+    os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
+    STATE["token"] = sec.resolve_token(a.token, a.token_file) or None
+    tls = bool(a.tls_cert and a.tls_key)
+    try:
+        for w in sec.check_bind(a.host, STATE["token"] or "", tls=tls, allow_plaintext=a.allow_plaintext):
+            print("warning:", w)
+    except sec.SecurityConfigError as e:
+        raise SystemExit(f"error: {e}")
 
     print(f"NeuronScope control on http://{a.host}:{a.port}")
     print(f"root: {STATE['root']}")
     c = collection_state()
     print(f"collection: {c['attempted']} attempted, {c['pairs']} pairs")
-    if a.host == "0.0.0.0" and not STATE["token"]:
-        print("\n!! no --token and bound to 0.0.0.0: anyone on this network "
-              "can start processes here")
-    ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    if tls:
+        srv.socket = sec.server_ssl_context(a.tls_cert, a.tls_key).wrap_socket(
+            srv.socket, server_side=True, do_handshake_on_connect=False)
+    srv.serve_forever()
 
 
 if __name__ == "__main__":

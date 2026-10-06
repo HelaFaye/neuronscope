@@ -74,14 +74,14 @@ table{width:100%;border-collapse:collapse;font-size:.92rem}th,td{text-align:left
 <h2>Capability profiles</h2>
 <label>Profile directory</label><input id="profilesDir" value="">
 <p>One <code>PROFILE.json::weight</code> per line. Higher weight = higher preservation priority.</p>
-<textarea id="profiles" placeholder="profiles/<fingerprint>/math.json::1.0\nprofiles/<fingerprint>/coding.json::1.2"></textarea>
+<textarea id="profiles" placeholder="profiles/&lt;fingerprint&gt;/math.json::1.0&#10;profiles/&lt;fingerprint&gt;/coding.json::1.2"></textarea>
 <div class="row"><button onclick="scanProfiles()">Show profiles</button><button onclick="preview()" class="primary">Preview plan</button></div>
 <pre id="profileList">No profiles scanned.</pre>
 </section>
 <section class="card">
 <h2>Calibration corpus</h2>
 <p>One text file per line as <code>/path/file.txt::weight</code>. The lab deterministically samples and interleaves them.</p>
-<textarea id="calibration" placeholder="/data/math.txt::1.0\n/data/general.txt::0.5\n/data/reasoning.txt::1.0"></textarea>
+<textarea id="calibration" placeholder="/data/math.txt::1.0&#10;/data/general.txt::0.5&#10;/data/reasoning.txt::1.0"></textarea>
 <label>Maximum calibration lines</label><input id="maxLines" type="number" value="20000" min="1">
 </section>
 <section class="card">
@@ -115,7 +115,7 @@ async function build(){try{const r=await j('/api/build',{method:'POST',headers:{
 async function refreshJob(){if(!lastJob)return;try{const r=await j('/api/jobs/'+lastJob);$('buildStatus').innerHTML='<b>'+r.state+'</b>'+(r.error?'<span class="err"> '+escapeHtml(r.error)+'</span>':'')+'<br>'+escapeHtml(r.started||'');$('log').textContent=(r.log||[]).join('\n');if(r.state==='running')setTimeout(refreshJob,1000)}catch(e){$('buildStatus').textContent=e.message}}
 async function global(){try{const d=await j('/api/health');$('global').innerHTML='<span class="ok">Server ready.</span> Scratch /dev/shm: '+d.ram_free_gib.toFixed(2)+' GiB free'+(d.ram_tmpfs?' (tmpfs)':'') }catch(e){$('global').textContent=e.message}}
 function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-$('modelsDir').value=''' + "__MODELS__" + r''';$('profilesDir').value=''' + "__PROFILES__" + r''';scanModels();global();
+$('modelsDir').value=__MODELS__;$('profilesDir').value=__PROFILES__;scanModels();global();
 </script></body></html>'''
 
 
@@ -198,7 +198,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/":
-            data = HTML.replace("__MODELS__", STATE["models_dir"]).encode()
+            # JSON-encode: the values land inside a <script>, so a raw path
+            # would be a syntax error (and an injection point).
+            data = (HTML.replace("__MODELS__", json.dumps(STATE["models_dir"]).replace("<", "\\u003c"))
+                        .replace("__PROFILES__", json.dumps(STATE["profiles_dir"]).replace("<", "\\u003c"))).encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
         if u.path == "/api/health":
             st = scratch_status("/dev/shm" if os.path.isdir("/dev/shm") else "/tmp")
@@ -242,7 +245,10 @@ def main():
     ap.add_argument("--port", type=int, default=8796)
     ap.add_argument("--models-dir", action="append", default=[])
     ap.add_argument("--profiles-dir", default=str(ROOT / "profiles"))
+    ap.add_argument("--allow-unauthenticated", action="store_true", help="permit a non-loopback bind (no auth)")
     a = ap.parse_args()
+    import ns_security as sec
+    sec.loopback_only(a.host, "the Quantization Lab", a.allow_unauthenticated)
     STATE["models_dir"] = os.path.expanduser(a.models_dir[0]) if a.models_dir else os.path.expanduser("~/.models")
     STATE["profiles_dir"] = os.path.expanduser(a.profiles_dir)
     server = ThreadingHTTPServer((a.host, a.port), Handler)

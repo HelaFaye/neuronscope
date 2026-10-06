@@ -58,8 +58,17 @@ def detect():
     gpu, backend, vram, dedicated = "", "cpu", 0.0, False
 
     try:
+        from cuda_info import query_gpus
+        nv = query_gpus()
+        if nv:
+            gpu = nv[0]["name"] if len(nv) == 1 else f"{len(nv)} x {nv[0]['name']}"
+            vram = sum(g["memory_total"] for g in nv) / GIB
+            backend, dedicated = "cuda", True
+    except Exception:
+        pass
+    try:
         import torch
-        if torch.cuda.is_available():
+        if not gpu and torch.cuda.is_available():
             gpu = torch.cuda.get_device_name(0)
             vram = torch.cuda.mem_get_info()[1] / GIB
             backend = "rocm" if getattr(torch.version, "hip", None) else "cuda"

@@ -1,0 +1,30 @@
+{"id": "q-au", "kind": "qa", "subject": "science", "prompt": "What is the chemical symbol for gold? Respond with the answer only.", "aliases": ["Au"]}
+{"id": "q-jupiter", "kind": "qa", "subject": "science", "prompt": "What is the largest planet in our solar system? Respond with the answer only.", "aliases": ["Jupiter"]}
+{"id": "q-h2o", "kind": "qa", "subject": "science", "prompt": "How many hydrogen atoms are in one molecule of water? Respond with the answer only.", "aliases": ["2", "two"]}
+{"id": "q-light", "kind": "qa", "subject": "science", "prompt": "Approximately how many minutes does sunlight take to reach Earth? Give a whole number. Respond with the answer only.", "aliases": ["8", "eight"]}
+{"id": "q-dna", "kind": "qa", "subject": "science", "prompt": "What molecule carries genetic information in most living organisms? Give the abbreviation. Respond with the answer only.", "aliases": ["DNA", "deoxyribonucleic acid"]}
+{"id": "q-c-speed", "kind": "qa", "subject": "science", "prompt": "What is the speed of light in a vacuum in kilometres per second, to the nearest thousand? Respond with the answer only.", "aliases": ["300000", "300,000", "299792", "299,792"]}
+{"id": "q-co2", "kind": "qa", "subject": "science", "prompt": "What gas do plants absorb from the air for photosynthesis? Respond with the answer only.", "aliases": ["carbon dioxide", "CO2"]}
+{"id": "q-nitrogen", "kind": "qa", "subject": "science", "prompt": "What is the most abundant gas in Earth's atmosphere? Respond with the answer only.", "aliases": ["nitrogen", "N2"]}
+{"id": "q-newton", "kind": "qa", "subject": "science", "prompt": "What is the SI unit of force? Respond with the answer only.", "aliases": ["newton"]}
+{"id": "q-electron", "kind": "qa", "subject": "science", "prompt": "Which subatomic particle carries a negative charge? Respond with the answer only.", "aliases": ["electron"]}
+{"id": "q-nacl", "kind": "qa", "subject": "science", "prompt": "What is the chemical formula of table salt? Respond with the answer only.", "aliases": ["NaCl", "sodium chloride"]}
+{"id": "q-insulin", "kind": "qa", "subject": "science", "prompt": "Which organ in the human body produces insulin? Respond with the answer only.", "aliases": ["pancreas"]}
+{"id": "q-mito", "kind": "qa", "subject": "science", "prompt": "Which organelle produces most of a cell's ATP? Respond with the answer only.", "aliases": ["mitochondria", "mitochondrion"]}
+{"id": "q-boil", "kind": "qa", "subject": "science", "prompt": "At sea level, at what temperature in degrees Celsius does pure water boil? Respond with the answer only.", "aliases": ["100"]}
+{"id": "q-mars", "kind": "qa", "subject": "science", "prompt": "Which planet is known as the Red Planet? Respond with the answer only.", "aliases": ["Mars"]}
+{"id": "q-chromosomes", "kind": "qa", "subject": "science", "prompt": "How many chromosomes are in a typical human body cell? Respond with the answer only.", "aliases": ["46", "forty-six"]}
+{"id": "q-diamond", "kind": "qa", "subject": "science", "prompt": "What is the hardest naturally occurring mineral? Respond with the answer only.", "aliases": ["diamond"]}
+{"id": "q-covalent", "kind": "qa", "subject": "science", "prompt": "What type of chemical bond involves atoms sharing pairs of electrons? Respond with the answer only.", "aliases": ["covalent"]}
+{"id": "r-accel", "kind": "reasoning", "subject": "science", "prompt": "A car accelerates uniformly from rest to 20 m/s in 4 seconds. What is its acceleration in m/s^2?", "answer": "5", "answer_type": "number"}
+{"id": "r-kinetic", "kind": "reasoning", "subject": "science", "prompt": "What is the kinetic energy, in joules, of a 2 kg object moving at 3 m/s?", "answer": "9", "answer_type": "number"}
+{"id": "r-ohm", "kind": "reasoning", "subject": "science", "prompt": "A 10 ohm resistor carries a current of 2 A. What is the voltage across it, in volts?", "answer": "20", "answer_type": "number"}
+{"id": "r-moles", "kind": "reasoning", "subject": "science", "prompt": "How many moles are in 36 grams of water? (Molar mass of water: 18 g/mol.)", "answer": "2", "answer_type": "number"}
+{"id": "r-mass", "kind": "reasoning", "subject": "science", "prompt": "An object weighs 98 N on Earth, where g = 9.8 m/s^2. What is its mass in kilograms?", "answer": "10", "answer_type": "number"}
+{"id": "r-lightsec", "kind": "reasoning", "subject": "science", "prompt": "Light travels about 300,000 km per second. Roughly how many seconds does it take to travel 900,000 km?", "answer": "3", "answer_type": "number"}
+{"id": "q-gravity", "kind": "qa", "subject": "science", "prompt": "What force keeps the planets in orbit around the Sun? Respond with the answer only.", "aliases": ["gravity", "gravitation"]}
+{"id": "q-condense", "kind": "qa", "subject": "science", "prompt": "What is the process called when water vapour turns into liquid water? Respond with the answer only.", "aliases": ["condensation", "condensing"]}
+{"id": "q-rbc", "kind": "qa", "subject": "science", "prompt": "Which blood cells carry oxygen around the human body? Respond with the answer only.", "aliases": ["red blood cells", "red blood cell", "erythrocytes", "red cells"]}
+{"id": "q-ozone", "kind": "qa", "subject": "science", "prompt": "Which layer of gas in the atmosphere absorbs most of the Sun's ultraviolet radiation? Respond with the answer only.", "aliases": ["ozone"]}
+{"id": "r-salt", "kind": "reasoning", "subject": "science", "prompt": "How many grams of salt are in 500 g of a solution that is 4% salt by mass?", "answer": "20", "answer_type": "number"}
+{"id": "r-wave", "kind": "reasoning", "subject": "science", "prompt": "A wave has a frequency of 5 Hz and a wavelength of 2 m. What is its speed in m/s?", "answer": "10", "answer_type": "number"}

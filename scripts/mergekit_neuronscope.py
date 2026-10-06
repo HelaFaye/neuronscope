@@ -22,9 +22,9 @@ at neurons the classifier identified, and leaves everything else at the base.
 
     # merge.yaml
     merge_method: neuronscope_select
-    base_model: ornith-ai/Ornith-1.0-9B
+    base_model: Qwen/Qwen3-8B
     models:
-      - model: ornith-ai/Ornith-1.5-9B
+      - model: Qwen/Qwen3-8B
         parameters:
           weight: 1.0
     parameters:
@@ -45,7 +45,7 @@ check that and neither can this plugin -- it is on you.
 import json
 import os
 import re
-from typing import List, Optional
+from typing import List
 
 import torch
 
@@ -205,8 +205,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="Check an h_neurons.json and print a mergekit config")
     p.add_argument("--h-neurons", default=os.environ.get("NEURONSCOPE_NEURONS"))
-    p.add_argument("--base", default="ornith-ai/Ornith-1.0-9B")
-    p.add_argument("--donor", default="ornith-ai/Ornith-1.5-9B")
+    p.add_argument("--base", default="Qwen/Qwen3-8B")
+    p.add_argument("--donor", default="Qwen/Qwen3-8B")
     a = p.parse_args()
     if not a.h_neurons:
         raise SystemExit("pass --h-neurons or set NEURONSCOPE_NEURONS")

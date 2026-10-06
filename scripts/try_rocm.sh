@@ -145,8 +145,8 @@ What this unlocks, honestly:
     use the GPU, though they are one-off weight edits where it barely matters
   - small models can use the bf16 hook path in extract_activations.py
 What it does not:
-  - a 9B in bf16 is ~18GB and will not fit a 12GB carve-out. cett-dump on
-    Vulkan remains the extraction path for Ornith.""")
+  - a 9B in bf16 is ~18GB, more than most integrated GPUs can address;
+    cett-dump on Vulkan remains the extraction path for large models.""")
 PY
 rc=$?
 if (( rc != 0 )); then

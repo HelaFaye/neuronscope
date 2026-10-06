@@ -14,7 +14,7 @@ cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j --target llama-cett-dump
 ```
 
-On EndeavourOS you need `vulkan-headers`, `shaderc` and your driver's Vulkan
+On Linux you need `vulkan-headers`, `shaderc` and your driver's Vulkan
 ICD (`vulkan-radeon` for AMD). Confirm the GPU is visible with `vulkaninfo
 --summary` before building.
 
@@ -25,6 +25,13 @@ printf 'The capital of France is' > /tmp/seq.txt
 ./build/bin/llama-cett-dump -m tiny.gguf -ngl 99 -b 4096 \
     --prompt-file /tmp/seq.txt --out /tmp/dump.bin
 ```
+
+Or just run `scripts/build_llama_tools.sh --backend vulkan`.
+
+Every token is flagged as an output so llama.cpp computes the final layer for
+all of them; that costs an n_vocab x n_tokens logits buffer (about 1 GB for
+2k tokens at a 150k vocabulary). `--last-layer-outputs-only` trades the last
+layer's activations for that memory.
 
 Expect one record per decoder layer. If you get zero, the node naming differs
 in your llama.cpp version -- run `llama-eval-callback` on the same model and

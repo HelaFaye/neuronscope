@@ -14,12 +14,12 @@ The config names endpoints; nothing here constructs a command line, so a
 config file cannot become a remote shell:
 
     {
-      "boss":    {"url": "http://192.168.41.171:1234/v1", "model": "ornith-1.5-9b"},
+      "boss":    {"url": "http://GPU-HOST:1234/v1", "model": "qwen3-8b"},
       "minions": [
         {"name": "local",  "url": "http://127.0.0.1:8080/v1", "model": "minion",
          "good_at": ["summarise", "extract", "rewrite"]},
-        {"name": "remote", "url": "http://192.168.41.171:1234/v1",
-         "model": "ornith-1.5-9b", "good_at": ["reason", "code"]}
+        {"name": "remote", "url": "http://GPU-HOST:1234/v1",
+         "model": "qwen3-8b", "good_at": ["reason", "code"]}
       ],
       "gate": {"trace_endpoint": "http://127.0.0.1:8088",
                "classifier": "models_1v1/classifier.npz", "max_score": 1.5,
@@ -32,7 +32,6 @@ cannot actually score anything would be theatre.
 
 import argparse
 import json
-import os
 import sys
 import time
 import urllib.request
@@ -101,7 +100,7 @@ def score(instruction, answer):
             method="POST", headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=300) as r:
             d = json.loads(r.read())
-        return float(d.get("score", 0.0)), d.get("detail", "")
+        return float(d["score"]), d.get("detail", "")
     except Exception as e:
         # A gate that fails closed would stall the whole run on a flaky
         # endpoint; a gate that fails open silently would be a lie. Say so.

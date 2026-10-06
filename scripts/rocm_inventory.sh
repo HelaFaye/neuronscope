@@ -134,5 +134,5 @@ else
   warn "what you have."
   echo
   warn "Nothing in the pipeline needs this: cett-dump runs on Vulkan, and a"
-  warn "9B in bf16 will not fit a 12GB carve-out even if ROCm works."
+  warn "large models in bf16 rarely fit an integrated GPU even if ROCm works."
 fi

@@ -1,140 +1,79 @@
-# Adding `--activations` to llama-server
+# Live activations from llama-server
 
-Three insertion points, all in `tools/server/server.cpp`. Configuration is read
-from the environment rather than the argument parser, so `common/arg.cpp` is
-left alone — one fewer file to re-merge when llama.cpp moves.
+`apply_patch.py` adds `GET /activations` to llama-server: one server-sent event
+per generated token, carrying that token's down_proj activations (reduced
+in-process) and, optionally, the H-Neuron classifier score.
 
 ```bash
-cp ns_activations.h /path/to/llama.cpp/tools/server/
+python llama-tools/server-activations/apply_patch.py ~/llama.cpp
+cmake --build ~/llama.cpp/build --target llama-server
+# or both at once: scripts/build_llama_tools.sh --server-activations
 ```
 
-## 1. Include and globals
+The script is idempotent (each insertion is marked `ns-activations`) and checks
+every anchor first. If llama.cpp has moved one, it stops and names it rather
+than patching the wrong place; the sections below are then the manual recipe.
+Tested against llama.cpp with the `tools/server/server-context.cpp` layout
+(2026). Configuration is read from the environment, so `common/arg.cpp` is
+left alone.
 
-Near the other includes at the top of `server.cpp`:
+## What it changes
 
-```cpp
-#include "ns_activations.h"
+**Files added to `tools/server/`:** `ns_activations.h` (callback, reduction,
+classifier, per-subscriber queues; no llama.cpp internals) and
+`ns_server_glue.h` (the two globals and the SSE handler).
 
-static ns::streamer g_ns_stream;
-static ns::ctx      g_ns_ctx;
+**1. `server-context.cpp`, before `common_init_from_params`:** with
+`NS_ACTIVATIONS=sparse|binned|raw` set, put `ns::eval_callback` into
+`params_base.cb_eval`. Refused with a warning when `--parallel > 1`: a batch
+then interleaves several sequences and graph nodes carry no sequence id, so
+frames would mix conversations. `NS_TOPK` and `NS_BINS` tune the reductions.
+
+**2. `server-context.cpp`, after the model loads:** read the layer count, and
+load `NS_CLASSIFIER` if set. The expected size is layers × `feed_forward_length`
+from the GGUF metadata (`NS_NFF` overrides it); a classifier for another model
+is refused.
+
+**3. `src/llama-context.cpp`, before the graph-reuse check in
+`process_ubatch`:** set the eval callback on every ubatch. **Without this the
+callback fires once and then silently stops**, because the callback is only
+installed when the graph is rebuilt and a server reuses it between decodes.
+Found by hrhdegenetrix in llama.cpp PR #20785. cett-dump never hits this: it
+evaluates one sequence per process.
+
+**4. `server.cpp`:** register `GET /activations` beside `/metrics`. Each client
+gets a bounded queue that drops frames rather than block the inference thread;
+the subscription ends when the connection closes. A keepalive comment goes out
+every ~10 s of silence. Without `NS_ACTIVATIONS` the route answers 503.
+It is not a public endpoint, so llama-server's `--api-key` applies to it as to
+`/completion`; frames reveal what is being generated, so expose it no more
+widely than the completion API.
+
+## Node names
+
+The dense down projection is the `GGML_OP_MUL_MAT` node named `ffn_down-N` in
+older llama.cpp and `ffn_out-N` in current builds, the same names cett-dump
+accepts; `src[1]` is its input, the activation vector. MoE models use
+`ffn_moe_down-N`.
+
+## The classifier blob
+
+```bash
+python llama-tools/server-activations/export_classifier_bin.py \
+    models/classifier.npz models/classifier.bin --gguf model.gguf
 ```
 
-## 2. Register the callback before the context is created
+Flat little-endian float32 coefficients, then the intercept. The server streams
+`|a| / ||layer output||`, which is CETT without the `||W[:, j]||` factor;
+`--gguf` folds those column norms into the coefficients so the streamed score
+equals the classifier applied to full CETT (the integration test checks this
+against PyTorch). It is a logit: sigmoid it for a probability.
 
-Find where the server builds its context — search for `common_init_from_params`
-inside `server_context::load_model`. `common_params` already carries `cb_eval`
-and `cb_eval_user_data`, so nothing in llama.cpp's context creation changes:
+## Token text
 
-```cpp
-// --- ns: activation streaming -------------------------------------------
-if (const char * mode = getenv("NS_ACTIVATIONS")) {
-    if (params.n_parallel > 1) {
-        // A batch with several slots interleaves tokens from different
-        // sequences and the node carries no sequence id we can recover, so
-        // frames would silently mix two conversations.
-        LOG_WRN("%s: NS_ACTIVATIONS ignored, needs --parallel 1\n", __func__);
-    } else {
-        g_ns_stream.cfg.enabled = true;
-        g_ns_stream.cfg.reduction =
-            strcmp(mode, "binned") == 0 ? ns::tier::binned :
-            strcmp(mode, "raw")    == 0 ? ns::tier::raw    : ns::tier::sparse;
-        if (const char * v = getenv("NS_TOPK")) g_ns_stream.cfg.top_k = atoi(v);
-        if (const char * v = getenv("NS_BINS")) g_ns_stream.cfg.bins  = atoi(v);
-
-        g_ns_ctx.str      = &g_ns_stream;
-        params.cb_eval           = ns::eval_callback;
-        params.cb_eval_user_data = &g_ns_ctx;
-    }
-}
-```
-
-Immediately **after** `common_init_from_params` returns, the layer count is
-known, so finish the setup there:
-
-```cpp
-if (g_ns_stream.cfg.enabled) {
-    g_ns_ctx.n_layers = llama_model_n_layer(model);
-    if (const char * p = getenv("NS_CLASSIFIER")) {
-        const int n_ff = llama_model_n_ff(model);
-        if (g_ns_stream.clf.load(p, g_ns_ctx.n_layers * n_ff)) {
-            LOG_INF("%s: ns activations scored by %s\n", __func__, p);
-        }
-    }
-    LOG_INF("%s: ns activations on, %d layers\n", __func__, g_ns_ctx.n_layers);
-}
-```
-
-If `llama_model_n_ff` is absent in your revision, read it off the first
-`ffn_down` tensor instead, or pass it via `NS_NFF`.
-
-## 3. REQUIRED: keep the callback alive across graph reuse
-
-**Without this the callback fires once and then silently stops.** llama.cpp
-reuses the compute graph between decodes, and the eval callback is only
-installed on the rebuild path. Found by hrhdegenetrix in llama.cpp PR #20785;
-I had missed it entirely.
-
-In `src/llama-context.cpp`, inside `llama_context::process_ubatch`, move the
-call so it runs before the reuse check rather than only after it:
-
-```diff
-     const auto gparams = graph_params(res, ubatch, mctx, gtype);
-
-+    // Always set the eval callback, including on graph reuse.
-+    ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval,
-+                                         cparams.cb_eval_user_data);
-+
-     if (!graph_reuse_disable && res->can_reuse(gparams)) {
-@@
-         res->reset();
-
-         ggml_backend_sched_reset(sched.get());
--        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval,
--                                             cparams.cb_eval_user_data);
-```
-
-This is also why `llama-tools/cett-dump` works: it evaluates one sequence per
-process and never hits the reuse path. A long-running server does.
-
-## 4. The SSE route
-
-Beside the other `svr->Get(...)` registrations:
-
-```cpp
-svr->Get("/activations", [](const httplib::Request & req,
-                            httplib::Response & res) {
-    if (!g_ns_stream.cfg.enabled) {
-        res.status = 503;
-        res.set_content("{\"error\":\"start with NS_ACTIVATIONS set\"}",
-                        "application/json");
-        return;
-    }
-    auto s = std::make_shared<ns::sink>(g_ns_stream.cfg.max_queue);
-    g_ns_stream.subscribe(s);
-    res.set_chunked_content_provider("text/event-stream",
-        [s](size_t, httplib::DataSink & sink) {
-            // Long poll: hand over whatever has accumulated, then yield.
-            // Returning true keeps the connection; false ends it.
-            for (int i = 0; i < 64; ++i) {
-                auto f = s->pop();
-                if (!f) break;
-                const std::string line = "data: " + ns::to_json(*f, "") + "\n\n";
-                if (!sink.write(line.data(), line.size())) return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            return true;
-        },
-        [s](bool) { g_ns_stream.unsubscribe(s); });
-});
-```
-
-## 5. Optional: token text alongside frames
-
-The callback cannot see the token — it only sees graph nodes. If you want the
-text in the frame rather than correlating by index on the client, set a global
-in the completion loop where the sampled token is detokenised, and pass it to
-`ns::to_json`. This is the only change that touches generation, which is why it
-is optional.
+The callback sees graph nodes, not tokens, so frames carry an index `i`, not
+the token text. Correlate by order with the completion stream, or set a global
+where the server detokenises the sampled token and pass it to `ns::to_json`.
 
 ## Prior art
 
@@ -157,7 +96,7 @@ NS_ACTIVATIONS=sparse NS_TOPK=48 \
 NS_CLASSIFIER=models/classifier.bin \
   ./build/bin/llama-server -m model.gguf --parallel 1 --port 8080
 
-python viz/stream.py --source http://127.0.0.1:8080 --token secret --host 0.0.0.0
+python viz/stream.py --source http://127.0.0.1:8080 --token-file viewer.token --host 0.0.0.0 --allow-plaintext
 ```
 
 ## What to expect
@@ -172,10 +111,11 @@ on a fast card it might be, in which case use `NS_ACTIVATIONS=sparse` and
 accept the top-k selection cost instead.
 
 **Prefill is skipped.** Frames are only emitted when the batch is a single
-token, which is generation. A multi-token batch is prompt processing.
+token, which is generation. The first generated token comes out of prompt
+processing, so N generated tokens give N - 1 frames.
 
-**Live scores are not replay scores.** The server emits `|a| / ||layer output||`
-without the `||W[:, j]||` factor, because holding dequantised down_proj weights
-in RAM is a large cost for a live view. `scored` in each frame says whether a
-classifier was loaded; when it was not, `s` is peak activation, which shows
-activity but flags nothing.
+**Raw values are not CETT; scores are.** Values lack the `||W[:, j]||`
+factor (holding dequantised down_proj weights in RAM is a large cost for a live
+view); the classifier blob carries it instead. `scored` in each frame says
+whether a classifier was loaded; when it was not, `s` is peak activation, which
+shows activity but flags nothing.

@@ -92,8 +92,42 @@ def check_packages():
         add("packages", mod, OK if m else WARN, v or "", fix, why)
 
 
+def check_cuda(gpus=None, torch=None):
+    """NVIDIA: every GPU, and whether torch, the toolkit and the driver fit them."""
+    import cuda_info
+    gpus = cuda_info.query_gpus() if gpus is None else gpus
+    if not gpus:
+        return
+    a = cuda_info.advise(gpus, cuda_info.nvcc_version())
+    for g in gpus:
+        add("cuda", f"GPU {g['index']}", OK, f"{g['name']} sm_{g['cc']} {g['memory_total'] / 2**30:.0f} GiB, "
+            f"train in {a['precision'][g['index']]['dtype']}")
+    if torch is not None and torch.cuda.is_available() and not getattr(torch.version, "hip", None):
+        archs = torch.cuda.get_arch_list()
+        missing = sorted({f"sm_{g['cc']}" for g in gpus if f"sm_{g['cc']}" not in archs})
+        t = a["torch"]
+        fix = f"pip install '{t['spec']}'" + (f" --index-url {t['index']}" if t["index"] else "")
+        add("cuda", "torch kernels", FAIL if missing else OK,
+            f"no kernels for {', '.join(missing)} in torch {torch.__version__}" if missing
+            else f"torch {torch.__version__} covers every GPU", fix, "PyTorch on these GPUs")
+    lc = a["llama_cpp"]
+    if lc.get("error"):
+        add("cuda", "CUDA toolkit", FAIL, f"nvcc {a.get('nvcc')}", lc["error"], "building llama.cpp for these GPUs")
+    elif a.get("nvcc"):
+        add("cuda", "CUDA toolkit", OK, f"nvcc {a['nvcc']}; build with --cuda-arch '{lc['cmake_archs']}'")
+    else:
+        add("cuda", "CUDA toolkit", WARN, "nvcc not found", "install CUDA 12.9 (pre-Turing) or newer, or use "
+            "docker/llama-cuda.Dockerfile", "building llama.cpp with CUDA")
+    for n in a.get("notes", []):
+        add("cuda", "note", WARN if "newer than" in n else OK, n)
+
+
 def check_compute():
     torch, _ = have("torch")
+    try:
+        check_cuda(torch=torch)
+    except Exception as e:
+        add("cuda", "nvidia-smi", WARN, str(e)[:80])
     if torch is None:
         add("compute", "torch device", SKIP, "", "", "PyTorch extraction")
     else:

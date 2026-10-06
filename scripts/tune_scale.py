@@ -16,7 +16,7 @@ If perplexity climbs, you selected too many neurons: retrain the classifier
 with a lower --C rather than reaching for a gentler scale.
 
     python scripts/tune_scale.py \
-        --model_path ornith-ai/Ornith-1.0-9B \
+        --model_path Qwen/Qwen3-8B \
         --h_neurons models/h_neurons.json \
         --eval_path data/consistency_samples.jsonl \
         --scales 1.0 0.5 0.25 0.1 0.0 \

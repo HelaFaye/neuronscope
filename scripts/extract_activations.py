@@ -7,7 +7,7 @@ for the substantive differences (device-safe hooks, text-layer filtering, exact
 sequence construction, think-block-aware region indexing).
 
     python scripts/extract_activations.py \
-        --model_path ornith-ai/Ornith-1.0-9B \
+        --model_path Qwen/Qwen3-8B \
         --input_path data/answer_tokens.jsonl \
         --ids_path data/train_qids.json \
         --output_root data/activations \

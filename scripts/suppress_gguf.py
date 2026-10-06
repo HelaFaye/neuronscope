@@ -23,13 +23,12 @@ it reduces wrong answers on this model is exactly what compare_models.py
 measures. Do not assume it from the classifier's AUROC.
 
     python scripts/suppress_gguf.py --h_neurons models_1v1_fixed/h_neurons.json \\
-        --scale 0.25 --out ~/models/ornith-1.5-9b-supp025.Q6_K.gguf
+        --scale 0.25 --out ~/models/my-model-supp25.Q6_K.gguf
 """
 import argparse
 import json
 import os
 import shutil
-import sys
 
 import numpy as np
 

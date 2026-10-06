@@ -2,12 +2,12 @@
 """
 Near-realtime activation streaming, for a phone or SBC on your network.
 
-The fork this expects does not exist yet: `llama-server --activations` would
-reduce in-process and emit alongside the token stream. The eval callback
-cett-dump already uses fires during generation as well as prefill, so the C++
-side is a known quantity. What is not obvious is the protocol, and that is what
-this implements and tests -- against a simulated source now, against the fork
-later, without the client changing.
+The source is llama-server patched with llama-tools/server-activations
+(`scripts/build_llama_tools.sh --server-activations`), started with
+NS_ACTIVATIONS=sparse|binned|raw and --parallel 1. It reduces in-process and
+serves one frame per generated token at /activations; this relays those frames
+and adds auth, TLS and per-viewer backpressure. --simulate stands in when no
+patched server is running.
 
 Bandwidth is the whole design. On a 36-layer, 14336-wide model:
 
@@ -18,8 +18,8 @@ Bandwidth is the whole design. On a 36-layer, 14336-wide model:
 So the reduction happens server-side and the client chooses a tier. A phone
 asks for `sparse`; a desktop on the same switch asks for `binned`.
 
-    python viz/stream.py --simulate --token secret --host 0.0.0.0
-    python viz/stream.py --source http://127.0.0.1:8080 --token secret \\
+    python viz/stream.py --simulate --token-file viewer.token --host 0.0.0.0 --allow-plaintext  # behind a VPN
+    python viz/stream.py --source http://127.0.0.1:8080 --token-file viewer.token \\
         --tls-cert cert.pem --tls-key key.pem --host 0.0.0.0
 
 Open the printed URL on the phone. Auth is a bearer token or cookie; TLS is
@@ -29,11 +29,9 @@ the user is trained to click through.
 """
 
 import argparse
-import hashlib
 import hmac
 import http.cookies
 import json
-import math
 import os
 import queue
 import ssl
@@ -41,6 +39,10 @@ import urllib.request
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import ns_security as sec  # noqa: E402
 
 STATE = {"token": None, "tier": "binned", "source": None, "simulate": False}
 SUBS = []
@@ -105,7 +107,7 @@ def publish(frame):
 
 
 def relay(source):
-    """Pull /activations from a forked llama-server into our fan-out.
+    """Pull /activations from the patched llama-server into our fan-out.
 
     Frames arrive already reduced by the server, so nothing is re-reduced here;
     this only adds the auth, TLS and backpressure the C++ side does not do.
@@ -130,7 +132,7 @@ def relay(source):
 
 
 def simulate(layers=36, neurons=14336, rate=4.0):
-    """Stand-in for the fork: a plausible activation field at 4 tokens/sec."""
+    """Stand-in for the patched server: a plausible activation field at 4 tokens/sec."""
     import random
     rng = random.Random(0)
     hot = [(rng.randrange(layers), rng.randrange(neurons)) for _ in range(6)]
@@ -291,7 +293,7 @@ PAGE = r"""<!DOCTYPE html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>NeuronScope live</title>
 <style>
-:root{--hot:#F09595;--act:#EF9F27}
+:root{--hot:#FF4D1A;--act:#3D8BFF}
 *{box-sizing:border-box}
 body{margin:0;background:#05050a;color:#c9c9d2;font:14px system-ui;
 overscroll-behavior:none;-webkit-text-size-adjust:100%}
@@ -380,7 +382,7 @@ function draw(){
       // busy, not that a token is fabricated. Only flag when scored.
       const hot=(f.scored!==false) && f.s>1.5 && c.v>0.9;
       cx.globalAlpha=hot?1:(0.16+0.5*(1-age));
-      cx.fillStyle=hot?'#F09595':'#EF9F27';
+      cx.fillStyle=hot?'#FF4D1A':'#3D8BFF';
       cx.beginPath();
       cx.arc(x0+jitter, y, hot?3.2:1.5*(0.5+c.v), 0, 6.283); cx.fill();
     });
@@ -388,7 +390,7 @@ function draw(){
   cx.globalAlpha=1;
   const sw=sc.clientWidth, sh=sc.clientHeight;
   sx.clearRect(0,0,sw,sh);
-  sx.strokeStyle='#F09595'; sx.lineWidth=2; sx.beginPath();
+  sx.strokeStyle='#FF4D1A'; sx.lineWidth=2; sx.beginPath();
   frames.forEach((f,i)=>{const x=sw*i/Math.max(frames.length-1,1);
     const y=sh/2-(f.s||0)*(sh/8); i?sx.lineTo(x,y):sx.moveTo(x,y);});
   sx.stroke();
@@ -408,18 +410,23 @@ function draw(){
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--simulate", action="store_true",
-                   help="synthesise a field; use until the fork exists")
-    p.add_argument("--source", help="llama-server with --activations (not yet "
-                                    "implemented upstream)")
+                   help="synthesise a field (no patched llama-server needed)")
+    p.add_argument("--source", help="llama-server patched by llama-tools/server-activations, "
+                                    "e.g. http://127.0.0.1:8080")
     p.add_argument("--tier", default="binned", choices=sorted(TIERS))
-    p.add_argument("--token", help="require this token")
-    p.add_argument("--tls-cert")
-    p.add_argument("--tls-key")
     p.add_argument("--port", type=int, default=7890)
     p.add_argument("--host", default="127.0.0.1")
+    sec.add_server_security_args(p)
     a = p.parse_args()
 
-    STATE.update({"token": a.token or os.environ.get("NS_STUDIO_TOKEN"),
+    os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
+    token = sec.resolve_token(a.token, a.token_file) or None
+    try:
+        for w in sec.check_bind(a.host, token or "", tls=bool(a.tls_cert), allow_plaintext=a.allow_plaintext):
+            print("warning:", w)
+    except sec.SecurityConfigError as e:
+        raise SystemExit(f"error: {e}")
+    STATE.update({"token": token,
                   "tier": a.tier, "source": a.source,
                   "simulate": a.simulate})
 
@@ -438,12 +445,6 @@ def main():
     print(f"NeuronScope live on {scheme}://{a.host}:{a.port}")
     print(f"tier {a.tier}: {TIERS[a.tier][0]}, "
           f"~{TIERS[a.tier][1] / 1024:.1f} KB/token")
-    if not STATE["token"]:
-        print("\n!! no --token: anyone on this network can watch the stream")
-    if a.host == "0.0.0.0" and not a.tls_cert:
-        print("   plaintext on the LAN. For an untrusted network prefer a "
-              "WireGuard or\n   Tailscale tunnel over a self-signed cert users "
-              "learn to click through.")
 
     if a.simulate:
         threading.Thread(target=simulate, daemon=True).start()
