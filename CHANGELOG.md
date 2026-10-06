@@ -31,6 +31,9 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Studio RAG: document collections (Docs tab, `scripts/rag.py`), BM25 or hybrid
+  retrieval with an embedding GGUF sidecar or any embeddings endpoint, cited
+  passages under each reply.
 - Studio `/jobs`: evaluation, retraining and benchmark runs from the browser
   (TestQA, deficits, SWE-bench training data, fine-tune, merge/GGUF, SWE-bench,
   LiveBench, CLIP_benchmark). Typed per-job forms with no free-form command

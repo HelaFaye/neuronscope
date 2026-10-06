@@ -37,6 +37,7 @@ that. Studio handles everything around it.
 | **`model: "auto"`**: route each prompt to the best-suited local model | no | yes, on each model's measured per-subject accuracy, hallucination and abstention rates |
 | **Rolling per-model stats** (graded answers, H-Neuron activations, live abstentions) | no | yes; models without stats are flagged ⚠ |
 | Remote access | LM Link (proprietary) | `--host` + token + TLS |
+| Chat with your documents (RAG) | yes | yes; BM25 with no model, or hybrid with any embedding GGUF / endpoint; replies cite passages |
 | **Jobs page**: TestQA, deficit datasets, fine-tuning, merge/GGUF, SWE-bench, LiveBench, CLIP_benchmark from the browser | no | yes, at `/jobs` |
 
 Not included: RAG and an MCP client. Both are project-sized. The transfer
@@ -123,6 +124,35 @@ at several suppression strengths in one conversation.
 **Active experts.** For MoE models the load panel exposes
 `<arch>.expert_used_count`. See `scripts/sweep_experts.py` for measuring the
 quality and speed curve.
+
+## Documents (RAG)
+
+The **Docs** tab holds collections of files (text, Markdown, code, HTML, JSON,
+CSV; PDF with `pypdf`, DOCX with `python-docx`). Pick a collection in the
+**docs** selector under the chat and each message retrieves the four best
+passages, adds them as a numbered system message, and asks the model to cite
+them; the passages appear under the reply, expandable, and are saved with the
+chat.
+
+Retrieval is BM25 by default, which needs no model and does well on names,
+identifiers and error messages. For meaning-level matches add an embedding
+model; search then fuses both rankings (reciprocal-rank fusion):
+
+```bash
+python viz/studio.py ... --rag-embed-gguf ~/models/nomic-embed-text-v1.5.Q8_0.gguf   # Studio runs it on demand
+python viz/studio.py ... --rag-embed http://127.0.0.1:1234/v1@text-embedding-model  # or any /v1/embeddings
+```
+
+The embedding sidecar is a second llama-server (`--embedding`, port
+`--backend-port + 1`, CPU unless `--rag-embed-ngl`), so it never displaces the
+chat model. A collection remembers which embedding model built it and refuses
+to mix in vectors from another. Collections live in `~/.neuronscope/rag`
+(`--rag-dir`) and work from the command line too:
+
+```bash
+python scripts/rag.py add --collection notes docs/*.md
+python scripts/rag.py search --collection notes "how does auto routing pick a model"
+```
 
 ## Jobs
 

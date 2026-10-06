@@ -43,7 +43,8 @@ def studio_srv(tmp_path):
         "settings_path": str(tmp_path / "studio.json"), "chats_dir": str(tmp_path / "chats"),
         "token": None, "stats": model_stats.StatsStore(tmp_path / "stats"), "min_graded": 20,
         "min_subject": 5, "halluc_cost": 1.0, "cett": None, "idle_ttl": 0, "jit": True, "backend_port": free_port(), "tls": False,
-        "jobs": studio.ns_jobs.JobRunner(tmp_path / "jobs", 1), "jobs_off": None})
+        "jobs": studio.ns_jobs.JobRunner(tmp_path / "jobs", 1), "jobs_off": None,
+        "rag": None, "rag_dir": str(tmp_path / "rag"), "rag_embed": None, "rag_embed_gguf": None})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), studio.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -249,3 +250,66 @@ def test_jobs_cancel_and_off_on_network_bind(studio_srv, tmp_path, monkeypatch):
     monkeypatch.setitem(studio.STATE, "jobs_off", "jobs are off on a network bind")
     code, err = call(studio_srv, "/api/jobs")
     assert code == 403 and "network bind" in err["error"]
+
+
+def sse_chat(base, body):
+    req = urllib.request.Request(base + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
+    events = []
+    with urllib.request.urlopen(req, timeout=30) as r:
+        for line in r:
+            line = line.decode().strip()
+            if line.startswith("data:") and line[5:].strip() != "[DONE]":
+                events.append(json.loads(line[5:]))
+    return events
+
+
+def _upload(base, coll, name, text):
+    import base64
+    return call(base, "/api/rag/upload", {"collection": coll, "filename": name,
+                                          "data": base64.b64encode(text.encode()).decode()})
+
+
+def test_rag_collections_and_chat_citations(studio_srv):
+    code, _ = call(studio_srv, "/api/rag/create", {"collection": "kb"})
+    assert code == 200
+    code, r = _upload(studio_srv, "kb", "falcon.md", "The Falcon 9 booster lands on a drone ship.\n\n"
+                                                        "Paris is the capital of France.")
+    assert code == 200 and r["chunks"] >= 1
+    _upload(studio_srv, "kb", "cats.txt", "Cats sleep for most of the day.")
+    _, info = call(studio_srv, "/api/rag")
+    (kb,) = info["collections"]
+    assert kb["docs"] == 2 and not kb["dense"]
+    code, hits = call(studio_srv, "/api/rag/search", {"collection": "kb", "query": "where does the booster land"})
+    assert hits[0]["source"] == "falcon.md"
+    ev = sse_chat(studio_srv, {"model": CODER, "rag": {"collection": "kb", "k": 2},
+                               "messages": [{"role": "user", "content": "Where does the Falcon booster land?"}]})
+    assert ev[0]["sources"][0]["source"] == "falcon.md"
+    text = "".join(e["choices"][0]["delta"].get("content", "") for e in ev if "choices" in e)
+    assert "ctx=yes" in text                              # the passages reached the model
+    ev = sse_chat(studio_srv, {"model": CODER, "messages": [{"role": "user", "content": "hi"}]})
+    assert "sources" not in ev[0]
+    # bad names cannot escape the collection root
+    code, err = call(studio_srv, "/api/rag/create", {"collection": "../etc"})
+    assert code == 400
+    _, docs = call(studio_srv, "/api/rag/docs?c=kb")
+    call(studio_srv, "/api/rag/delete", {"collection": "kb", "doc": next(d["doc"] for d in docs if d["source"] == "cats.txt")})
+    _, info = call(studio_srv, "/api/rag")
+    assert info["collections"][0]["docs"] == 1
+    call(studio_srv, "/api/rag/delete", {"collection": "kb"})
+    assert call(studio_srv, "/api/rag")[1]["collections"] == []
+
+
+def test_rag_dense_with_embedding_sidecar(studio_srv, monkeypatch):
+    monkeypatch.setitem(studio.STATE, "rag_embed_gguf", "/models/embed.gguf")   # the fake server ignores -m
+    try:
+        _upload(studio_srv, "dense", "a.txt", "alpha bravo charlie")
+        _upload(studio_srv, "dense", "b.txt", "rocket booster landing")
+        _, info = call(studio_srv, "/api/rag")
+        assert info["embedder"] and info["collections"][0]["dense"]
+        _, hits = call(studio_srv, "/api/rag/search", {"collection": "dense", "query": "booster landing", "k": 1})
+        assert hits[0]["source"] == "b.txt"
+    finally:
+        p = studio.EMBED["proc"]
+        if p is not None:
+            p.terminate()
+            studio.EMBED["proc"] = None

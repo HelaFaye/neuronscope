@@ -57,6 +57,7 @@ import gguf_utils
 import ns_security as sec
 import model_stats
 import jobs as ns_jobs
+import rag as ns_rag
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -648,6 +649,64 @@ def stop_server():
                  "started": None, "lora": None})
 
 
+# ---------------------------------------------------------------- RAG
+
+EMBED = {"proc": None, "lock": threading.Lock()}
+
+
+def rag_embedder():
+    """The embedder for dense retrieval: --rag-embed URL@model, or a llama-server
+    --embedding sidecar for --rag-embed-gguf, started on first use."""
+    if STATE.get("rag_embed"):
+        return ns_rag.Embedder(STATE["rag_embed"])
+    gguf = STATE.get("rag_embed_gguf")
+    if not gguf:
+        return None
+    port = STATE["backend_port"] + 1
+    with EMBED["lock"]:
+        p = EMBED["proc"]
+        if p is None or p.poll() is not None:
+            if not STATE["server_bin"]:
+                raise RuntimeError("--rag-embed-gguf needs --server")
+            cmd = [STATE["server_bin"], "-m", gguf, "--embedding", "--pooling", "mean", "-ngl",
+                   str(STATE.get("rag_embed_ngl", 0)), "-c", "2048", "-b", "2048", "-ub", "2048",
+                   "--port", str(port), "--host", "127.0.0.1", "--alias", "rag-embed"]
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            ok, why = wait_healthy(port, proc)
+            if not ok:
+                proc.terminate()
+                raise RuntimeError(f"embedding server did not start: {why}")
+            EMBED["proc"] = proc
+    return ns_rag.Embedder(f"http://127.0.0.1:{port}/v1@rag-embed")
+
+
+def rag_store():
+    st = STATE.get("rag")
+    if st is None:
+        st = STATE["rag"] = ns_rag.RagStore(STATE.get("rag_dir"))
+    return st
+
+
+def rag_context(req: dict, msgs: list) -> tuple[list, list]:
+    """Retrieve for the last user message; returns (messages with context, sources)."""
+    spec = req.get("rag") or {}
+    name = spec.get("collection")
+    if not name:
+        return msgs, []
+    last = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+    query = last["content"] if last and isinstance(last.get("content"), str) else \
+        " ".join(c.get("text", "") for c in (last or {}).get("content") or [] if isinstance(c, dict))
+    store = rag_store()
+    coll = store.get(name)
+    emb = rag_embedder() if coll.dense is not None else None
+    hits = coll.search(query, max(1, min(int(spec.get("k", 4)), 12)), emb)
+    if not hits:
+        return msgs, []
+    ctx = {"role": "system", "content": ns_rag.context_message(hits)}
+    i = 1 if msgs and msgs[0].get("role") == "system" else 0
+    return msgs[:i] + [ctx] + msgs[i:], hits
+
+
 def proxy(path, payload, stream_to=None):
     """Forward to the running llama-server. Streams SSE when asked.
 
@@ -1043,6 +1102,38 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             return self._json(429, {"error": str(e)})
 
+    def _rag_post(self):
+        import base64
+        store = rag_store()
+        try:
+            if self.path == "/api/rag/upload":
+                req = self._read(48 * 1024 * 1024)
+                data = base64.b64decode(str(req.get("data", "")).split(",", 1)[-1], validate=False)
+                if len(data) > 32 * 1024 * 1024:
+                    return self._json(413, {"error": "file larger than 32 MB"})
+                coll = store.get(str(req.get("collection", "")), create=True)
+                emb = rag_embedder() if (coll.dense is not None or (not coll.chunks and
+                                                                    req.get("dense", True))) else None
+                return self._json(200, coll.add(str(req.get("filename", "upload.txt")), data, emb))
+            req = self._read()
+            name = str(req.get("collection", ""))
+            if self.path == "/api/rag/create":
+                return self._json(200, store.get(name, create=True).info())
+            if self.path == "/api/rag/delete":
+                if req.get("doc"):
+                    return self._json(200, {"removed": store.get(name).remove(str(req["doc"]))})
+                store.drop(name)
+                return self._json(200, {"ok": True})
+            if self.path == "/api/rag/search":
+                coll = store.get(name)
+                emb = rag_embedder() if coll.dense is not None else None
+                return self._json(200, coll.search(str(req.get("query", "")), int(req.get("k", 4)), emb))
+        except FileNotFoundError as e:
+            return self._json(404, {"error": str(e)})
+        except (ValueError, RuntimeError, OSError) as e:
+            return self._json(400, {"error": str(e)[:300]})
+        return self._json(404, {"error": "not found"})
+
     def do_GET(self):
         self._route = None
         if not self._authed():
@@ -1065,6 +1156,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/api/jobs"):
             return self._jobs_get()
+        if self.path == "/api/rag":
+            return self._json(200, {"collections": rag_store().list(),
+                                    "embedder": bool(STATE.get("rag_embed") or STATE.get("rag_embed_gguf"))})
+        m = re.fullmatch(r"/api/rag/docs\?c=(.+)", self.path)
+        if m:
+            try:
+                return self._json(200, rag_store().get(urllib.parse.unquote(m.group(1))).docs())
+            except (ValueError, FileNotFoundError) as e:
+                return self._json(404, {"error": str(e)})
         if self.path == "/v1/models":
             return self._json(200, openai_models())
         if self.path == "/api/chats":
@@ -1174,6 +1274,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in ("/api/jobs", "/api/jobs/cancel"):
                 return self._jobs_post()
 
+            if self.path.startswith("/api/rag/"):
+                return self._rag_post()
+
             if self.path == "/api/stats/ingest":
                 req = self._read(8 * 1024 * 1024)
                 target = find_model(str(req.get("model", "")))
@@ -1280,6 +1383,10 @@ class Handler(BaseHTTPRequestHandler):
                         msgs and msgs[0].get("role") == "system"):
                     msgs.insert(0, {"role": "system",
                                     "content": preset["system"]})
+                try:
+                    msgs, sources = rag_context(req, msgs)
+                except (FileNotFoundError, ValueError, RuntimeError, OSError) as e:
+                    return self._json(400, {"error": f"retrieval failed: {e}"})
                 payload = {"messages": msgs,
                            "temperature": preset.get("temperature", 0.7),
                            "top_p": preset.get("top_p", 0.95),
@@ -1299,6 +1406,8 @@ class Handler(BaseHTTPRequestHandler):
                     payload["grammar"] = preset["grammar"]
                 self._route = route
                 self._send_headers_sse()
+                if sources:
+                    self.wfile.write(f"data: {json.dumps({'sources': sources})}\n\n".encode())
                 touch(+1)
                 try:
                     out = proxy("/v1/chat/completions", payload, stream_to=self.wfile)
@@ -1381,6 +1490,8 @@ form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5re
 table.st{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:.4rem}
 table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px solid var(--line)}
 #modelPick{width:auto;max-width:260px}
+.src{font-size:12px;color:var(--mut);margin-top:.3rem}.src details{margin:.1rem 0}.src summary{cursor:pointer}
+.src pre{white-space:pre-wrap;font:12px ui-monospace,monospace;background:var(--code);padding:.4rem;border-radius:5px;margin:.2rem 0}
 </style>
 <header>
   <h1>NeuronScope Studio</h1>
@@ -1396,6 +1507,22 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
     <button data-tab="chats" class="pri">Chats</button>
     <button data-tab="local">Models</button>
     <button data-tab="hub">Hub</button>
+    <button data-tab="docs">Docs</button>
+  </div>
+  <div id="tab-docs" style="display:none">
+    <div class="note">Document collections for chat. Pick one under the chat ("docs") and replies cite the passages they used.</div>
+    <div style="display:flex;gap:.4rem;margin:.4rem 0"><input id="newcoll" placeholder="new collection name"><button id="mkcoll">Create</button></div>
+    <div id="colls"></div>
+    <div id="collpanel" style="display:none">
+      <hr style="border:none;border-top:1px solid var(--line);margin:.6rem 0">
+      <b id="collname"></b> <span id="colldense" class="note"></span>
+      <input type="file" id="docfile" multiple hidden>
+      <button id="adddocs" style="width:100%;margin:.4rem 0">+ Add files (txt, md, code, html, pdf, docx)</button>
+      <div id="docmsg" class="note"></div>
+      <div id="docs"></div>
+      <label>Try a search</label><input id="ragq" placeholder="query, Enter to search"><div id="raghits" class="note"></div>
+      <button id="dropcoll" style="margin-top:.6rem;width:100%;color:var(--no)">Delete collection</button>
+    </div>
   </div>
   <div id="tab-chats">
     <button id="newchat" style="width:100%;margin-bottom:.5rem">+ New chat</button>
@@ -1441,6 +1568,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div id="log"></div>
   <div class="dials">
     <span>preset</span><select id="preset"></select>
+    <span title="retrieve passages from a document collection for each message">docs</span><select id="ragPick"><option value="">none</option></select>
     <span>suppression α</span>
     <input type="range" id="alpha" min="0" max="1" step="0.05" value="1" disabled>
     <span id="av">1.00</span>
@@ -1502,7 +1630,7 @@ $('#api').onclick=async()=>{try{await navigator.clipboard.writeText(location.ori
 
 // tabs
 $$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x===b));
-  ['chats','local','hub'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
+  ['chats','local','hub','docs'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
 
 // ---------- models
 async function refresh(){
@@ -1605,22 +1733,24 @@ function bubble(role,content,extra={}){
   const d=document.createElement('div'); d.className='msg';
   d.innerHTML=`<div class="who">${role==='user'?'you':'assistant'}<span class="acts"></span></div>`+
     (extra.think!==undefined?`<details class="think"><summary>reasoning</summary><div></div></details>`:'')+
-    `<div class="imgs"></div><div class="body"></div><div class="stats"></div>`;
+    `<div class="imgs"></div><div class="body"></div><div class="src"></div><div class="stats"></div>`;
   d.querySelector('.imgs').innerHTML=imagesOf(content).map(u=>`<img src="${esc(u)}" alt="attached image">`).join('');
   d.querySelector('.body').innerHTML=render(textOf(content));
   if(extra.think) d.querySelector('.think div').textContent=extra.think;
   if(extra.stats) d.querySelector('.stats').textContent=extra.stats;
+  if(extra.sources) showSources(d.querySelector('.src'),extra.sources);
   if(role==='assistant'){ const a=d.querySelector('.acts');
     a.innerHTML='<button data-a="copy">copy</button><button data-a="regen">regenerate</button>';
     a.querySelector('[data-a=copy]').onclick=()=>navigator.clipboard.writeText(d.querySelector('.body').textContent);
     a.querySelector('[data-a=regen]').onclick=regenerate; }
   $('#log').appendChild(d); $('#log').scrollTop=1e9;
-  return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats')};
+  return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats'), src:d.querySelector('.src')};
 }
+function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
 function renderChat(){
   $('#log').innerHTML='';
   if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from the Models tab, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
-  for(const m of chat.messages) bubble(m.role,m.content,{think:m.think,stats:m.stats});
+  for(const m of chat.messages) bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources});
 }
 
 // ---------- images
@@ -1645,10 +1775,11 @@ $('#f').onsubmit=async e=>{
 async function regenerate(){ if(busy) return; while(chat.messages.length && chat.messages.at(-1).role==='assistant') chat.messages.pop(); renderChat(); await stream(); }
 async function stream(){
   busy=true; $('#send').textContent='Stop'; ctrl=new AbortController();
-  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='';
+  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null;
   try{
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value})});
+      body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
+        rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined})});
     if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} out.body.textContent='error: '+e; throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
       if(rt){ routeNote = rt.mode==='auto' ? `auto → ${rt.model}: ${rt.reason}` : `model: ${rt.model}${rt.mode==='manual'?' (chosen manually)':''}`;
@@ -1663,6 +1794,7 @@ async function stream(){
         const d=line.slice(5).trim(); if(d==='[DONE]') continue;
         let j; try{ j=JSON.parse(d) }catch{ continue }
         if(j.error){ out.body.textContent='error: '+(j.error.message||j.error); continue; }
+        if(j.sources){ sources=j.sources; showSources(out.src,sources); continue; }
         if(j.usage) usage=j.usage; if(j.timings) timings=j.timings;
         const delta=j.choices?.[0]?.delta||{};
         if((delta.reasoning_content||delta.content) && !tFirst) tFirst=performance.now();
@@ -1679,7 +1811,7 @@ async function stream(){
   const stats=[ntok?`${ntok} tokens`:null, tps?`${tps.toFixed(1)} tok/s`:null, tFirst?`first token ${((tFirst-t0)/1000).toFixed(2)}s`:null].filter(Boolean).join(' · ');
   const fullStats=[routeNote,stats].filter(Boolean).join(' · ');
   out.stats.textContent=fullStats;
-  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats:fullStats}); await persist(); }
+  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats:fullStats,sources:sources||undefined}); await persist(); }
   status(); refresh();
   busy=false; $('#send').textContent='Send';
 }
@@ -1724,7 +1856,35 @@ async function presets(){
   const p=await (await fetch('/api/presets')).json();
   $('#preset').innerHTML=Object.keys(p).map(k=>`<option>${esc(k)}</option>`).join('');
 }
-refresh(); status(); presets(); jobs(); loadChats(); renderChat(); setInterval(status,4000);
+// ---------- docs (RAG)
+let curColl=null;
+async function colls(){
+  const r=await (await fetch('/api/rag')).json(), cs=r.collections||[];
+  const keep=$('#ragPick').value;
+  $('#ragPick').innerHTML='<option value="">none</option>'+cs.map(c=>`<option ${c.name===keep?'selected':''}>${esc(c.name)}</option>`).join('');
+  $('#colls').innerHTML=cs.length?cs.map(c=>`<div class="m" data-c="${esc(c.name)}"><div class="mn">${esc(c.name)}</div><div class="mm">${c.docs} files · ${c.chunks} passages${c.dense?' · <span class="tag">dense</span>':''}</div></div>`).join(''):'<div class="note">No collections yet.</div>';
+  $$('#colls .m').forEach(el=>el.onclick=()=>openColl(el.dataset.c));
+  return r;
+}
+async function openColl(name){ curColl=name; $('#collpanel').style.display=''; $('#collname').textContent=name; $('#raghits').textContent='';
+  const ds=await (await fetch('/api/rag/docs?c='+encodeURIComponent(name))).json();
+  $('#docs').innerHTML=(ds.length?ds:[]).map(d=>`<div class="m"><div class="mn">${esc(d.source)}</div><div class="mm">${d.chunks} passages</div><button class="x" data-d="${esc(d.doc)}" title="remove">×</button></div>`).join('')||'<div class="note">empty</div>';
+  $$('#docs button[data-d]').forEach(b=>b.onclick=async()=>{ await post('/api/rag/delete',{collection:name,doc:b.dataset.d}); openColl(name); colls(); }); }
+$('#mkcoll').onclick=async()=>{ const n=$('#newcoll').value.trim(); if(!n) return;
+  const r=await post('/api/rag/create',{collection:n}); if(!r.ok){ alert((await r.json()).error); return; } $('#newcoll').value=''; await colls(); openColl(n); };
+$('#adddocs').onclick=()=>$('#docfile').click();
+$('#docfile').onchange=async()=>{ const fs=[...$('#docfile').files]; $('#docfile').value='';
+  for(const f of fs){ if(f.size>32e6){ $('#docmsg').textContent=f.name+' is larger than 32 MB'; continue; }
+    $('#docmsg').textContent='indexing '+f.name+'…';
+    const data=await new Promise(r=>{const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(f);});
+    const r=await post('/api/rag/upload',{collection:curColl,filename:f.name,data}); const j=await r.json();
+    $('#docmsg').textContent=r.ok?`${f.name}: ${j.chunks} passages`:`${f.name}: ${j.error}`; }
+  openColl(curColl); colls(); };
+$('#ragq').onkeydown=async e=>{ if(e.key!=='Enter') return; const r=await post('/api/rag/search',{collection:curColl,query:$('#ragq').value,k:4}); const j=await r.json();
+  $('#raghits').innerHTML=r.ok?(j.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre style="white-space:pre-wrap">${esc(h.text)}</pre></details>`).join('')||'no match'):esc(j.error); };
+$('#dropcoll').onclick=async()=>{ if(!confirm('Delete collection '+curColl+'?')) return; await post('/api/rag/delete',{collection:curColl}); $('#collpanel').style.display='none'; colls(); };
+
+refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); setInterval(status,4000);
 </script>"""
 
 
@@ -1781,6 +1941,10 @@ def main(argv=None):
     p.add_argument("--allow-remote-jobs", action="store_true",
                    help="allow /jobs on a non-loopback bind (jobs can train models and run model-written code)")
     p.add_argument("--no-jobs", action="store_true", help="disable /jobs entirely")
+    p.add_argument("--rag-dir", default=os.path.expanduser("~/.neuronscope/rag"), help="document collections")
+    p.add_argument("--rag-embed", help="URL[@model] of an OpenAI-compatible embeddings endpoint for dense retrieval")
+    p.add_argument("--rag-embed-gguf", help="embedding GGUF; Studio runs it with llama-server --embedding on demand")
+    p.add_argument("--rag-embed-ngl", type=int, default=0, help="GPU layers for the embedding model")
     sec.add_server_security_args(p)
     a = p.parse_args(argv)
 
@@ -1812,6 +1976,8 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    STATE.update(rag_dir=a.rag_dir, rag_embed=a.rag_embed, rag_embed_gguf=a.rag_embed_gguf,
+                 rag_embed_ngl=a.rag_embed_ngl, rag=None)
     if a.no_jobs:
         STATE["jobs"], STATE["jobs_off"] = None, "jobs are disabled (--no-jobs)"
     elif not sec.is_loopback(a.host) and not a.allow_remote_jobs:
@@ -1852,6 +2018,8 @@ def main(argv=None):
         pass
     finally:
         stop_server()
+        if EMBED["proc"] is not None and EMBED["proc"].poll() is None:
+            EMBED["proc"].terminate()
     return 0
 
 

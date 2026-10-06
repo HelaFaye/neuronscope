@@ -32,8 +32,22 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path.endswith("/embeddings"):
+            # deterministic bag-of-words vectors: similar wording -> similar vectors
+            import hashlib
+            import re
+            out = []
+            for i, t in enumerate(body["input"] if isinstance(body["input"], list) else [body["input"]]):
+                v = [0.0] * 64
+                for w in re.findall(r"[a-z]+", t.lower()):
+                    v[int(hashlib.md5(w.encode()).hexdigest(), 16) % 64] += 1.0
+                out.append({"index": i, "embedding": v})
+            return self._send({"data": out, "model": a.alias})
         has_img = any(isinstance(m.get("content"), list) for m in body.get("messages", []))
+        ctx = any(m.get("role") == "system" and "[1] (" in str(m.get("content")) for m in body.get("messages", []))
         text = f"model={a.alias} mmproj={'yes' if a.mmproj else 'no'} image={'yes' if has_img else 'no'}"
+        if ctx:
+            text += " ctx=yes"
         if body.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
