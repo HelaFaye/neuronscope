@@ -24,7 +24,7 @@ PAGES = [
     ("viz/stream.py", "PAGE"), ("viz/stream.py", "LOGIN"),
     ("viz/server.py", "PAGE"), ("viz/bloom.py", "PAGE"),
     ("viz/quant_lab.py", "HTML"), ("viz/scale_sweep_lab.py", "HTML"),
-    ("viz/adaptive_tuning_lab.py", "HTML"), ("viz/jobs.py", "PAGE"),
+    ("viz/adaptive_tuning_lab.py", "HTML"), ("viz/jobs.py", "PAGE"), ("viz/studio.py", "PAIR_PAGE"), ("viz/studio.py", "LINK_PAGE"),
 ]
 PLACEHOLDERS = {"__MODELS__": '""', "__PROFILES__": '""'}
 

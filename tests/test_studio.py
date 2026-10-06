@@ -1,6 +1,7 @@
 """Studio's OpenAI-compatible API, JIT loading, routing, TTL and chat storage
 against a fake llama-server."""
 import json
+import os
 import socket
 import sys
 import threading
@@ -44,7 +45,9 @@ def studio_srv(tmp_path):
         "token": None, "stats": model_stats.StatsStore(tmp_path / "stats"), "min_graded": 20,
         "min_subject": 5, "halluc_cost": 1.0, "cett": None, "idle_ttl": 0, "jit": True, "backend_port": free_port(), "tls": False,
         "jobs": studio.ns_jobs.JobRunner(tmp_path / "jobs", 1), "jobs_off": None,
-        "rag": None, "rag_dir": str(tmp_path / "rag"), "rag_embed": None, "rag_embed_gguf": None})
+        "rag": None, "rag_dir": str(tmp_path / "rag"), "rag_embed": None, "rag_embed_gguf": None,
+        "devices": studio.ns_pairing.DeviceRegistry(tmp_path / "devices.json"),
+        "links_path": str(tmp_path / "links.json"), "fingerprint": None})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), studio.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -360,3 +363,101 @@ def test_mcp_tool_calls_with_approval(studio_srv, tmp_path, monkeypatch, auto, a
     finally:
         if studio.STATE.get("mcp"):
             studio.STATE["mcp"].close()
+
+
+@pytest.fixture()
+def remote_studio(tmp_path):
+    """A second Studio in its own process: token + self-signed TLS, one model."""
+    import subprocess
+    pytest.importorskip("cryptography")
+    d = tmp_path / "remote"
+    (d / "models" / "acme" / "Big-GGUF").mkdir(parents=True)
+    (d / "models" / "acme" / "Big-GGUF" / "big-70b-Q4_K_M.gguf").write_bytes(b"GGUF" + b"\0" * 64)
+    sec = __import__("ns_security")
+    token = sec.generate_token()
+    sec.write_secret_file(d / "token", token)
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "ns_security.py"), "selfsigned", "--host", "127.0.0.1",
+                    "--cert", str(d / "c.pem"), "--key", str(d / "k.pem")], check=True, capture_output=True)
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, str(ROOT / "viz" / "studio.py"), "--models-dir", str(d / "models"),
+                             "--server", str(ROOT / "tests" / "fake_llama_server.py"), "--port", str(port),
+                             "--backend-port", str(free_port()), "--token-file", str(d / "token"),
+                             "--tls-cert", str(d / "c.pem"), "--tls-key", str(d / "k.pem"),
+                             "--devices", str(d / "devices.json"), "--links", str(d / "links.json"),
+                             "--mcp-config", str(d / "none.json"), "--rag-dir", str(d / "rag"),
+                             "--jobs-dir", str(d / "jobs"), "--settings", str(d / "s.json"),
+                             "--chats-dir", str(d / "chats"), "--stats-dir", str(d / "stats")],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    base = f"https://127.0.0.1:{port}"
+    import ns_pairing
+    fp = ns_pairing.cert_fingerprint(str(d / "c.pem"))
+    for _ in range(100):
+        try:
+            ns_pairing.request(base, "GET", "/api/status", token=token, fingerprint=fp, timeout=2)
+            break
+        except Exception:
+            time.sleep(0.1)
+    yield base, token, fp
+    proc.terminate()
+    proc.wait(10)
+
+
+def test_pairing_and_linked_host(studio_srv, remote_studio):
+    import ns_pairing
+    base, token, fp = remote_studio
+    # the owner creates a link; it carries the certificate fingerprint
+    r = ns_pairing.request(base, "POST", "/api/pair/start", {}, token=token, fingerprint=fp)
+    assert r["fingerprint"] == fp and f"fp={fp}" in r["link"]
+    link = r["link"].replace(r["link"].split("/pair")[0], base)
+    # a wrong fingerprint is refused before the code is ever sent
+    bad = link.replace(fp, "0" * 64)
+    code, err = call(studio_srv, "/api/links/add", {"link": bad, "name": "gpu"})
+    assert code == 400 and "fingerprint" in err["error"]
+    code, r2 = call(studio_srv, "/api/links/add", {"link": link, "name": "gpu"})
+    assert code == 200 and r2["models"] == ["gpu:big-gguf/big-70b-q4_k_m"], r2
+    _, ms = call(studio_srv, "/v1/models")
+    remote_ids = [m["id"] for m in ms["data"] if m.get("owned_by") == "link:gpu"]
+    assert len(remote_ids) == 1 and remote_ids[0].startswith("gpu:")
+    # chat through the link: the remote Studio loads and answers
+    ev = sse_chat(studio_srv, {"model": remote_ids[0], "messages": [{"role": "user", "content": "hi"}]})
+    text = "".join(e["choices"][0]["delta"].get("content", "") for e in ev if "choices" in e)
+    assert text.startswith("model=") and "big" in text
+    code, out = call(studio_srv, "/v1/chat/completions", {"model": remote_ids[0],
+                                                          "messages": [{"role": "user", "content": "hi"}]})
+    assert code == 200 and "big" in out["choices"][0]["message"]["content"]
+    # the code was single use
+    with pytest.raises(RuntimeError, match="403"):
+        ns_pairing.claim(link, "again")
+    # the device token works for models but not for owner actions
+    links = json.loads(open(studio.STATE["links_path"]).read())["links"]
+    dev_tok = links[0]["token"]
+    assert ns_pairing.request(base, "GET", "/v1/models", token=dev_tok, fingerprint=fp)["data"]
+    with pytest.raises(RuntimeError, match="403"):
+        ns_pairing.request(base, "POST", "/api/pair/start", {}, token=dev_tok, fingerprint=fp)
+    for path, body in [("/api/jobs", {"kind": "swe_import", "values": {}}), ("/api/load", {"id": "x"}),
+                       ("/api/download", {"repo": "a/b"}), ("/api/mcp/reload", {})]:
+        with pytest.raises(RuntimeError, match="403"):
+            ns_pairing.request(base, "POST", path, body, token=dev_tok, fingerprint=fp)
+    with pytest.raises(RuntimeError, match="403"):
+        ns_pairing.request(base, "GET", "/api/jobs", token=dev_tok, fingerprint=fp)
+    # revoking the device cuts the link off
+    devs = ns_pairing.request(base, "GET", "/api/devices", token=token, fingerprint=fp)["devices"]
+    assert [d["name"] for d in devs] == ["studio"]
+    ns_pairing.request(base, "POST", "/api/devices/revoke", {"id": devs[0]["id"]}, token=token, fingerprint=fp)
+    with pytest.raises(RuntimeError, match="401"):
+        ns_pairing.request(base, "GET", "/v1/models", token=dev_tok, fingerprint=fp)
+    # the token file on this side is private
+    assert oct(os.stat(studio.STATE["links_path"]).st_mode & 0o777) == "0o600"
+
+
+def test_device_registry_codes_expire_and_are_hashed(tmp_path, monkeypatch):
+    import ns_pairing
+    reg = ns_pairing.DeviceRegistry(tmp_path / "d.json")
+    code, _ = reg.new_code()
+    assert reg.claim("WRONGCODE000", "x") is None
+    r = reg.claim(code.lower()[:4] + "-" + code[4:], "laptop")          # dashes and case do not matter
+    assert r and reg.check(r["token"])["name"] == "laptop"
+    assert r["token"] not in (tmp_path / "d.json").read_text()          # only the hash is stored
+    code2, _ = reg.new_code()
+    monkeypatch.setattr(ns_pairing.time, "time", lambda: 10 ** 12)      # far future
+    assert reg.claim(code2, "late") is None

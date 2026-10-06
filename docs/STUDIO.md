@@ -36,7 +36,7 @@ that. Studio handles everything around it.
 | **MoE active-expert override** | no | yes, key read from the model's architecture |
 | **`model: "auto"`**: route each prompt to the best-suited local model | no | yes, on each model's measured per-subject accuracy, hallucination and abstention rates |
 | **Rolling per-model stats** (graded answers, H-Neuron activations, live abstentions) | no | yes; models without stats are flagged ⚠ |
-| Remote access | LM Link (proprietary) | `--host` + token + TLS |
+| Remote access | LM Link (proprietary) | `--host` + token + TLS, device pairing with per-device tokens, and **linked hosts**: another machine's models served from this Studio |
 | Chat with your documents (RAG) | yes | yes; BM25 with no model, or hybrid with any embedding GGUF / endpoint; replies cite passages |
 | MCP client: chat can call tools from MCP servers | yes | yes; stdio or streamable HTTP, `mcp.json` in the same format; each call asks first unless auto-approved |
 | **Jobs page**: TestQA, deficit datasets, fine-tuning, merge/GGUF, SWE-bench, LiveBench, CLIP_benchmark from the browser | no | yes, at `/jobs` |
@@ -182,6 +182,39 @@ you edit the file. Stdio servers' logs go to `~/.neuronscope/mcp-logs/`.
 
 MCP servers run with your permissions. Only configure servers you trust, and
 keep `autoApprove` to read-only tools.
+
+## Link: paired devices and other machines' models
+
+The **Link** page (header) does two things, both built on one-time pairing
+links instead of sharing the master token.
+
+**Pair a device.** *Create pairing link* gives a link valid for five minutes
+and usable once, like `https://studio.lan:7870/pair#c=K7QX-M2PA-9DTE&fp=…`.
+Opened in a browser, it pairs that browser and logs it in; on the command line,
+`python scripts/ns_pairing.py claim '<link>' --out laptop.token` writes a token
+file for API clients. Each device gets its own token, stored on the host only
+as a SHA-256 hash, listed with when it was last seen, and revocable at once.
+Paired devices can chat (with documents), use `/v1` and keep saved chats.
+Everything that administers the machine needs the master token: jobs (they
+run code), load settings and llama-server flags, downloads, MCP tools (they
+run with the host owner's permissions), pairing, revoking and links.
+
+**Use another machine's models.** On the GPU box's Studio create a pairing
+link, and paste it into this Studio's Link page with a name (say `gpu`). Its
+models appear in the picker and in `/v1/models` as `gpu:<model id>`; requests
+for them, from the chat or from any OpenAI client pointed at this Studio, are
+forwarded to that machine with this Studio's device token, streamed back, and
+can use this Studio's documents and tools. Stats and `auto` routing stay
+per machine.
+
+The link carries the host certificate's SHA-256 fingerprint (`fp=`). The
+claiming side checks that the server presents exactly that certificate before
+sending the code, and keeps checking it on every later request, so a
+self-signed LAN certificate is pinned, not trusted blindly, and a machine in
+the middle can neither take the code nor read the traffic. Pairing requires
+the host to run with a token; without TLS the link has no fingerprint and
+should only be used inside a VPN. Tokens for linked hosts are kept in
+`~/.neuronscope/links.json` (0600); devices in `~/.neuronscope/devices.json`.
 
 ## Jobs
 

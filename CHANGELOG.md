@@ -33,6 +33,10 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Studio Link: one-time pairing links (certificate fingerprint pinned) give
+  browsers and API clients their own revocable device tokens; linked hosts
+  serve another machine's models from this Studio as `name:model` in the
+  picker and `/v1` (`scripts/ns_pairing.py`).
 - Studio MCP client: tools from MCP servers (stdio or streamable HTTP,
   `mcp.json` in LM Studio / Claude Desktop format) offered to the chat model;
   every call is shown with Allow/Deny unless auto-approved; Tools tab.

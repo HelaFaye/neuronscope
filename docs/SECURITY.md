@@ -93,6 +93,13 @@ code.
   TLS-terminating proxy or a plaintext VPN hop; it cannot protect against a
   compromised worker, which holds the key)
 
+**Studio pairing and links**
+- [x] one-time pairing codes (~59 bits, 5 minutes, single use, throttled claims)
+- [x] per-device tokens, stored as SHA-256 hashes, revocable; devices are limited to chat, `/v1`, saved
+  chats and document search (no jobs, load flags, downloads, MCP tools, pairing or links)
+- [x] pairing links carry the TLS certificate fingerprint; claims and every linked-host request pin it
+- [x] linked-host tokens in a 0600 file; pairing refused when the host has no token
+
 **Still open / by design**
 - Peer identity on WebRTC is proven by comparing the verification code, not by
   accounts. That is deliberate (no accounts), and the code check is manual.

@@ -50,6 +50,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "scripts"))
@@ -59,6 +60,7 @@ import model_stats
 import jobs as ns_jobs
 import rag as ns_rag
 import mcp_client as ns_mcp
+import ns_pairing
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -661,6 +663,71 @@ def stop_server():
                  "started": None, "lora": None})
 
 
+# ---------------------------------------------------------------- linked hosts
+
+# What a paired device may POST. Everything else needs the owner's token.
+DEVICE_POSTS = {"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/api/chat", "/api/chats",
+                "/api/chats/delete", "/api/rag/search", "/api/tools/approve"}
+
+LINKS = {"cache": {}, "lock": threading.Lock()}
+LINK_SEP = ":"
+
+
+def load_links() -> list[dict]:
+    try:
+        return json.loads(open(STATE["links_path"]).read()).get("links", [])
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return []
+
+
+def save_links(links: list[dict]) -> None:
+    os.makedirs(os.path.dirname(STATE["links_path"]), exist_ok=True)
+    sec.write_secret_file(Path(STATE["links_path"]), json.dumps({"links": links}, indent=1))
+
+
+def link_models(refresh: bool = False) -> list[dict]:
+    """Models of every linked host, as '<link>:<remote id>' (cached 30 s)."""
+    out = []
+    for ln in load_links():
+        with LINKS["lock"]:
+            hit = LINKS["cache"].get(ln["name"])
+        if hit and not refresh and time.time() - hit[0] < 30:
+            out += hit[1]
+            continue
+        try:
+            r = ns_pairing.request(ln["url"], "GET", "/v1/models", token=ln["token"],
+                                   fingerprint=ln.get("fingerprint", ""), timeout=5)
+            ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"link:{ln['name']}",
+                   "remote_id": m["id"], "link": ln["name"], "vision": m.get("vision", False)}
+                  for m in r.get("data", []) if m.get("id") != "auto"]
+            err = None
+        except Exception as e:
+            ms, err = [], f"{type(e).__name__}: {e}"[:200]
+        with LINKS["lock"]:
+            LINKS["cache"][ln["name"]] = (time.time(), ms, err)
+        out += ms
+    return out
+
+
+def link_target(model_id: str | None):
+    """-> (upstream dict, remote model id) when model_id names a linked host's model."""
+    if not model_id or LINK_SEP not in model_id:
+        return None
+    name, _, rid = model_id.partition(LINK_SEP)
+    ln = next((x for x in load_links() if x["name"] == name), None)
+    if ln is None:
+        return None
+    return {"base": ln["url"], "token": ln["token"], "fingerprint": ln.get("fingerprint", "")}, rid
+
+
+def _upstream_stream(upstream: dict, path: str, payload: dict):
+    r = ns_pairing.request(upstream["base"], "POST", path, payload, token=upstream["token"],
+                           fingerprint=upstream["fingerprint"], timeout=900, stream=True)
+    if r.status >= 400:
+        raise RuntimeError(f"linked host: HTTP {r.status}: {r.read()[:300].decode(errors='replace')}")
+    return r
+
+
 # ---------------------------------------------------------------- MCP tools
 
 APPROVALS: dict = {}            # call key -> {"event": Event, "allow": bool}
@@ -694,14 +761,14 @@ def sse(wfile, obj) -> None:
     wfile.flush()
 
 
-def chat_with_tools(wfile, payload: dict, msgs: list, hub) -> dict:
+def chat_with_tools(wfile, payload: dict, msgs: list, hub, upstream=None) -> dict:
     """Stream a chat in which the model may call MCP tools. Each call is shown
     to the user and, unless auto-approved, waits for Allow/Deny."""
     payload = {**payload, "tools": hub.openai_tools()}
     out = {"text": ""}
     for _ in range(MAX_TOOL_ROUNDS):
         payload["messages"] = msgs
-        out = proxy("/v1/chat/completions", payload, stream_to=wfile, hold_done=True)
+        out = proxy("/v1/chat/completions", payload, stream_to=wfile, hold_done=True, upstream=upstream)
         calls = out.get("tool_calls") or []
         if not calls:
             break
@@ -798,7 +865,7 @@ def rag_context(req: dict, msgs: list) -> tuple[list, list]:
     return msgs[:i] + [ctx] + msgs[i:], hits
 
 
-def proxy(path, payload, stream_to=None, hold_done=False):
+def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
     """Forward to the running llama-server. Streams SSE when asked.
 
     Streaming matters here: on an iGPU at a few tokens per second, a
@@ -806,18 +873,27 @@ def proxy(path, payload, stream_to=None, hold_done=False):
     With hold_done the final [DONE] is not forwarded (a tool round follows),
     and streamed tool calls are assembled and returned.
     """
-    if not server_running():
-        raise RuntimeError("no model loaded")
-    url = f"http://127.0.0.1:{PROC['port']}{path}"
-    req = urllib.request.Request(
-        url, method="POST", data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"})
-    if stream_to is None:
-        with urllib.request.urlopen(req, timeout=900) as r:
-            return json.loads(r.read())
+    if upstream is not None:
+        # a linked host's model: same OpenAI API, its device token, its pinned certificate
+        if stream_to is None:
+            return ns_pairing.request(upstream["base"], "POST", path, payload, token=upstream["token"],
+                                      fingerprint=upstream["fingerprint"], timeout=900)
+        opener = lambda: _upstream_stream(upstream, path, payload)  # noqa: E731
+    else:
+        if not server_running():
+            raise RuntimeError("no model loaded")
+        url = f"http://127.0.0.1:{PROC['port']}{path}"
+        req = urllib.request.Request(
+            url, method="POST", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        if stream_to is None:
+            with urllib.request.urlopen(req, timeout=900) as r:
+                return json.loads(r.read())
+        opener = lambda: urllib.request.urlopen(req, timeout=900)  # noqa: E731
     # Stream through untouched, keeping a copy of the text for stats.
     text, calls, finish = [], {}, None
-    with urllib.request.urlopen(req, timeout=900) as r:
+    r = opener()
+    with r:
         for raw in r:
             line = raw.decode(errors="replace").strip()
             if hold_done and line.startswith("data:") and line[5:].strip() == "[DONE]":
@@ -1025,6 +1101,7 @@ def openai_models():
     if any_eligible:
         data.insert(0, {"id": "auto", "object": "model", "owned_by": "neuronscope",
                         "description": "per prompt: subject classifier + rolling performance stats"})
+    data += [{k: v for k, v in m.items() if k != "remote_id"} for m in link_models()]
     return {"object": "list", "data": data}
 
 
@@ -1080,23 +1157,45 @@ class Handler(BaseHTTPRequestHandler):
     # This endpoint loads models, downloads files and runs inference. On a LAN
     # that is not something to leave open, so --token gates everything except
     # the login page itself.
-    def _authed(self):
-        tok = STATE["token"]
-        if not tok:
-            return True
+    _role = None      # "owner" (master token, or no token configured) or "device" (a paired device)
+
+    def _presented(self) -> list[str]:
+        out = []
         hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("Bearer ") and hmac.compare_digest(hdr[7:], tok):
-            return True
+        if hdr.startswith("Bearer "):
+            out.append(hdr[7:])
         raw = self.headers.get("Cookie", "")
         if raw:
             try:
                 c = http.cookies.SimpleCookie(raw)
-                if "ns_token" in c and hmac.compare_digest(
-                        c["ns_token"].value, tok):
-                    return True
+                if "ns_token" in c:
+                    out.append(c["ns_token"].value)
             except Exception:
                 pass
+        return out
+
+    def _authed(self):
+        self._role = None
+        tok = STATE["token"]
+        if not tok:
+            self._role = "owner"
+            return True
+        presented = self._presented()
+        if any(hmac.compare_digest(p, tok) for p in presented):
+            self._role = "owner"
+            return True
+        reg = STATE.get("devices")
+        if reg is not None and any(reg.check(p) for p in presented):
+            self._role = "device"
+            return True
         return False
+
+    def _owner_only(self):
+        """Pairing, device management and links are for the owner, not for paired devices."""
+        if self._role != "owner":
+            self._json(403, {"error": "only the owner (master token) can do this"})
+            return False
+        return True
 
     def _deny(self):
         if self.path == "/" or self.path.startswith("/login"):
@@ -1141,6 +1240,16 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read(MAX_BODY)
         touch(+1)
         try:
+            lt = link_target(body.get("model"))
+            if lt is not None:
+                upstream, rid = lt
+                body = {**body, "model": rid}
+                if body.get("stream"):
+                    self._send_headers_sse()
+                    proxy(path, body, stream_to=self.wfile, upstream=upstream)
+                else:
+                    self._json(200, proxy(path, body, upstream=upstream))
+                return
             with LOCK:
                 target, route = resolve_request_model(body)
                 if target is None:
@@ -1169,6 +1278,44 @@ class Handler(BaseHTTPRequestHandler):
                 note_reply(target, body.get("messages") or [], text or "")
         finally:
             touch(-1)
+
+    def _pairing_post(self):
+        if not self._owner_only():
+            return
+        req = self._read()
+        reg = STATE["devices"]
+        if self.path == "/api/pair/start":
+            if not STATE["token"]:
+                return self._json(400, {"error": "pairing needs Studio to run with a token (and TLS off loopback); "
+                                                 "without one, nothing is protected to pair into"})
+            code, exp = reg.new_code()
+            host = self.headers.get("Host") or "127.0.0.1"
+            scheme = "https" if STATE["tls"] else "http"
+            frag = f"c={code[:4]}-{code[4:8]}-{code[8:]}" + (f"&fp={STATE['fingerprint']}" if STATE.get("fingerprint") else "")
+            return self._json(200, {"code": code, "expires": exp, "link": f"{scheme}://{host}/pair#{frag}",
+                                    "fingerprint": STATE.get("fingerprint")})
+        if self.path == "/api/devices/revoke":
+            return self._json(200, {"ok": reg.revoke(str(req.get("id", "")))})
+        if self.path == "/api/links/add":
+            name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("name") or "remote"))[:32].strip("-") or "remote"
+            links = [x for x in load_links() if x["name"] != name]
+            try:
+                r = ns_pairing.claim(str(req.get("link", "")), str(req.get("device_name") or "studio"))
+            except (ValueError, RuntimeError, OSError) as e:
+                return self._json(400, {"error": f"could not pair: {e}"})
+            links.append({"name": name, "url": r["url"], "token": r["token"], "fingerprint": r["fingerprint"],
+                          "device_id": r["device_id"], "added": time.time()})
+            save_links(links)
+            with LINKS["lock"]:
+                LINKS["cache"].pop(name, None)
+            return self._json(200, {"name": name, "models": [m["id"] for m in link_models(refresh=True)
+                                                             if m["link"] == name]})
+        if self.path == "/api/links/remove":
+            name = str(req.get("name", ""))
+            save_links([x for x in load_links() if x["name"] != name])
+            with LINKS["lock"]:
+                LINKS["cache"].pop(name, None)
+            return self._json(200, {"ok": True})
 
     def _jobs_off(self):
         return self._json(403, {"error": STATE.get("jobs_off") or "jobs are disabled"})
@@ -1239,8 +1386,36 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._route = None
+        if self.path.split("?")[0] == "/pair":
+            body = PAIR_PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if not self._authed():
             return self._deny()
+        if self.path == "/link":
+            body = LINK_PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/api/devices":
+            if not self._owner_only():
+                return
+            return self._json(200, {"devices": STATE["devices"].list(),
+                                    "links": [{"name": x["name"], "url": x["url"],
+                                               "pinned": bool(x.get("fingerprint")),
+                                               "error": (LINKS["cache"].get(x["name"]) or (0, [], None))[2],
+                                               "models": len((LINKS["cache"].get(x["name"]) or (0, []))[1])}
+                                              for x in load_links()]})
+        if self.path == "/api/links/models":
+            return self._json(200, link_models())
         if self.path == "/":
             body = PAGE.encode()
             self.send_response(200)
@@ -1249,15 +1424,17 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/jobs":
-            body = ns_jobs.PAGE.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if self.path.startswith("/api/jobs"):
+        if self.path.startswith("/api/jobs") or self.path == "/jobs":
+            if self._role != "owner":
+                return self._json(403, {"error": "jobs need the owner"})
+            if self.path == "/jobs":
+                body = ns_jobs.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             return self._jobs_get()
         if self.path == "/api/mcp":
             hub = mcp_hub()
@@ -1369,9 +1546,36 @@ class Handler(BaseHTTPRequestHandler):
                 THROTTLE.fail(self.client_address[0])
                 self._json(401, {"error": "bad token"})
             return
+        if self.path == "/api/pair/claim":
+            ip = self.client_address[0]
+            if THROTTLE.blocked(ip):
+                return self._json(429, {"error": "too many attempts; wait a few minutes"})
+            req = self._read()
+            r = STATE["devices"].claim(str(req.get("code", "")), str(req.get("name", "device")))
+            if r is None:
+                THROTTLE.fail(ip)
+                return self._json(403, {"error": "pairing code is wrong, used or expired"})
+            r["fingerprint"] = STATE.get("fingerprint") or ""
+            if req.get("cookie"):
+                body = json.dumps(r).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Set-Cookie", f"ns_token={r['token']}; Path=/; HttpOnly; SameSite=Strict; "
+                                 "Max-Age=31536000" + ("; Secure" if STATE["tls"] else ""))
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            return self._json(200, r)
         if not self._authed():
             return self._deny()
+        if self._role == "device" and self.path not in DEVICE_POSTS:
+            # A paired device may use models, not administer this machine: no jobs (they
+            # run code), no load flags or downloads, no MCP reloads, no pairing.
+            return self._json(403, {"error": "paired devices can chat and use /v1; this needs the owner"})
         try:
+            if self.path in ("/api/pair/start", "/api/devices/revoke", "/api/links/add", "/api/links/remove"):
+                return self._pairing_post()
             if self.path in ("/v1/chat/completions", "/v1/completions", "/v1/embeddings"):
                 return self._v1(self.path)
 
@@ -1487,17 +1691,23 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/chat":
                 req = self._read(MAX_BODY)
-                with LOCK:
-                    target, route = resolve_request_model({"model": req.get("model", ""),
-                                                           "messages": req.get("messages", [])})
-                    if target is None:
-                        msg = route.get("error") or (f"model not found: {req.get('model')}" if req.get("model")
-                                                     else "no model loaded")
-                        return self._json(409, {"error": msg})
-                    ok, why = ensure_loaded(target, own=0)
-                if not ok:
-                    return self._json(503, {"error": f"could not load {target['id']}: {why}"})
-                if _has_image(req) and not target.get("mmproj"):
+                lt = link_target(req.get("model"))
+                upstream = None
+                if lt is not None:
+                    upstream, rid = lt
+                    target, route = None, {"mode": "link", "model": req["model"]}
+                else:
+                    with LOCK:
+                        target, route = resolve_request_model({"model": req.get("model", ""),
+                                                               "messages": req.get("messages", [])})
+                        if target is None:
+                            msg = route.get("error") or (f"model not found: {req.get('model')}" if req.get("model")
+                                                         else "no model loaded")
+                            return self._json(409, {"error": msg})
+                        ok, why = ensure_loaded(target, own=0)
+                    if not ok:
+                        return self._json(503, {"error": f"could not load {target['id']}: {why}"})
+                if target is not None and _has_image(req) and not target.get("mmproj"):
                     return self._json(400, {"error": f"{target['id']} has no vision projector (mmproj)"})
                 preset = load_presets().get(req.get("preset", "default"),
                                             PRESET_DEFAULTS)
@@ -1527,18 +1737,22 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 elif preset.get("grammar"):
                     payload["grammar"] = preset["grammar"]
+                if upstream is not None:
+                    payload["model"] = rid
                 self._route = route
                 self._send_headers_sse()
                 if sources:
                     self.wfile.write(f"data: {json.dumps({'sources': sources})}\n\n".encode())
                 touch(+1)
                 try:
-                    hub = mcp_hub() if req.get("tools") else None
+                    # MCP tools run with the host owner's permissions: owner sessions only
+                    hub = mcp_hub() if req.get("tools") and self._role == "owner" else None
                     if hub is not None and hub.openai_tools():
-                        out = chat_with_tools(self.wfile, payload, msgs, hub)
+                        out = chat_with_tools(self.wfile, payload, msgs, hub, upstream=upstream)
                     else:
-                        out = proxy("/v1/chat/completions", payload, stream_to=self.wfile)
-                    note_reply(target, msgs, out["text"])
+                        out = proxy("/v1/chat/completions", payload, stream_to=self.wfile, upstream=upstream)
+                    if target is not None:
+                        note_reply(target, msgs, out["text"])
                 except Exception as e:
                     self.wfile.write(
                         f"data: {json.dumps({'error': str(e)})}\n\n".encode())
@@ -1557,6 +1771,76 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+
+_PAIR_STYLE = """<style>
+:root{--bg:#f7f7f5;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b64;--line:#e3e2dd;--acc:#2c5f8a;--accfg:#fff;--ok:#2f7d4f;--no:#b23c2e;--code:#f3f2ee;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#161615;--panel:#1e1e1c;--fg:#ecebe6;--mut:#9b9a93;--line:#34332f;--acc:#7aa7d6;--accfg:#0f0f0e;--ok:#5fb27f;--no:#e0705f;--code:#262522;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-sans-serif,system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;gap:1rem;align-items:center;padding:.6rem 1rem;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:15px;margin:0}a{color:var(--acc)}
+main{max-width:900px;margin:0 auto;padding:1rem;display:grid;gap:1rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.9rem}
+h2{font-size:13px;margin:0 0 .5rem;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+input{font:13px ui-monospace,monospace;padding:.35rem .45rem;border:1px solid var(--line);border-radius:5px;width:100%;background:var(--bg);color:var(--fg)}
+button{font:500 13px ui-sans-serif,system-ui;padding:.4rem .8rem;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;cursor:pointer}
+button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
+.note{font-size:12.5px;color:var(--mut)}.err{color:var(--no)}.ok{color:var(--ok)}
+code,.code{font:12.5px ui-monospace,monospace;background:var(--code);padding:.15rem .35rem;border-radius:4px;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:.3rem .25rem;border-bottom:1px solid var(--line)}
+.row{display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap}.row>div{flex:1;min-width:180px}
+label{display:block;font-size:12px;color:var(--mut);margin:.3rem 0 .1rem}
+</style>"""
+
+PAIR_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pair device</title>""" + _PAIR_STYLE + r"""
+<header><h1>NeuronScope Studio · Pair this device</h1></header>
+<main><div class="card"><h2>Pair</h2><div id="msg" class="note">Reading the pairing code…</div>
+<div id="form" style="display:none"><label>Name for this device</label><input id="name">
+<button class="pri" id="go" style="margin-top:.6rem">Pair and open Studio</button></div></div></main>
+<script>
+const p=new URLSearchParams(location.hash.slice(1)), code=p.get('c'), $=s=>document.querySelector(s);
+history.replaceState(null,'',location.pathname);         // keep the code out of history
+if(!code){ $('#msg').innerHTML='<span class="err">This link has no pairing code. Ask the owner for a new one.</span>'; }
+else { $('#msg').textContent='Pairing code '+code+'. This browser will get its own access, which the owner can revoke.';
+  $('#name').value=(navigator.userAgentData?.platform||navigator.platform||'browser')+' browser'; $('#form').style.display=''; }
+$('#go').onclick=async()=>{ const r=await fetch('/api/pair/claim',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({code,name:$('#name').value,cookie:true})}); const j=await r.json().catch(()=>({}));
+  if(r.ok){ location.href='/'; } else { $('#msg').innerHTML='<span class="err">'+(j.error||r.status)+'</span>'; } };
+</script>"""
+
+LINK_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Studio Link</title>""" + _PAIR_STYLE + r"""
+<header><h1>Studio · Link</h1><a href="/">← Studio</a></header>
+<main>
+<div class="card"><h2>Pair a device with this Studio</h2>
+ <div class="note">Creates a one-time link (5 minutes). Open it on a phone or laptop, or paste it into another Studio below. Each device gets its own token, revocable here; the master token is never shared. The link carries this server's certificate fingerprint, so the other side pins it instead of trusting any certificate.</div>
+ <button class="pri" id="start" style="margin-top:.6rem">Create pairing link</button>
+ <div id="pairout" style="margin-top:.6rem"></div></div>
+<div class="card"><h2>Paired devices</h2><div id="devs" class="note">loading…</div></div>
+<div class="card"><h2>Use another machine's models here</h2>
+ <div class="note">On the other machine's Studio, open Link → Create pairing link, and paste it here. Its models then appear in this Studio's model picker and its <code>/v1</code> API as <code>name:model</code>; requests are served by that machine.</div>
+ <div class="row"><div><label>Pairing link from the other Studio</label><input id="lnk" placeholder="https://host:7870/pair#c=…&fp=…"></div>
+ <div style="max-width:200px"><label>Name here</label><input id="lname" placeholder="gpu-box"></div><button class="pri" id="add">Link</button></div>
+ <div id="addmsg" class="note" style="margin-top:.4rem"></div>
+ <div id="links" style="margin-top:.6rem"></div></div>
+</main>
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+const when=t=>t?new Date(t*1000).toLocaleString():'never';
+async function load(){ const r=await fetch('/api/devices'); const j=await r.json();
+  if(!r.ok){ $('#devs').innerHTML='<span class="err">'+esc(j.error)+'</span>'; $('#start').disabled=true; $('#add').disabled=true; return; }
+  $('#devs').innerHTML=j.devices.length?'<table><tr><th>device</th><th>paired</th><th>last seen</th><th></th></tr>'+j.devices.map(d=>`<tr><td>${esc(d.name)}</td><td>${when(d.created)}</td><td>${when(d.last_seen)}</td><td><button data-r="${esc(d.id)}">Revoke</button></td></tr>`).join('')+'</table>':'No paired devices.';
+  document.querySelectorAll('[data-r]').forEach(b=>b.onclick=async()=>{ if(confirm('Revoke this device? It loses access immediately.')){ await post('/api/devices/revoke',{id:b.dataset.r}); load(); } });
+  $('#links').innerHTML=j.links.length?'<table><tr><th>name</th><th>host</th><th>models</th><th></th></tr>'+j.links.map(l=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.url)}</code> ${l.pinned?'🔒 pinned':''}</td><td>${l.error?'<span class="err">'+esc(l.error)+'</span>':l.models}</td><td><button data-l="${esc(l.name)}">Unlink</button></td></tr>`).join('')+'</table>':'';
+  document.querySelectorAll('[data-l]').forEach(b=>b.onclick=async()=>{ await post('/api/links/remove',{name:b.dataset.l}); load(); }); }
+$('#start').onclick=async()=>{ const r=await post('/api/pair/start'); const j=await r.json();
+  $('#pairout').innerHTML=r.ok?`<div><span class="code" id="plink">${esc(j.link)}</span> <button id="cp">Copy</button></div><div class="note">Code <b>${esc(j.code)}</b>, valid until ${new Date(j.expires*1000).toLocaleTimeString()}, single use.${j.fingerprint?'':' <span class="err">No TLS on this Studio: use the link only inside a VPN.</span>'}</div>`:'<span class="err">'+esc(j.error)+'</span>';
+  if(r.ok) $('#cp').onclick=()=>navigator.clipboard.writeText(j.link); };
+$('#add').onclick=async()=>{ $('#addmsg').textContent='pairing…'; const r=await post('/api/links/add',{link:$('#lnk').value.trim(),name:$('#lname').value.trim()||'remote',device_name:location.host});
+  const j=await r.json(); $('#addmsg').innerHTML=r.ok?`<span class="ok">Linked ${esc(j.name)}: ${j.models.length} models.</span>`:'<span class="err">'+esc(j.error)+'</span>'; if(r.ok){ $('#lnk').value=''; } load(); };
+load();
+</script>"""
 
 PAGE = r"""<!DOCTYPE html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1627,7 +1911,8 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <h1>NeuronScope Studio</h1>
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
-  <a href="/jobs" class="chip" style="margin-left:auto;text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
+  <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
   <button id="theme" title="toggle theme">◐</button>
   <button id="unload" disabled>Unload</button>
 </header>
@@ -1771,13 +2056,17 @@ $$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.cl
   ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
 
 // ---------- models
+let linked=[];
 async function refresh(){
-  models=await (await fetch('/api/models')).json(); renderModels(); renderPicker();
+  models=await (await fetch('/api/models')).json();
+  try{ linked=await (await fetch('/api/links/models')).json(); }catch{ linked=[]; }
+  renderModels(); renderPicker();
 }
 function renderPicker(){
   const cur=$('#modelPick').value; const anyOk=models.some(m=>m.stats&&m.stats.eligible);
   let o=`<option value="">Loaded model</option><option value="auto"${anyOk?'':' disabled'}>Auto (by performance stats)${anyOk?'':' - no models have stats'}</option>`;
   o+=models.map(m=>`<option value="${esc(m.id)}">${m.stats&&!m.stats.eligible?'⚠ ':''}${esc(m.id)}${m.stats&&!m.stats.eligible?' (no stats)':''}</option>`).join('');
+  if(linked.length) o+=`<optgroup label="linked hosts">`+linked.map(m=>`<option value="${esc(m.id)}">⇢ ${esc(m.id)}</option>`).join('')+`</optgroup>`;
   $('#modelPick').innerHTML=o; if([...$('#modelPick').options].some(x=>x.value===cur&&!x.disabled)) $('#modelPick').value=cur;
   pickChanged();
 }
@@ -2104,6 +2393,10 @@ def main(argv=None):
     p.add_argument("--allow-remote-jobs", action="store_true",
                    help="allow /jobs on a non-loopback bind (jobs can train models and run model-written code)")
     p.add_argument("--no-jobs", action="store_true", help="disable /jobs entirely")
+    p.add_argument("--devices", default=os.path.expanduser("~/.neuronscope/devices.json"),
+                   help="paired devices (token hashes only)")
+    p.add_argument("--links", default=os.path.expanduser("~/.neuronscope/links.json"),
+                   help="linked hosts whose models this Studio serves (holds their device tokens; 0600)")
     p.add_argument("--mcp-config", default=str(ns_mcp.DEFAULT_CONFIG),
                    help="MCP servers for chat tools (mcpServers JSON, as in LM Studio / Claude Desktop)")
     p.add_argument("--rag-dir", default=os.path.expanduser("~/.neuronscope/rag"), help="document collections")
@@ -2141,6 +2434,8 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    STATE.update(devices=ns_pairing.DeviceRegistry(a.devices), links_path=os.path.expanduser(a.links),
+                 fingerprint=ns_pairing.cert_fingerprint(a.tls_cert) if a.tls_cert and a.tls_key else None)
     STATE.update(mcp_config=a.mcp_config if os.path.exists(os.path.expanduser(a.mcp_config)) else None, mcp=None)
     STATE.update(rag_dir=a.rag_dir, rag_embed=a.rag_embed, rag_embed_gguf=a.rag_embed_gguf,
                  rag_embed_ngl=a.rag_embed_ngl, rag=None)
