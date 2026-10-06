@@ -65,6 +65,35 @@ and refuses.
 ---
 
 
+## Which view when
+
+Start from the question you have, not the tool:
+
+| question | view | how to get there |
+|---|---|---|
+| Did this reply hallucinate, and where? | **Studio check** | in chat, *check* on a reply (or turn on *check replies*); tokens are shaded by risk and the flagged ones underlined |
+| What did the network do on those tokens? | **3D view** (`viz/bloom.py`, Godot) | *open 3D view* on a checked reply, or Replay in the hub; step token by token, `N` jumps to the next flagged token in Godot |
+| Is this exact cell / layer really different? | **timeline** (`viz/timeline.py`) | the same trace directory; exact sizes, no glow, for deciding |
+| Which neurons matter for this model at all? | explorer, weights | `viz/explore.py`, `viz/weights.py` over a profiling run |
+| Is model A worse than model B? | comparison, graded stats | `viz/compare.py`; `model_stats.py rank` |
+
+The usual path is the first three in order: **check** a reply in Studio, look
+at the shaded text for the flagged span, **open the 3D view** on it to see
+which layers lit up, and go to **timeline** only if you need to measure. Every
+check is saved as a trace session under `~/.neuronscope/traces/<id>`, which
+the hub's Replay picker, `bloom.py` and `timeline.py` all open.
+
+The 3D views read the same way everywhere:
+
+- **dim dots**: neurons that fire at least once in the reply; **bright**: firing on this token;
+- **rings** (cyan in `ember`): H-neurons firing on a flagged token;
+- **risk strip** along the bottom: risk per token, the dashed line is the flag threshold, shaded columns are flagged tokens; click to jump;
+- **reply text** under it: each token shaded by its risk, flagged ones underlined, the current one outlined; click a token to jump.
+
+A checked reply's risk is a signal, not a verdict: the classifier is around
+0.7 AUROC on whole replies. Treat a flagged span as "verify this", and an
+unflagged reply as unflagged, not as correct.
+
 ## Visualization modes
 
 | mode | shows | where |
@@ -73,7 +102,6 @@ and refuses.
 | dashboard | pipeline state, per-layer H-Neuron bars, live alpha sweep | `viz/server.py`, remote |
 | explorer | mean map, contrast map, 3D MIP volume, click-inspect | `viz/explore.py`, local GPU |
 | comparison | depth profiles, concentration, failure overlap, tiered index diff | `viz/compare.py` |
-
 | weights | magnitude, quantization error, H-Neuron enrichment | `viz/weights.py` |
 
 ### Time-resolved 3D
@@ -93,12 +121,25 @@ Size is why this is per-sample: one 500-token sequence on a 32x14336 model is
 459 MB unbinned, about 16 MB at 512 bins. Binning max-pools, never means --
 H-Neurons are under 0.1% of neurons and averaging erases them.
 
-**What counts as hallucinating.** A neuron is not flagged for being in the
-H-Neuron set; those fire constantly on grounded text too. It is flagged when it
-is firing *and* the classifier score for that token is high, so the marking
-tracks the moment rather than the membership. Verified: with a burst planted on
-two cells across five frames, the player flags exactly those frames and exactly
-those cells, and flags nothing when the score signal is removed.
+**What counts as hallucinating.** Each token gets a risk: the classifier's
+probability that its activity looks like a hallucination (sigmoid of the
+per-token logit). A token is **flagged when its risk reaches 0.5**, the
+classifier's own decision boundary, so a clean reply flags nothing and a bad
+one flags only the tokens that crossed. `--flag-prob` moves the threshold and
+`--smooth N` averages risk over N tokens (the classifier was trained on span
+means). `--relative-z Z` is the old behaviour, flagging tokens Z standard
+deviations above the trace's own mean; it always flags something, even in a
+clean reply, so it is a way of looking at shape, not a verdict, and the HUD
+says "relative" when it is on.
+
+On a flagged token, the **H-neuron cells** that are firing are ringed. The
+cells come from an H-neuron profile: `--h-neurons models/h_neurons.json`, or,
+when the trace was recorded with `--classifier`, the classifier's positive
+weights stored in the trace. Without either, the token is still flagged in the
+risk strip and text, but no cell is ringed, and the HUD says why. Columns are
+ordered by classifier weight by default (`--order weight`), so the H-neurons
+form a band at the left of every layer instead of scattering by neuron index;
+`--order index` restores the raw layout.
 
 The active threshold is global across the trace, not per frame. A per-frame
 percentile would mark the same fraction active at every token and erase the
@@ -115,9 +156,9 @@ variation the animation exists to show.
 Parity survives because the clients are thin. `viz/bloom.py` serves the API all
 three consume:
 
-    GET /api/meta     frames, cells, layers, per-frame z, labels, flagged
+    GET /api/meta     frames, cells, layers, labels, per-token risk, flagged tokens, mode
     GET /api/theme    the selected theme, from themes.json
-    GET /api/trace    i32 T,N,L | i32 layer[N] | i32 neuron[N]
+    GET /api/trace    i32 T,N,L | i32 layer[N] | i32 x[N] (column position)
                       | f32 intensity[T][N] | u8 state[T][N]
 
 The Godot client is verified against the Godot 4.7 source, not from memory --
@@ -157,7 +198,10 @@ NS_API=http://127.0.0.1:7880 godot --path viz/godot         # terminal 2
 NS_FRAME=67 NS_PAUSED=1 NS_API=... godot --path viz/godot   # open on one token, paused
 ```
 
-Space pauses, Left/Right step a token, Esc quits. It runs the project
+Space pauses, Left/Right step a token, N jumps to the next flagged token,
+clicking the risk strip seeks, Esc quits. `NS_API` may include a path (Studio
+serves each checked reply at `.../viz/<id>/`) and `NS_TOKEN` sends a bearer
+token for a Studio that needs one. It runs the project
 directly, no editor needed; opening `viz/godot/project.godot` in the editor
 works too. Forward+ needs Vulkan; on a GPU or driver without it, add
 `--rendering-method gl_compatibility` (glow still works, a little softer).

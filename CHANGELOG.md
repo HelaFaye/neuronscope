@@ -49,6 +49,19 @@
 - Themes: flagged colours chosen to stay distinct from active colours under
   common colour-vision deficiencies (ember: cyan on amber; cool: orange on teal).
 - Fixed: Godot billboards ignored instance scale, so every cell drew at one size.
+- Studio: *check* on a reply (or the *check replies* toggle) scores every token
+  of it with the model's classifier, shades the reply text by risk, underlines
+  flagged tokens, and links to a 3D view of that reply served by Studio at
+  `/viz/<id>/`. Checks are saved with the chat and as trace sessions in
+  `--traces-dir`. `POST /api/trace`, `GET /api/traces`; `HScorer.trace`.
+- Fixed: the GGUF tokenizer decoded SentencePiece byte-fallback tokens
+  (`<0xNN>`) to nothing, so characters outside the vocabulary vanished from
+  decoded text and trace labels; multi-byte characters now land on the last
+  of their byte tokens.
+- Hub: Replay lists saved traces (Studio checks and `runs/`) to pick from.
+- Docs: VISUALIZATION.md "Which view when" and how to read the 3D views.
+- Removed tabs with nothing behind them: the planned Recipes tab, and the
+  example Eval package is no longer enabled by default.
 
 ### Added
 - Studio pairing: persistent (until revoked) or temporary access per pairing

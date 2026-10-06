@@ -65,11 +65,24 @@ class GGufTokenizer:
     def has_template(self):
         return bool(self.chat_template)
 
+    def _byte(self, i):
+        """SentencePiece byte-fallback token <0xNN> -> its byte, else None."""
+        t = self.tokens[int(i)] if 0 <= int(i) < len(self.tokens) else ""
+        if len(t) == 6 and t.startswith("<0x") and t.endswith(">"):
+            try:
+                return int(t[3:5], 16)
+            except ValueError:
+                return None
+        return None
+
     def decode_id(self, i):
         i = int(i)
         if i < 0 or i >= len(self.tokens):
             return ""
         t = self.tokens[i]
+        b = self._byte(i)
+        if b is not None:
+            return bytes([b]).decode("utf-8", errors="replace")
         if (t.startswith("<") and t.endswith(">") and len(t) > 2
                 and t not in ("<think>", "</think>")
                 and not t.startswith("<|")):
@@ -81,10 +94,34 @@ class GGufTokenizer:
         return t
 
     def decode(self, ids):
-        return "".join(self.decode_id(i) for i in ids)
+        return "".join(self.pieces(ids))
 
     def pieces(self, ids):
-        return [self.decode_id(i) for i in ids]
+        """Text per token. Byte-fallback tokens that together encode one
+        character (e.g. an emoji as four <0xNN> tokens) give the character on
+        the last of them and "" on the others, so the pieces still join to the
+        decoded text."""
+        out, pend = [], bytearray()
+        for i in ids:
+            b = self._byte(i)
+            if b is None:
+                if pend:            # an incomplete sequence: show what is there
+                    out[-1] = pend.decode("utf-8", errors="replace")
+                    pend.clear()
+                out.append(self.decode_id(i))
+                continue
+            pend.append(b)
+            out.append("")
+            try:
+                out[-1] = pend.decode("utf-8")
+                pend.clear()
+            except UnicodeDecodeError:
+                if len(pend) >= 4:
+                    out[-1] = pend.decode("utf-8", errors="replace")
+                    pend.clear()
+        if pend:
+            out[-1] = pend.decode("utf-8", errors="replace")
+        return out
 
     def render_chat(self, messages, add_generation_prompt=True):
         if not self.chat_template:

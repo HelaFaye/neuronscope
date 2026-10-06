@@ -72,44 +72,80 @@ class HScorer:
         if r.returncode != 0:
             raise RuntimeError(f"cett-dump failed: {(r.stderr or r.stdout)[-400:]}")
 
-    def score(self, messages: list[dict], response: str) -> dict:
-        from extract_activations_gguf import read_aggregate, read_tokens
-        tok = self._tokenizer()
-        prompt = tok.render_chat(messages, True)
+    def _prepare(self, messages: list[dict], response: str, work: str):
+        """Tokenize prompt and prompt+response with the binary; -> (text, ids, start).
+        The response starts where the prompt's own tokenization ends; if the
+        boundary merged into one token, back off to the common prefix."""
+        from extract_activations_gguf import read_tokens
+        prompt = self._tokenizer().render_chat(messages, True)
         text = prompt + response
-        with self.lock, tempfile.TemporaryDirectory(prefix="hscore-") as work:
-            m1 = os.path.join(work, "t.jsonl")
-            with open(m1, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"id": "p", "text": prompt}, ensure_ascii=False) + "\n")
-                f.write(json.dumps({"id": "r", "text": text}, ensure_ascii=False) + "\n")
-            self._run(["--tokenize-only", "-ngl", "0", "-c", "4096", "--manifest", m1, "--outdir", work])
-            ids = read_tokens(os.path.join(work, "r.toks"))
-            p_ids = read_tokens(os.path.join(work, "p.toks"))
-            n_tok = len(ids)
-            if n_tok > self.batch:
-                raise ValueError(f"{n_tok} tokens exceeds batch {self.batch}")
-            # The response starts where the prompt's own tokenization ends. If
-            # the boundary merged into one token, back off to the common prefix.
-            start = 0
-            while start < min(len(p_ids), n_tok) and p_ids[start] == ids[start]:
-                start += 1
-            if start >= n_tok:
-                raise ValueError("empty response region")
-            m2 = os.path.join(work, "s.jsonl")
-            with open(m2, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"id": "r", "text": text, "spans": [[start, -1]]}, ensure_ascii=False) + "\n")
-            n_layers = self.n_layers or self._layers_from_gguf()
-            self._run(["-ngl", str(self.ngl), "-b", str(self.batch), "-c", str(self.batch),
-                       "--n-layers", str(n_layers), "--manifest", m2, "--outdir", work])
-            _, agg, _seen, _counts, n_experts = read_aggregate(os.path.join(work, "r.bin"))
+        m1 = os.path.join(work, "t.jsonl")
+        with open(m1, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "p", "text": prompt}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"id": "r", "text": text}, ensure_ascii=False) + "\n")
+        self._run(["--tokenize-only", "-ngl", "0", "-c", "4096", "--manifest", m1, "--outdir", work])
+        ids = read_tokens(os.path.join(work, "r.toks"))
+        p_ids = read_tokens(os.path.join(work, "p.toks"))
+        n_tok = len(ids)
+        if n_tok > self.batch:
+            raise ValueError(f"{n_tok} tokens exceeds batch {self.batch}")
+        start = 0
+        while start < min(len(p_ids), n_tok) and p_ids[start] == ids[start]:
+            start += 1
+        if start >= n_tok:
+            raise ValueError("empty response region")
+        return text, ids, start
+
+    def _dump(self, text: str, spans: list, work: str):
+        from extract_activations_gguf import read_aggregate
+        m2 = os.path.join(work, "s.jsonl")
+        with open(m2, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"id": "r", "text": text, "spans": spans}, ensure_ascii=False) + "\n")
+        n_layers = self.n_layers or self._layers_from_gguf()
+        self._run(["-ngl", str(self.ngl), "-b", str(self.batch), "-c", str(self.batch),
+                   "--n-layers", str(n_layers), "--manifest", m2, "--outdir", work])
+        _, agg, _seen, _counts, n_experts = read_aggregate(os.path.join(work, "r.bin"))
         if n_experts > 1:
             raise ValueError("MoE models are not supported for live scoring")
+        return agg, n_layers
+
+    def score(self, messages: list[dict], response: str) -> dict:
+        with self.lock, tempfile.TemporaryDirectory(prefix="hscore-") as work:
+            text, ids, start = self._prepare(messages, response, work)
+            agg, n_layers = self._dump(text, [[start, -1]], work)
         feats = (agg[0] * self._col_norms(n_layers)).ravel().astype(np.float32)
         if feats.size != self.coef.size:
             raise ValueError(f"feature size {feats.size} != classifier {self.coef.size}: wrong classifier for this model?")
         s = float(feats @ self.coef + self.intercept)
         return {"score": s, "prob": 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, s)))),
-                "n_tokens": int(n_tok - start)}
+                "n_tokens": int(len(ids) - start)}
+
+    def trace(self, messages: list[dict], response: str, bins: int = 512, max_frames: int = 512) -> dict:
+        """Per-token CETT over the response (one span per token, or per `stride`
+        tokens when the reply is longer than `max_frames`), scored token by token.
+        -> {frames [T, L, bins], scores [T] (logits), prob [T], pieces [T], stride,
+            h_cells, col_weight, n_layers}"""
+        from trace_sample import bin_axis, classifier_cells
+        with self.lock, tempfile.TemporaryDirectory(prefix="htrace-") as work:
+            text, ids, start = self._prepare(messages, response, work)
+            n = len(ids) - start
+            stride = max(1, -(-n // max_frames))
+            spans = [[start + i, min(start + i + stride, len(ids))] for i in range(0, n, stride)]
+            agg, n_layers = self._dump(text, spans, work)
+        trace = (agg * self._col_norms(n_layers)[None]).astype(np.float32)
+        flat = trace.reshape(trace.shape[0], -1)
+        if flat.shape[1] != self.coef.size:
+            raise ValueError(f"feature size {flat.shape[1]} != classifier {self.coef.size}: wrong classifier?")
+        scores = flat @ self.coef + self.intercept
+        tok = self._tokenizer()
+        resp_ids = [int(i) for i in ids[start:]]
+        per = tok.pieces(resp_ids) if hasattr(tok, "pieces") else [tok.decode([i]) for i in resp_ids]
+        pieces = ["".join(per[i:i + stride]) for i in range(0, n, stride)]
+        cells, col_w = classifier_cells(self.coef, n_layers, trace.shape[-1], bins)
+        return {"frames": bin_axis(trace, bins), "scores": scores.astype(np.float32),
+                "prob": (1 / (1 + np.exp(-np.clip(scores, -60, 60)))).astype(np.float32),
+                "pieces": pieces, "stride": stride, "h_cells": cells, "col_weight": col_w,
+                "n_layers": n_layers, "tokens": resp_ids}
 
     def _layers_from_gguf(self) -> int:
         import gguf

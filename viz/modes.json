@@ -49,15 +49,6 @@
       "summary": "Two models or two profiles, side by side.",
       "surfaces": ["compare", "control"],
       "route": "/#compare"
-    },
-    {
-      "id": "recipes",
-      "label": "Recipes",
-      "glyph": "\u2261",
-      "summary": "Saved multi-stage runs. Declarative, reviewed before they run.",
-      "surfaces": ["control"],
-      "route": "/#recipes",
-      "planned": true
     }
   ]
 }

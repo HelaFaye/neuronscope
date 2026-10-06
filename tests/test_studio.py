@@ -598,3 +598,74 @@ def test_expired_link_is_reported_not_called(studio_srv):
     _, d = call(studio_srv, "/api/devices")
     (ln,) = d["links"]
     assert "expired" in ln["error"] and ln["expires"]
+
+
+class _CharTok:
+    """One token per character, as tests/fake_cett_dump.py tokenizes."""
+    def render_chat(self, messages, add_generation_prompt=True):
+        return "<u>" + messages[-1]["content"] + "</u><a>"
+
+    def decode(self, ids):
+        return "".join(chr(int(i)) for i in ids)
+
+
+def _fake_scorer(tmp_path, max_frames=None):
+    import numpy as np
+    import hscore
+    n_layers, n_ff = 3, 4
+    coef = np.zeros(n_layers * n_ff, dtype=np.float32)
+    coef[5] = 1.0                                     # layer 1, neuron 1
+    np.savez(tmp_path / "clf.npz", coef=coef, intercept=-5.0, n_layers=n_layers, n_neurons=n_ff)
+    sc = hscore.HScorer(str(ROOT / "tests" / "fake_cett_dump.py"), "model.gguf", str(tmp_path / "clf.npz"),
+                        tokenizer=_CharTok())
+    sc._norms = np.full((n_layers, n_ff), 2.0, dtype=np.float32)
+    return sc
+
+
+def test_hscore_trace_scores_each_token(tmp_path):
+    import numpy as np
+    sc = _fake_scorer(tmp_path)
+    prompt, reply = "<u>hi</u><a>", "abcdef"
+    r = sc.trace([{"role": "user", "content": "hi"}], reply)
+    t = np.arange(len(prompt), len(prompt) + len(reply))
+    want = 2.0 * (1 + (t + 1 + 1) % 3) - 5.0          # per token: layer 1, neuron 1
+    assert r["pieces"] == list(reply) and r["stride"] == 1
+    assert np.allclose(r["scores"], want, atol=1e-2)
+    assert r["frames"].shape[0] == len(reply)
+    assert r["h_cells"] == [[1, 1]]                    # the one positive weight
+    # A long reply is strided so the trace stays a bounded size.
+    r2 = sc.trace([{"role": "user", "content": "hi"}], reply, max_frames=2)
+    assert r2["stride"] == 3 and r2["pieces"] == ["abc", "def"] and len(r2["scores"]) == 2
+
+
+def test_check_reply_saves_trace_and_serves_3d_view(studio_srv, tmp_path):
+    sc = _fake_scorer(tmp_path)
+    m = studio.find_model(CODER)
+    st = studio.load_settings()
+    st.setdefault(studio._key(m["path"]), {})["classifier"] = str(tmp_path / "clf.npz")
+    studio.save_settings(st)
+    studio.STATE.update(cett=sc.binary, traces_dir=str(tmp_path / "traces"))
+    studio._SCORERS[(m["path"], str(tmp_path / "clf.npz"))] = sc
+    try:
+        code, r = call(studio_srv, "/api/trace", {"model": CODER, "text": "abcdef",
+                                                  "messages": [{"role": "user", "content": "hi"}]})
+        assert code == 200, r
+        # Tokens alternate 1, 2, 3 on the H-neuron: logits -3, -1, 1 -> only the 3s cross 0.5.
+        assert r["pieces"] == list("abcdef") and len(r["prob"]) == 6
+        assert r["flagged"] == [i for i, p in enumerate(r["prob"]) if p >= 0.5] and r["flagged"]
+        assert r["url"] == f"viz/{r['id']}/"
+        code, page = call(studio_srv, "/" + r["url"])
+        assert code == 200 and "three" in page
+        code, meta = call(studio_srv, f"/viz/{r['id']}/api/meta")
+        assert meta["flagged"] == r["flagged"] and meta["labels"] == list("abcdef")
+        assert meta["mode"] == "absolute"
+        code, lst = call(studio_srv, "/api/traces")
+        assert [x["id"] for x in lst["traces"]] == [r["id"]]
+        assert call(studio_srv, "/viz/../api/meta")[0] == 404
+        assert call(studio_srv, "/viz/nosuchtrace/api/meta")[0] == 404
+        # A model without a classifier gets a reason, not a crash.
+        code, r = call(studio_srv, "/api/trace", {"model": VLM, "text": "x", "messages": []})
+        assert code == 400 and "classifier" in r["error"]
+    finally:
+        studio._SCORERS.clear()
+        studio.STATE.update(cett=None)

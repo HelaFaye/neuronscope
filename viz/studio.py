@@ -69,7 +69,7 @@ except ImportError:
 STATE = {"models_dirs": [], "server_bin": None, "settings_path": None,
          "download_dir": None, "offline": False, "token": None,
          "chats_dir": None, "stats": None, "min_graded": 20, "min_subject": 5,
-         "halluc_cost": 1.0, "cett": None, "score_ngl": 0, "score_every": 1,
+         "halluc_cost": 1.0, "traces_dir": None, "cett": None, "score_ngl": 0, "score_every": 1,
          "idle_ttl": 0, "jit": True,
          "backend_port": 8080, "tls": False}
 ACTIVITY = {"last": time.time(), "active": 0}
@@ -716,7 +716,7 @@ def stop_server():
 
 # What a paired device may POST. Everything else needs the owner's token.
 DEVICE_POSTS = {"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/api/chat", "/api/chats",
-                "/api/chats/delete", "/api/rag/search", "/api/tools/approve"}
+                "/api/chats/delete", "/api/rag/search", "/api/tools/approve", "/api/trace"}
 
 LINKS = {"cache": {}, "lock": threading.Lock()}
 LINK_SEP = ":"
@@ -1106,16 +1106,87 @@ def score_worker():
         while ACTIVITY["active"] > 0:
             time.sleep(1)
         try:
-            key = (model["path"], clf)
-            if key not in _SCORERS:
-                from hscore import HScorer
-                _SCORERS[key] = HScorer(STATE["cett"], model["path"], clf, ngl=STATE["score_ngl"])
-            res = _SCORERS[key].score([m for m in messages if m.get("role") != "system"] or messages, text)
+            res = _scorer(model, clf).score([m for m in messages if m.get("role") != "system"] or messages, text)
             STATE["stats"].record(model["id"], "activation", size=model["size"], subject=subject,
                                   h_score=res["score"], prob=res["prob"], n_tokens=res["n_tokens"],
                                   threshold=0.0)
         except Exception as e:
             print(f"[studio] activation scoring failed for {model['name']}: {e}", file=sys.stderr)
+
+
+# ------------------------------------------------------- per-reply checks
+
+TRACES = {"lock": threading.Lock(), "payloads": {}}
+TRACE_ID = re.compile(r"[A-Za-z0-9_-]{6,64}")
+
+
+def _scorer(model, clf):
+    key = (model["path"], clf)
+    if key not in _SCORERS:
+        from hscore import HScorer
+        _SCORERS[key] = HScorer(STATE["cett"], model["path"], clf, ngl=STATE["score_ngl"])
+    return _SCORERS[key]
+
+
+def trace_reply(model, messages, text, threshold=0.5):
+    """Score one reply token by token and save it as a trace session that the
+    3D view (viz/bloom.py) and timeline.py can open. -> summary for the chat."""
+    clf = load_settings().get(_key(model["path"]), {}).get("classifier")
+    if not clf:
+        raise ValueError(f"{model['id']} has no classifier set (model settings: classifier)")
+    if not STATE["cett"]:
+        raise ValueError("activation checks need llama-cett-dump (studio --cett)")
+    msgs = [m for m in messages if m.get("role") != "system"] or messages
+    r = _scorer(model, clf).trace(msgs, text)
+    frames = r["frames"]
+    T, L, N = frames.shape
+    tid = time.strftime("%Y%m%d-%H%M%S-") + hashlib.sha1(text.encode()).hexdigest()[:8]
+    from records import Recorder
+    with Recorder(os.path.join(STATE["traces_dir"], tid),
+                  {"model": model["name"], "n_layers": L, "n_neurons": N, "kind": "trace",
+                   "stride": r["stride"], "source": "studio"}, resume=False) as rec:
+        rec.add("reply", agg=frames.reshape(-1, N), tokens=r["tokens"], scores=r["scores"],
+                kind="trace", n_frames=T, n_layers=L, pieces=r["pieces"], stride=1,
+                question=(_last_user_text({"messages": msgs}) or "")[:500], verdict=None,
+                h_cells=r["h_cells"], col_weight=r["col_weight"].tolist())
+    prob = [round(float(p), 4) for p in r["prob"]]
+    return {"id": tid, "pieces": r["pieces"], "prob": prob,
+            "flagged": [i for i, p in enumerate(prob) if p >= threshold], "threshold": threshold,
+            "max": max(prob), "mean": round(sum(prob) / len(prob), 4),
+            "url": f"viz/{tid}/"}
+
+
+def trace_payload(tid):
+    """bloom payload for a saved trace, built once and cached (a few per process)."""
+    with TRACES["lock"]:
+        hit = TRACES["payloads"].get(tid)
+    if hit:
+        return hit
+    path = os.path.join(STATE["traces_dir"], tid)
+    if not TRACE_ID.fullmatch(tid) or not os.path.isdir(path):
+        return None
+    import bloom
+    blob, meta = bloom.build_payload(path, None, 97.0, 40000)
+    out = {"blob": blob, "meta": meta, "theme": bloom.THEMES.get(STATE.get("viz_theme") or "ember")
+           or next(iter(bloom.THEMES.values()))}
+    with TRACES["lock"]:
+        if len(TRACES["payloads"]) >= 8:
+            TRACES["payloads"].pop(next(iter(TRACES["payloads"])))
+        TRACES["payloads"][tid] = out
+    return out
+
+
+def list_traces(limit=200):
+    d = STATE.get("traces_dir")
+    out = []
+    if d and os.path.isdir(d):
+        for name in sorted(os.listdir(d), reverse=True)[:limit]:
+            try:
+                meta = json.load(open(os.path.join(d, name, "manifest.json")))
+            except (OSError, ValueError):
+                continue
+            out.append({"id": name, "model": meta.get("model"), "created": meta.get("created")})
+    return out
 
 
 def ensure_loaded(model, own=1):
@@ -1494,6 +1565,25 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        m = re.fullmatch(r"/viz/([A-Za-z0-9_-]+)/(|api/meta|api/theme|api/trace)", self.path)
+        if m:
+            pl = trace_payload(m.group(1))
+            if pl is None:
+                return self._json(404, {"error": "no such trace"})
+            import bloom
+            kind = m.group(2)
+            body, ctype = ((bloom.PAGE.encode(), "text/html; charset=utf-8") if kind == "" else
+                           (pl["blob"], "application/octet-stream") if kind == "api/trace" else
+                           (json.dumps(pl["meta" if kind == "api/meta" else "theme"]).encode(),
+                            "application/json"))
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/api/traces":
+            return self._json(200, {"traces": list_traces()})
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
             if self._role != "owner":
                 return self._json(403, {"error": "jobs need the owner"})
@@ -1661,6 +1751,21 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path in ("/api/jobs", "/api/jobs/cancel"):
                 return self._jobs_post()
+
+            if self.path == "/api/trace":
+                req = self._read(MAX_BODY)
+                ref = req.get("model")
+                model = find_model(ref) if ref and ref != "auto" else PROC["model"]
+                if model is None:
+                    return self._json(404, {"error": "checks run on local models only"})
+                text = str(req.get("text") or "")
+                if not text.strip():
+                    return self._json(400, {"error": "nothing to check"})
+                try:
+                    return self._json(200, trace_reply(model, req.get("messages") or [], text,
+                                                       float(req.get("threshold", 0.5))))
+                except ValueError as e:
+                    return self._json(400, {"error": str(e)})
 
             if self.path.startswith("/api/rag/"):
                 return self._rag_post()
@@ -1991,6 +2096,10 @@ button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 details.think{color:var(--mut);font-size:13px;border-left:2px solid var(--line);padding-left:.7rem;margin-bottom:.5rem}
 details.think summary{cursor:pointer}
 .stats{font-size:11px;color:var(--mut);margin-top:.3rem}
+.risk{font-size:12px;margin-top:.35rem}.risk:empty{display:none}
+.risk .sum{color:var(--mut);margin-bottom:.25rem}.risk .sum b{color:var(--fg)}
+.risk .rt{white-space:pre-wrap;word-wrap:break-word;line-height:1.7;font-size:13px}
+.risk .rt span{border-radius:2px}.risk .rt .fl{text-decoration:underline 2px var(--no);text-underline-offset:3px}
 .imgs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0}.imgs img{max-height:120px;max-width:200px;border-radius:6px;border:1px solid var(--line)}
 form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5rem;background:var(--panel);align-items:flex-end;flex-wrap:wrap}
 #in{flex:1;min-width:200px;font:14px ui-sans-serif,system-ui;padding:.5rem .6rem;resize:none}
@@ -2107,6 +2216,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
     <span>preset</span><select id="preset"></select>
     <span title="retrieve passages from a document collection for each message">docs</span><select id="ragPick"><option value="">none</option></select>
     <label id="toolsBox" style="display:none;margin:0" title="let the model call MCP tools (each call asks first)"><input type="checkbox" id="toolsOn"> tools</label>
+    <label style="margin:0" title="after each reply, score every token with the model's hallucination classifier (needs studio --cett and a classifier in the model's settings)"><input type="checkbox" id="autoCheck"> check replies</label>
     <span>suppression α</span>
     <input type="range" id="alpha" min="0" max="1" step="0.05" value="1" disabled>
     <span id="av">1.00</span>
@@ -2276,7 +2386,7 @@ function bubble(role,content,extra={}){
   const d=document.createElement('div'); d.className='msg';
   d.innerHTML=`<div class="who">${role==='user'?'you':'assistant'}<span class="acts"></span></div>`+
     (extra.think!==undefined?`<details class="think"><summary>reasoning</summary><div></div></details>`:'')+
-    `<div class="imgs"></div><div class="tools"></div><div class="body"></div><div class="src"></div><div class="stats"></div>`;
+    `<div class="imgs"></div><div class="tools"></div><div class="body"></div><div class="src"></div><div class="stats"></div><div class="risk"></div>`;
   d.querySelector('.imgs').innerHTML=imagesOf(content).map(u=>`<img src="${esc(u)}" alt="attached image">`).join('');
   d.querySelector('.body').innerHTML=render(textOf(content));
   if(extra.think) d.querySelector('.think div').textContent=extra.think;
@@ -2284,9 +2394,11 @@ function bubble(role,content,extra={}){
   if(extra.sources) showSources(d.querySelector('.src'),extra.sources);
   for(const t of extra.tools||[]) toolCard(d.querySelector('.tools'),t);
   if(role==='assistant'){ const a=d.querySelector('.acts');
-    a.innerHTML='<button data-a="copy">copy</button><button data-a="regen">regenerate</button>';
+    a.innerHTML='<button data-a="copy">copy</button><button data-a="regen">regenerate</button><button data-a="check" title="score each token of this reply for hallucination risk">check</button>';
     a.querySelector('[data-a=copy]').onclick=()=>navigator.clipboard.writeText(d.querySelector('.body').textContent);
-    a.querySelector('[data-a=regen]').onclick=regenerate; }
+    a.querySelector('[data-a=regen]').onclick=regenerate;
+    a.querySelector('[data-a=check]').onclick=()=>checkReply(d);
+    if(extra.check) showRisk(d.querySelector('.risk'),extra.check); }
   $('#log').appendChild(d); $('#log').scrollTop=1e9;
   return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats'), src:d.querySelector('.src'), tools:d.querySelector('.tools')};
 }
@@ -2304,8 +2416,34 @@ function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details>
 function renderChat(){
   $('#log').innerHTML='';
   if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from the Models tab, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
-  for(const m of chat.messages) bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools});
+  for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check}); b.root._msg=m; }
 }
+// ---------- per-reply check: token risk from the activation classifier
+function showRisk(el,c){
+  if(c.error){ el.innerHTML=`<div class="sum bad">check failed: ${esc(c.error)}</div>`; return; }
+  const n=c.flagged.length, T=c.prob.length;
+  const verdict=n?`<b class="bad">${n} of ${T} tokens flagged</b>`:`<b class="okc">no tokens flagged</b>`;
+  el.innerHTML=`<div class="sum">risk: ${verdict} · peak ${(c.max*100).toFixed(0)}% · mean ${(c.mean*100).toFixed(0)}% `+
+    `(flag at ${(c.threshold*100).toFixed(0)}%) · <a href="${esc(c.url)}" target="_blank" rel="noopener">open 3D view ↗</a>`+
+    ` · <a href="#" data-a="tog">${n?'hide':'show'} tokens</a></div><div class="rt"${n?'':' hidden'}></div>`;
+  // Shade each token by its risk; underline the ones over the threshold.
+  // Shading starts at half the threshold, so tokens the classifier calls clean stay unshaded.
+  el.querySelector('.rt').innerHTML=c.pieces.map((p,i)=>{ const r=c.prob[i]||0, a=Math.max(0,Math.min(1,(r-c.threshold/2)/(c.threshold/2)));
+    return `<span class="${r>=c.threshold?'fl':''}" title="risk ${(r*100).toFixed(0)}%" style="background:color-mix(in srgb,var(--no) ${Math.round(a*(r>=c.threshold?50:30))}%,transparent)">${esc(p)}</span>`; }).join('');
+  el.querySelector('[data-a=tog]').onclick=e=>{ e.preventDefault(); const rt=el.querySelector('.rt'); rt.hidden=!rt.hidden; e.target.textContent=(rt.hidden?'show':'hide')+' tokens'; };
+}
+async function checkReply(d){
+  const m=d._msg; if(!m) return;
+  const idx=chat.messages.indexOf(m), el=d.querySelector('.risk');
+  el.innerHTML='<div class="sum">checking… (one extra pass over the reply)</div>';
+  let c;
+  try{ const r=await post('/api/trace',{model:m.model||$('#modelPick').value||undefined,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)});
+    c=await r.json(); if(!r.ok) c={error:c.error||r.statusText}; }catch(e){ c={error:String(e)}; }
+  showRisk(el,c);
+  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url}; await persist(); }
+}
+try{ $('#autoCheck').checked=localStorage.getItem('ns_autocheck')==='1'; }catch{}
+$('#autoCheck').onchange=()=>{ try{ localStorage.setItem('ns_autocheck',$('#autoCheck').checked?'1':'0'); }catch{} };
 
 // ---------- images
 $('#attach').onclick=()=>$('#file').click();
@@ -2329,13 +2467,14 @@ $('#f').onsubmit=async e=>{
 async function regenerate(){ if(busy) return; while(chat.messages.length && chat.messages.at(-1).role==='assistant') chat.messages.pop(); renderChat(); await stream(); }
 async function stream(){
   busy=true; $('#send').textContent='Stop'; ctrl=new AbortController();
-  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[];
+  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[], servedBy=null;
   try{
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
         rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined})});
     if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} out.body.textContent='error: '+e; throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
+      if(rt) servedBy=rt.model;
       if(rt){ routeNote = rt.mode==='auto' ? `auto → ${rt.model}: ${rt.reason}` : `model: ${rt.model}${rt.mode==='manual'?' (chosen manually)':''}`;
         const m=models.find(x=>x.id===rt.model); if(m&&m.stats&&!m.stats.eligible) routeNote+=' ⚠ no performance stats'; } }catch{}
     const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
@@ -2367,9 +2506,12 @@ async function stream(){
   const stats=[ntok?`${ntok} tokens`:null, tps?`${tps.toFixed(1)} tok/s`:null, tFirst?`first token ${((tFirst-t0)/1000).toFixed(2)}s`:null].filter(Boolean).join(' · ');
   const fullStats=[routeNote,stats].filter(Boolean).join(' · ');
   out.stats.textContent=fullStats;
-  if(acc||think){ chat.messages.push({role:'assistant',content:acc,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined}); await persist(); }
+  let msg=null;
+  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined};
+    chat.messages.push(msg); out.root._msg=msg; await persist(); }
   status(); refresh();
   busy=false; $('#send').textContent='Send';
+  if(msg&&acc&&$('#autoCheck').checked) checkReply(out.root);
 }
 $('#export').onclick=()=>{
   const md=`# ${chat.title}\n\n`+chat.messages.map(m=>`**${m.role}**\n\n${textOf(m.content)}${imagesOf(m.content).length?`\n\n_[${imagesOf(m.content).length} image(s)]_`:''}\n`).join('\n');
@@ -2508,6 +2650,8 @@ def main(argv=None):
     p.add_argument("--score-ngl", type=int, default=0,
                    help="GPU layers for activation scoring (0 keeps it off the GPU llama-server is using)")
     p.add_argument("--score-every", type=int, default=1, help="score one reply in N")
+    p.add_argument("--traces-dir", default=os.path.expanduser("~/.neuronscope/traces"),
+                   help="where per-reply checks are saved (open them in the 3D view or timeline.py)")
     p.add_argument("--idle-ttl", type=int, default=0, help="unload the model after N idle seconds (0 = never)")
     p.add_argument("--no-jit", action="store_true", help="/v1 requests never load or swap models")
     p.add_argument("--jobs-dir", default=os.path.expanduser("~/.neuronscope/jobs"),
@@ -2545,6 +2689,7 @@ def main(argv=None):
     STATE["server_bin"] = a.server or os.environ.get("NS_LLAMA_SERVER")
     STATE["settings_path"] = os.path.expanduser(a.settings)
     STATE["chats_dir"] = os.path.expanduser(a.chats_dir)
+    STATE["traces_dir"] = os.path.expanduser(a.traces_dir)
     os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
     STATE["token"] = sec.resolve_token(a.token, a.token_file) or None
     STATE["download_dir"] = (os.path.expanduser(a.download_dir)

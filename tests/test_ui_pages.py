@@ -108,3 +108,25 @@ def test_served_page_has_no_template_leftovers(path, extra, tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_hub_lists_trace_sessions_for_replay(tmp_path, monkeypatch):
+    import hub
+    for name, kind, created in [("a", "trace", "2026-01-01T00:00:00"), ("b", "trace", "2026-02-01T00:00:00"),
+                                ("c", "profile", "2026-03-01T00:00:00")]:
+        (tmp_path / "runs" / name).mkdir(parents=True)
+        (tmp_path / "runs" / name / "manifest.json").write_text(json.dumps({"kind": kind, "created": created,
+                                                                            "model": "m.gguf"}))
+    (tmp_path / "runs" / "broken").mkdir()
+    monkeypatch.setitem(hub.STATE, "root", str(tmp_path))
+    monkeypatch.setattr(hub, "TRACE_DIRS", ["runs", str(tmp_path / "missing")])
+    assert [t["path"] for t in hub.find_traces()] == [str(Path("runs") / "b"), str(Path("runs") / "a")]
+
+
+def test_no_dead_tabs():
+    """Every tab in the registry is implemented by at least one surface; no
+    'planned' placeholders, and no enabled package without an implementation."""
+    import shell
+    for m in shell.modes():
+        assert not m.get("planned"), m["id"]
+        assert m["id"] != "eval", "the example Eval package has nothing behind its route"

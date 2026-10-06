@@ -109,6 +109,33 @@ def declare(root, py):
     }
 
 
+TRACE_DIRS = ["~/.neuronscope/traces", "runs"]
+
+
+def find_traces(limit=200):
+    """Trace sessions for the Replay picker: Studio's per-reply checks and
+    scripts/trace_sample.py output, newest first."""
+    out = []
+    for base in TRACE_DIRS:
+        base = os.path.join(STATE["root"], os.path.expanduser(base))
+        if not os.path.isdir(base):
+            continue
+        for name in os.listdir(base):
+            d = os.path.join(base, name)
+            try:
+                with open(os.path.join(d, "manifest.json")) as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if meta.get("kind") != "trace":
+                continue
+            rel = os.path.relpath(d, STATE["root"])
+            out.append({"path": d if rel.startswith("..") else rel, "model": meta.get("model"),
+                        "created": meta.get("created") or "", "source": meta.get("source", "trace_sample")})
+    out.sort(key=lambda x: x["created"], reverse=True)
+    return out[:limit]
+
+
 def _pump(name, proc):
     rec = RUNNING[name]
     for line in proc.stdout:
@@ -304,6 +331,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(service_state()))
         if path == "/api/theme":
             return self._send(200, json.dumps(ui_theme()))
+        if path == "/api/traces":
+            return self._send(200, json.dumps({"traces": find_traces()}))
         if path == "/api/modes":
             return self._send(200, shell.as_json() if shell
                               else json.dumps({"modes": []}))
@@ -481,8 +510,9 @@ label{display:block;font-size:12px;color:var(--fg-dim);margin:8px 0 3px}
   <input id="server_bin" placeholder="~/llama.cpp/build/bin/llama-server">
   <label>models directory</label>
   <input id="models_dir" placeholder="/path/to/.models">
-  <label>trace session (for Replay)</label>
-  <input id="trace" placeholder="runs/trace-abc">
+  <label>trace session (for Replay): pick a checked reply or a trace_sample.py run, or type a path</label>
+  <input id="trace" list="traces" placeholder="runs/trace-abc">
+  <datalist id="traces"></datalist>
   <label>live source (for Live): a llama-server patched with llama-tools/server-activations; empty = simulated</label>
   <input id="live_source" placeholder="http://127.0.0.1:8080">
 </div>
@@ -514,6 +544,12 @@ for(const k of ['server_bin','models_dir','trace','live_source']){
   try{ const v=localStorage.getItem('ns_'+k); if(v) $('#'+k).value=v; }catch{}
   $('#'+k).oninput=e=>{ try{ localStorage.setItem('ns_'+k,e.target.value) }catch{} };
 }
+
+fetch('/api/traces').then(r=>r.json()).then(j=>{
+  const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  $('#traces').innerHTML=j.traces.map(t=>`<option value="${esc(t.path)}">${esc(t.model||'')} · ${esc(t.created)} · ${t.source==='studio'?'checked reply':'trace run'}</option>`).join('');
+  if(!$('#trace').value && j.traces.length) $('#trace').value=j.traces[0].path;
+}).catch(()=>{});
 
 async function tick(){
   const s=await (await fetch('/api/services')).json();

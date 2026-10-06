@@ -109,6 +109,18 @@ requests finish, on the CPU by default (`--score-ngl` to change). Use
 the classifier is a weak signal on whole replies (AUROC around 0.7); graded
 answers are the evidence `auto` trusts.
 
+**Checking a reply.** With `--cett` and a classifier set for the model, each
+assistant reply has a *check* action (and the *check replies* toggle under the
+chat runs it after every reply). It runs one extra pass over the reply on the
+CPU, scores every token, and shows the result under the reply: how many tokens
+crossed the classifier's 0.5 boundary, the peak and mean risk, and the reply
+text shaded by risk with the flagged tokens underlined. The check is saved
+with the chat and as a trace session in `--traces-dir`
+(`~/.neuronscope/traces/<id>`); *open 3D view* shows it at `/viz/<id>/` on
+the same Studio, with the same login. `POST /api/trace` with `{model,
+messages, text}` does the same from a script; paired devices may call it.
+See VISUALIZATION.md, "Which view when", for what to do with a flagged span.
+
 ```bash
 python scripts/model_stats.py show                               # every model's rolling summary
 python scripts/model_stats.py rank "Fix this segfault in my loop"  # what auto would pick, and why
