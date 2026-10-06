@@ -78,6 +78,16 @@ def bin_axis(a, bins):
 
 
 
+def classifier_cells(coef, n_layers, n_neurons, bins):
+    """H-neurons (positive classifier weights) as (layer, column) cells in the
+    trace's binned layout, and the per-column weight (the largest positive
+    weight in each bin) that the viewers use to order columns."""
+    w = np.clip(np.asarray(coef, dtype=np.float32).reshape(n_layers, n_neurons), 0, None)
+    col_w = bin_axis(w, bins)
+    cells = [[int(l), int(c)] for l, c in zip(*np.nonzero(col_w > 0))]
+    return cells, col_w
+
+
 def _require_paths(args):
     """Fall back to the environment, then fail with a sentence, not a
     numpy traceback. An empty --gguf used to surface as
@@ -215,15 +225,18 @@ def main():
     trace = (agg * col[None, :, :]).astype(np.float32)
     print(f"trace {trace.shape} ({trace.nbytes / 1e6:.0f} MB before binning)")
 
-    scores = None
+    scores, h_cells, col_weight = None, None, None
     if args.classifier:
         blob = np.load(args.classifier)
         coef, intercept = blob["coef"], float(blob["intercept"])
         flat = trace.reshape(trace.shape[0], -1)
         if flat.shape[1] == coef.shape[0]:
             scores = flat @ coef + intercept
-            print(f"per-token scores: min {scores.min():.3f}, "
-                  f"max {scores.max():.3f}")
+            prob = 1 / (1 + np.exp(-np.clip(scores, -60, 60)))
+            print(f"per-token scores: min {scores.min():.3f}, max {scores.max():.3f}; "
+                  f"{int((prob >= 0.5).sum())} of {len(prob)} tokens at p >= 0.5")
+            if n_experts <= 1:
+                h_cells, col_weight = classifier_cells(coef, n_layers, trace.shape[-1], args.bin_neurons)
         else:
             print(f"classifier has {coef.shape[0]} weights but the trace has "
                   f"{flat.shape[1]}; skipping scores")
@@ -246,7 +259,8 @@ def main():
               tokens=ids, scores=scores,
               kind="trace", n_frames=binned.shape[0],
               n_layers=n_layers, pieces=pieces,
-              verdict=rec.get("judge"), question=rec["question"])
+              verdict=rec.get("judge"), question=rec["question"],
+              h_cells=h_cells, col_weight=None if col_weight is None else col_weight.tolist())
         r.event("trace", qid=args.qid, frames=binned.shape[0],
                 tokens=n_tok, stride=args.stride)
     print(f"\nwrote {args.out}\n  python viz/timeline.py {args.out}")

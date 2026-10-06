@@ -42,6 +42,17 @@ with open(_THEME_PATH) as _f:
     THEMES = json.load(_f)
 
 
+def add_flag_args(p):
+    p.add_argument("--flag-prob", type=float, default=0.5,
+                   help="flag a token when the classifier's probability reaches this (0.5 = its decision boundary)")
+    p.add_argument("--smooth", type=int, default=1,
+                   help="average token scores over this many tokens before thresholding")
+    p.add_argument("--relative-z", type=float,
+                   help="instead flag tokens this many SDs above the reply's own mean (always flags some; "
+                        "for exploring only)")
+    p.add_argument("--score-z", type=float, dest="relative_z", help=argparse.SUPPRESS)   # old name
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("session")
@@ -49,9 +60,7 @@ def parse_args():
     p.add_argument("--h-neurons", help="models/h_neurons.json")
     p.add_argument("--active-pct", type=float, default=97.0,
                    help="percentile of CETT above which a neuron counts active")
-    p.add_argument("--score-z", type=float, default=1.0,
-                   help="per-token score z above which a frame counts as "
-                        "hallucinating")
+    add_flag_args(p)
     p.add_argument("--fps", type=float, default=8.0)
     p.add_argument("--play", action="store_true")
     p.add_argument("--dump", metavar="NPZ", help="write frames and exit, no GPU")
@@ -86,28 +95,78 @@ def load_trace(path):
     return frames, f
 
 
-def classify_frames(frames, fields, h_mask, active_pct, score_z):
-    """-> (active [T,L,N] bool, halluc [T,L,N] bool, per-frame z scores).
+def token_risk(fields, T, smooth=1):
+    """Per-token probability that the classifier calls this token's activity
+    hallucination-like: sigmoid of its logit, optionally averaged over a window
+    of `smooth` tokens (the classifier was trained on span means, so a little
+    smoothing matches it better than single tokens). None when the trace has
+    no classifier scores."""
+    scores = fields.get("scores")
+    if scores is None or len(scores) != T:
+        return None
+    s = np.asarray(scores, dtype=np.float64)
+    if smooth and smooth > 1:
+        k = np.ones(int(smooth)) / int(smooth)
+        s = np.convolve(np.pad(s, (int(smooth) // 2, (int(smooth) - 1) // 2), mode="edge"), k, "valid")
+    return (1.0 / (1.0 + np.exp(-np.clip(s, -60, 60)))).astype(np.float32)
 
-    Threshold on the whole trace, not per frame: a per-frame percentile would
-    mark the same fraction active at every token and erase exactly the
-    variation the animation exists to show.
+
+def classify_frames(frames, fields, h_mask, active_pct, threshold=0.5, smooth=1, relative_z=None):
+    """-> (active [T,L,N] bool, flagged [T,L,N] bool, info).
+
+    Active cells: above the trace-wide `active_pct` percentile. Trace-wide, not
+    per frame: a per-frame percentile would mark the same fraction active at
+    every token and erase exactly the variation the animation exists to show.
+
+    Flagged tokens: the classifier's probability is at least `threshold` (0.5 is
+    the classifier's own decision boundary). This is absolute, so a reply the
+    classifier considers clean has no flagged tokens. `relative_z` instead flags
+    tokens that many standard deviations above this reply's own mean; that always
+    flags some tokens in any reply, so it is for exploring, never the default.
+
+    Flagged cells: active H-neurons (h_mask) on flagged tokens. With no H-neuron
+    profile no cell is flagged, since "busy on a risky token" is not "H-neuron".
+    info: prob (per token or None), z, flagged_tokens, mode, threshold, cells.
     """
+    T = frames.shape[0]
     thresh = float(np.percentile(frames, active_pct))
     active = frames >= thresh
-
+    prob = token_risk(fields, T, smooth)
     scores = fields.get("scores")
-    if scores is None or len(scores) != frames.shape[0]:
-        z = np.zeros(frames.shape[0], dtype=np.float32)
-    else:
+    if scores is not None and len(scores) == T:
         s = np.asarray(scores, dtype=np.float32)
         z = (s - s.mean()) / (s.std() + 1e-8)
-
-    hot = (z >= score_z)[:, None, None]
-    halluc = active & hot
+    else:
+        z = np.zeros(T, dtype=np.float32)
+    if prob is None:
+        hot, mode = np.zeros(T, bool), "unscored"
+    elif relative_z is not None:
+        hot, mode = z >= relative_z, "relative"
+    else:
+        hot, mode = prob >= threshold, "absolute"
     if h_mask is not None:
-        halluc = halluc & h_mask[None, :, :]
-    return active, halluc, z
+        flagged = active & hot[:, None, None] & h_mask[None, :, :]
+    else:
+        flagged = np.zeros_like(active)
+    info = {"prob": prob, "z": z, "flagged_tokens": hot, "mode": mode, "threshold": threshold,
+            "relative_z": relative_z, "smooth": smooth,
+            "cells": "h-neurons" if h_mask is not None else "none: no H-neuron profile"}
+    return active, flagged, info
+
+
+def resolve_mask(path, fields, shape):
+    """H-neuron cells: an explicit h_neurons.json, else the ones the classifier
+    stored in the trace (trace_sample.py --classifier), else None."""
+    if path:
+        return load_mask(path, shape)
+    cells = fields.get("h_cells")
+    if cells:
+        mask = np.zeros(shape, dtype=bool)
+        for l, n in cells:
+            if 0 <= l < shape[0] and 0 <= n < shape[1]:
+                mask[l, n] = True
+        return mask
+    return None
 
 
 def load_mask(path, shape):
@@ -140,17 +199,19 @@ def main():
     print(f"{T} frames x {L} layers x {N} neurons "
           f"({frames.nbytes / 1e6:.1f} MB), theme '{args.theme}'")
 
-    h_mask = load_mask(args.h_neurons, (L, N))
-    active, halluc, z = classify_frames(frames, fields, h_mask,
-                                        args.active_pct, args.score_z)
-    print(f"active: {active.mean() * 100:.2f}% of cells; "
-          f"hallucinating: {halluc.mean() * 100:.3f}%")
-    hot_frames = int((halluc.any(axis=(1, 2))).sum())
-    print(f"{hot_frames} of {T} frames flagged")
+    h_mask = resolve_mask(args.h_neurons, fields, (L, N))
+    active, halluc, info = classify_frames(frames, fields, h_mask, args.active_pct,
+                                           args.flag_prob, args.smooth, args.relative_z)
+    z = info["z"]
+    print(f"active: {active.mean() * 100:.2f}% of cells; flagged cells: {halluc.mean() * 100:.3f}% "
+          f"({info['cells']})")
+    hot_frames = int(info["flagged_tokens"].sum())
+    print(f"{hot_frames} of {T} tokens flagged ({info['mode']}"
+          + (f", p >= {info['threshold']}" if info["mode"] == "absolute" else "") + ")")
 
     pieces = fields.get("pieces") or []
     if pieces and hot_frames:
-        idx = np.where(halluc.any(axis=(1, 2)))[0][:8]
+        idx = np.where(info["flagged_tokens"])[0][:8]
         stride = int(fields.get("stride", 1))
         shown = ["".join(pieces[i * stride:(i + 1) * stride]) for i in idx]
         print("  first flagged tokens: " +

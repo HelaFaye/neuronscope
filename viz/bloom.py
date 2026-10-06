@@ -54,7 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import ns_security as sec  # noqa: E402
 from records import Session  # noqa: E402
-from timeline import THEMES, classify_frames, load_mask, load_trace  # noqa
+from timeline import THEMES, add_flag_args, classify_frames, load_trace, resolve_mask  # noqa
 
 PAYLOAD = {}
 
@@ -80,24 +80,47 @@ def demo_trace(T=160, L=32, N=512, seed=0):
             burst[i] = 1.0
     burst = np.convolve(burst, [0.3, 1.0, 0.6], "same")
     frames[:, hl, hn] += (0.05 + 1.2 * burst)[:, None] * rng.uniform(0.6, 1.0, 24)[None, :]
-    mask = np.zeros((L, N), bool)
-    mask[hl, hn] = True
-    scores = frames[:, hl, hn].mean(1)
+    # A stand-in classifier: positive weight on the designated neurons, so token
+    # logits rise with their activity and cross 0 (p = 0.5) during the burst.
+    act = frames[:, hl, hn].mean(1)
+    base = np.median(act)
+    scores = (act - base) / (act.max() - base + 1e-6) * 6.0 - 2.0
+    col_w = np.zeros((L, N), np.float32)
+    col_w[hl, hn] = rng.uniform(0.2, 1.0, 24)
     fields = {"scores": scores.tolist(), "pieces": [" " + w for w in words], "stride": 1,
-              "meta": {"model": "demo (synthetic, not measured)"}, "n_frames": T, "n_layers": L}
-    return frames, fields, mask
+              "meta": {"model": "demo (synthetic, not measured)"}, "n_frames": T, "n_layers": L,
+              "h_cells": [[int(l), int(n)] for l, n in zip(hl, hn)], "col_weight": col_w.tolist()}
+    return frames, fields
 
 
-def build_payload(session, h_neurons, active_pct, score_z, max_cells, demo=False):
-    if demo:
-        frames, fields, mask = demo_trace()
-        T, L, N = frames.shape
-    else:
-        frames, fields = load_trace(session)
-        T, L, N = frames.shape
-        mask = load_mask(h_neurons, (L, N))
-    active, halluc, z = classify_frames(frames, fields, mask,
-                                        active_pct, score_z)
+def column_order(fields, mask, L, N):
+    """-> [L, N] int: the x position of each column within its layer. Columns
+    are sorted by classifier weight (H-neurons first, strongest leftmost), so
+    the H-neurons form a band on the left instead of scattering by index.
+    Neuron index order carries no meaning; the layer axis is the real one."""
+    w = fields.get("col_weight")
+    if w is not None:
+        w = np.asarray(w, dtype=np.float32)
+        if w.shape != (L, N):
+            w = None
+    if w is None and mask is not None:
+        w = mask.astype(np.float32)
+    if w is None:
+        return None
+    order = np.argsort(-w, axis=1, kind="stable")       # per layer: strongest first
+    pos = np.empty_like(order)
+    rows = np.arange(L)[:, None]
+    pos[rows, order] = np.arange(N)[None, :]
+    return pos
+
+
+def build_payload(session, h_neurons, active_pct, max_cells, demo=False, flag_prob=0.5, smooth=1,
+                  relative_z=None, order="weight"):
+    frames, fields = demo_trace() if demo else load_trace(session)
+    T, L, N = frames.shape
+    mask = resolve_mask(h_neurons, fields, (L, N))
+    active, halluc, info = classify_frames(frames, fields, mask, active_pct, flag_prob, smooth, relative_z)
+    z = info["z"]
 
     # Only cells that are ever active get geometry. At ~97% inactive, sending
     # the rest would be almost entirely wasted bandwidth and fill rate.
@@ -118,10 +141,14 @@ def build_payload(session, h_neurons, active_pct, score_z, max_cells, demo=False
     state[active[:, ly, nx]] = 1
     state[halluc[:, ly, nx]] = 2
 
+    pos = column_order(fields, mask, L, N) if order == "weight" else None
+    xs = pos[ly, nx] if pos is not None else nx
+    n_h = int(mask.sum(axis=1).max()) if mask is not None else 0
+
     blob = bytearray()
     blob += struct.pack("<iii", T, n, L)
     blob += ly.astype("<i4").tobytes()
-    blob += nx.astype("<i4").tobytes()
+    blob += xs.astype("<i4").tobytes()
     blob += inten.tobytes()
     blob += state.tobytes()
 
@@ -132,7 +159,13 @@ def build_payload(session, h_neurons, active_pct, score_z, max_cells, demo=False
     return bytes(blob), {
         "frames": T, "cells": n, "layers": L, "neurons": N,
         "z": [round(float(v), 3) for v in z], "labels": labels,
-        "flagged": [int(i) for i in np.where(halluc.any(axis=(1, 2)))[0]],
+        # Tokens whose risk crossed the threshold (whether or not an H-neuron
+        # cell is drawn for them), and the per-token risk itself.
+        "flagged": [int(i) for i in np.where(info["flagged_tokens"])[0]],
+        "prob": None if info["prob"] is None else [round(float(v), 4) for v in info["prob"]],
+        "threshold": info["threshold"], "mode": info["mode"], "relative_z": info["relative_z"],
+        "cells_note": info["cells"], "order": "weight" if pos is not None else "index",
+        "h_band": n_h,
         "model": fields.get("meta", {}).get("model"),
         "verdict": fields.get("verdict"),
         "question": (fields.get("question") or "")[:160],
@@ -168,29 +201,33 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, json.dumps({"error": "not found"}), "application/json")
 
 
-PAGE = r"""<!DOCTYPE html><meta charset="utf-8"><title>NeuronScope Bloom</title>
+PAGE = r"""<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NeuronScope Bloom</title>
 <style>
 html,body{margin:0;height:100%;background:#05050a;color:#c9c9d2;
 font:13px ui-sans-serif,system-ui,sans-serif;overflow:hidden}
 #c{position:absolute;inset:0}
-#hud{position:absolute;left:14px;top:12px;z-index:2;line-height:1.6;
-text-shadow:0 1px 3px #000}
+#hud{position:absolute;left:14px;top:12px;z-index:2;line-height:1.6;text-shadow:0 1px 3px #000;max-width:min(560px,90vw)}
 #hud b{font-weight:500;color:#fff}
-#bar{position:absolute;left:0;right:0;bottom:0;z-index:2;padding:10px 14px;
-background:linear-gradient(transparent,#05050ae0 40%);display:flex;gap:12px;align-items:center}
-#track{flex:1;height:4px;background:#2a2a34;border-radius:2px;position:relative;cursor:pointer}
-#fill{position:absolute;left:0;top:0;height:4px;border-radius:2px}
-#tok{font-family:ui-monospace,monospace;min-width:150px}
-button{background:transparent;border:1px solid #3a3a46;color:#c9c9d2;
-border-radius:6px;padding:5px 12px;cursor:pointer;font:inherit}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 4px 0 10px;vertical-align:middle}
+.ring{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 4px 0 10px;vertical-align:middle;box-sizing:border-box;border:2px solid}
+.note{color:#8a8a92;font-size:12px}.bad{color:#ff9b8a}
+#panel{position:absolute;left:0;right:0;bottom:0;z-index:2;padding:8px 14px 10px;
+background:linear-gradient(transparent,#05050af2 22%)}
+#row{display:flex;gap:12px;align-items:center}
+#spark{flex:1;height:46px;cursor:pointer;display:block;min-width:0}
+#tok{font-family:ui-monospace,monospace;min-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#text{margin-top:6px;max-height:22vh;overflow-y:auto;line-height:1.75;font-size:13.5px;white-space:pre-wrap;word-break:break-word}
+#text span{cursor:pointer;border-radius:3px;padding:1px 0}
+#text span.cur{outline:1.5px solid #fff;outline-offset:1px}
+button{background:transparent;border:1px solid #3a3a46;color:#c9c9d2;border-radius:6px;padding:5px 12px;cursor:pointer;font:inherit}
 button:hover{background:#16161e}
-.warn{position:absolute;inset:0;display:flex;align-items:center;
-justify-content:center;text-align:center;padding:2rem;z-index:3}
+.warn{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:2rem;z-index:3}
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
-<div id="bar"><button id="play">Pause</button>
-<div id="track"><div id="fill"></div></div><div id="tok"></div></div>
+<div id="panel"><div id="row"><button id="play">Pause</button><canvas id="spark"></canvas><div id="tok"></div></div>
+<div id="text"></div></div>
 <script type="importmap">
 {"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
 "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
@@ -210,9 +247,10 @@ import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
 import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
 import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-const meta = await (await fetch('/api/meta')).json();
-const theme = await (await fetch('/api/theme')).json();
-const buf = await (await fetch('/api/trace')).arrayBuffer();
+// Relative URLs: the same page is served at / by bloom.py and at /viz/<id>/ by Studio.
+const meta = await (await fetch('api/meta')).json();
+const theme = await (await fetch('api/theme')).json();
+const buf = await (await fetch('api/trace')).arrayBuffer();
 
 const dv = new DataView(buf);
 const T = dv.getInt32(0,true), N = dv.getInt32(4,true), L = dv.getInt32(8,true);
@@ -221,6 +259,11 @@ const ly = new Int32Array(buf, o, N); o += N*4;
 const nx = new Int32Array(buf, o, N); o += N*4;
 const inten = new Float32Array(buf, o, T*N); o += T*N*4;
 const state = new Uint8Array(buf, o, T*N);
+const prob = meta.prob, thr = meta.threshold ?? 0.5;
+const flaggedSet = new Set(meta.flagged);
+
+// Sizes and rate shared with the Godot client (viz/godot/main.gd); a test keeps them equal.
+const SIZE_IDLE = 1.1, SIZE_ACTIVE = 2.4, SIZE_FLAG = 7.0, FPS = 8;
 
 const hex = s => new THREE.Color(s);
 const cIdle = hex('#2a2a3a'), cAct = hex(theme.active), cHal = hex(theme.halluc);
@@ -231,100 +274,150 @@ const cam = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 6000);
 // Fit the view to this trace: neuron columns span W units whatever the trace's
 // width (512 bins or 14336 neurons), layers are 8 units apart.
 const W = 640, XS = W/Math.max(1, meta.neurons), H = L*8;
-const D = 0.65*Math.max(W, H);
-cam.position.set(W/2 + 0.35*D, H/2 + 0.3*D, 0.95*D);
+const D = 0.95*Math.max(W, H);
+cam.position.set(W/2 + 0.3*D, H/2 + 0.25*D, 0.95*D);
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,1.75));
 renderer.setSize(innerWidth, innerHeight);
 const controls = new OrbitControls(cam, canvas);
 controls.enableDamping = true;
-controls.target.set(W/2, H/2, 0);
+controls.target.set(W/2, H/2 - 40, 0);
 
-const pos = new Float32Array(N*3), col = new Float32Array(N*3), siz = new Float32Array(N);
-for(let i=0;i<N;i++){ pos[i*3]=nx[i]*XS; pos[i*3+1]=ly[i]*8; pos[i*3+2]=0; }
-const geo = new THREE.BufferGeometry();
-geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
-geo.setAttribute('color', new THREE.BufferAttribute(col,3));
-geo.setAttribute('size', new THREE.BufferAttribute(siz,1));
-const mat = new THREE.ShaderMaterial({
-  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
-  vertexShader:`attribute float size; varying vec3 vC;
-    void main(){ vC=color; vec4 mv=modelViewMatrix*vec4(position,1.0);
-    gl_PointSize=size*(300.0/-mv.z); gl_Position=projectionMatrix*mv; }`,
-  fragmentShader:`varying vec3 vC;
-    void main(){ vec2 d=gl_PointCoord-vec2(0.5); float r=length(d);
-    if(r>0.5) discard; float a=smoothstep(0.5,0.0,r);
-    gl_FragColor=vec4(vC, a); }`,
-  vertexColors:true});
-scene.add(new THREE.Points(geo, mat));
-
-// Trail: earlier frames persist as a dim wake so a burst reads as motion
-// rather than a single flash you can miss between frames.
-const trailN = 6, trails = [];
-for(let k=0;k<trailN;k++){
-  const g = geo.clone();
-  const m = mat.clone(); m.opacity = 0.5*(1-k/trailN);
-  const p = new THREE.Points(g, m); scene.add(p); trails.push(p);
+function pointsMaterial(ring, onTop){
+  return new THREE.ShaderMaterial({
+    transparent:true, depthWrite:false, depthTest:!onTop,
+    blending: onTop ? THREE.NormalBlending : THREE.AdditiveBlending,
+    // size 0 means hidden: some GL implementations clamp point size to 1 pixel,
+    // so a hidden point is moved outside the clip volume instead.
+    vertexShader:`attribute float size; varying vec3 vC;
+      void main(){ vC=color; vec4 mv=modelViewMatrix*vec4(position,1.0);
+      gl_PointSize=size*(300.0/-mv.z); gl_Position = size > 0.0 ? projectionMatrix*mv : vec4(2.0,2.0,2.0,1.0); }`,
+    fragmentShader: ring
+      // Flagged H-neurons: a solid core inside a ring, so they read as a different
+      // kind of mark, not just a brighter dot, whatever the colour vision.
+      ? `varying vec3 vC; void main(){ float r=length(gl_PointCoord-vec2(0.5)); if(r>0.5) discard;
+         float a = r<0.22 ? 1.0 : (r>0.36 ? smoothstep(0.5,0.42,r) : 0.15); gl_FragColor=vec4(vC, a); }`
+      : `varying vec3 vC; void main(){ float r=length(gl_PointCoord-vec2(0.5)); if(r>0.5) discard;
+         gl_FragColor=vec4(vC, smoothstep(0.5,0.0,r)); }`,
+    vertexColors:true});
 }
+function cloud(ring, onTop){
+  const pos = new Float32Array(N*3), col = new Float32Array(N*3), siz = new Float32Array(N);
+  for(let i=0;i<N;i++){ pos[i*3]=nx[i]*XS; pos[i*3+1]=ly[i]*8; pos[i*3+2]=0; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  g.setAttribute('color', new THREE.BufferAttribute(col,3));
+  g.setAttribute('size', new THREE.BufferAttribute(siz,1));
+  const pts = new THREE.Points(g, pointsMaterial(ring, onTop)); scene.add(pts); return pts;
+}
+const field = cloud(false, false);
+// Trail: earlier frames persist as a dim wake so a burst reads as motion.
+const trailN = 6, trails = [];
+for(let k=0;k<trailN;k++){ const p = cloud(false, false); p.material.opacity = 0.5*(1-k/trailN); trails.push(p); }
+const flags = cloud(true, true);     // drawn last, over everything
+flags.renderOrder = 10;
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, cam));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),
-                                  1.15, 0.55, 0.12);
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight), 1.0, 0.55, 0.12);
 composer.addPass(bloom);
 
 const tmp = new THREE.Color();
-// The current token sits at z=0; trail k (an earlier token) sits k+1 steps behind it,
-// so the field stays in view however long the trace is.
-function paint(geometry, t, dim, dz){
-  const c = geometry.getAttribute('color'), s = geometry.getAttribute('size');
-  const p = geometry.getAttribute('position');
+// The current token sits at z=0; trail k (an earlier token) sits k+1 steps behind it.
+function paint(pts, t, dim, dz){
+  const g = pts.geometry, c = g.getAttribute('color'), s = g.getAttribute('size'), p = g.getAttribute('position');
   const base = t*N;
   for(let i=0;i<N;i++){
     const v = inten[base+i], st = state[base+i];
-    tmp.copy(st===2?cHal:st===1?cAct:cIdle);
-    const g = (st===0?0.35:0.6+0.8*v)*dim;
-    c.array[i*3]=tmp.r*g; c.array[i*3+1]=tmp.g*g; c.array[i*3+2]=tmp.b*g;
-    s.array[i] = (st===2?4.2:st===1?2.4:1.1)*(0.6+0.9*v);
+    tmp.copy(st===0?cIdle:cAct);                 // flagged cells are drawn by the overlay
+    const gn = (st===0?0.35:0.6+0.8*v)*dim;
+    c.array[i*3]=tmp.r*gn; c.array[i*3+1]=tmp.g*gn; c.array[i*3+2]=tmp.b*gn;
+    s.array[i] = (st===0?SIZE_IDLE:SIZE_ACTIVE)*(0.6+0.9*v);
     p.array[i*3+2] = dz;
   }
   c.needsUpdate=true; s.needsUpdate=true; p.needsUpdate=true;
 }
+function paintFlags(t){
+  const g = flags.geometry, c = g.getAttribute('color'), s = g.getAttribute('size');
+  const base = t*N;
+  for(let i=0;i<N;i++){
+    const on = state[base+i]===2;
+    // Full colour, never pushed past 1: the hue survives instead of washing to white.
+    c.array[i*3]=cHal.r; c.array[i*3+1]=cHal.g; c.array[i*3+2]=cHal.b;
+    s.array[i] = on ? SIZE_FLAG*(0.8+0.5*inten[base+i]) : 0;
+  }
+  c.needsUpdate=true; s.needsUpdate=true;
+}
 
 let t=0, playing=true, acc=0;
 const hud=document.getElementById('hud'), tok=document.getElementById('tok');
-const fill=document.getElementById('fill'); fill.style.background=theme.halluc;
-document.getElementById('play').onclick=e=>{playing=!playing;
-  e.target.textContent=playing?'Pause':'Play';};
-document.getElementById('track').onclick=e=>{
-  const r=e.currentTarget.getBoundingClientRect();
-  t=Math.round((e.clientX-r.left)/r.width*(T-1)); update();};
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const rgba=(c,a)=>`rgba(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)},${a})`;
+document.getElementById('play').onclick=e=>{playing=!playing; e.target.textContent=playing?'Pause':'Play';};
 
+// ---- the reply, token by token, shaded by risk
+const textEl = document.getElementById('text');
+textEl.innerHTML = meta.labels.map((s,i)=>{
+  const p = prob ? prob[i] : 0, a = prob ? Math.max(0,(p-0.15)/0.85)*0.55 : 0;
+  const style = `background:${rgba(cHal,a.toFixed(3))};` + (flaggedSet.has(i)?`text-decoration:underline 2px ${theme.halluc};text-underline-offset:3px;`:'');
+  return `<span data-i="${i}" style="${style}" title="token ${i+1}${prob?` · risk ${(p*100).toFixed(0)}%`:''}">${esc(s)||'·'}</span>`;
+}).join('');
+textEl.onclick = e => { const i = e.target.dataset?.i; if(i!==undefined){ t=+i; update(); } };
+
+// ---- risk over the reply: line, threshold, flagged stretches, playhead
+const spark = document.getElementById('spark'), sctx = spark.getContext('2d');
+function drawSpark(){
+  const r = spark.getBoundingClientRect(), dpr = devicePixelRatio||1;
+  spark.width = r.width*dpr; spark.height = r.height*dpr; sctx.setTransform(dpr,0,0,dpr,0,0);
+  const w = r.width, h = r.height, x = i => (T>1 ? i/(T-1) : 0)*w, y = p => h-2-(h-4)*p;
+  sctx.clearRect(0,0,w,h); sctx.fillStyle='#16161e'; sctx.fillRect(0,0,w,h);
+  if(!prob){ sctx.fillStyle='#8a8a92'; sctx.font='12px ui-sans-serif,system-ui';
+    sctx.fillText('no classifier scores in this trace: nothing can be flagged', 8, h/2+4); }
+  else {
+    sctx.fillStyle=rgba(cHal,0.18);
+    for(const i of meta.flagged) sctx.fillRect(x(i)-Math.max(1,w/T/2), 0, Math.max(2,w/T), h);
+    sctx.strokeStyle='#8a8a92'; sctx.setLineDash([4,4]); sctx.beginPath(); sctx.moveTo(0,y(thr)); sctx.lineTo(w,y(thr)); sctx.stroke(); sctx.setLineDash([]);
+    sctx.strokeStyle=theme.halluc; sctx.lineWidth=1.5; sctx.beginPath();
+    prob.forEach((p,i)=> i?sctx.lineTo(x(i),y(p)):sctx.moveTo(x(i),y(p))); sctx.stroke();
+  }
+  sctx.fillStyle='#fff'; sctx.fillRect(x(t)-1,0,2,h);
+}
+spark.onclick = e => { const r = spark.getBoundingClientRect(); t = Math.round((e.clientX-r.left)/r.width*(T-1)); update(); };
+
+const modeNote = meta.mode==='absolute' ? `tokens flagged at risk ≥ ${Math.round(thr*100)}% (the classifier's own threshold)`
+  : meta.mode==='relative' ? `<span class="bad">relative mode: tokens ${meta.relative_z} SD above this reply's mean, so some are always flagged</span>`
+  : `<span class="bad">no classifier scores: nothing can be flagged</span>`;
+const cellsNote = meta.cells_note && meta.cells_note.startsWith('none') ? `<br><span class="note">${esc(meta.cells_note)}: risky tokens are shown, H-neuron cells are not</span>` : '';
+const orderNote = meta.order==='weight' ? `x: neurons ordered by classifier weight, H-neurons at the left · y: layer` : `x: neuron index · y: layer`;
+
+let lastCur = null;
 function update(){
-  paint(geo, t, 1.0, 0);
-  for(let k=0;k<trailN;k++) paint(trails[k].geometry, Math.max(0,t-(k+1)), 0.45, -(k+1)*6);
-  const flagged = meta.flagged.includes(t);
-  hud.innerHTML = `<b>${meta.model||'trace'}</b><br>`+
-    `${meta.frames} tokens · ${meta.cells.toLocaleString()} cells · ${meta.layers} layers<br>`+
-    `score z <b>${meta.z[t].toFixed(2)}</b>`+
-    (flagged?` · <span style="color:${theme.halluc}">flagged</span>`:'');
-  tok.innerHTML = `${t+1}/${T} ` +
-    `<span style="color:${flagged?theme.halluc:'#8a8a92'}">${
-      (meta.labels[t]||'').replace(/</g,'&lt;')||'·'}</span>`;
-  fill.style.width = (100*t/(T-1))+'%';
-  bloom.strength = flagged ? 1.9 : 1.15;
+  paint(field, t, 1.0, 0);
+  for(let k=0;k<trailN;k++) paint(trails[k], Math.max(0,t-(k+1)), 0.45, -(k+1)*6);
+  paintFlags(t);
+  const flagged = flaggedSet.has(t);
+  hud.innerHTML = `<b>${esc(meta.model||'trace')}</b> <span class="note">${meta.frames} tokens · ${meta.layers} layers</span><br>`+
+    `<span class="dot" style="background:${theme.active};margin-left:0"></span>active`+
+    `<span class="ring" style="border-color:${theme.halluc}"></span>H-neuron on a flagged token<br>`+
+    `<span class="note">${modeNote}</span>${cellsNote}<br><span class="note">${orderNote}</span>`;
+  tok.innerHTML = `${t+1}/${T} <span style="color:${flagged?theme.halluc:'#c9c9d2'}">${esc(meta.labels[t]||'·')}</span>`+
+    (prob?` <span class="note">risk ${(prob[t]*100).toFixed(0)}%</span>`:'')+(flagged?` <b style="color:${theme.halluc}">flagged</b>`:'');
+  if(lastCur) lastCur.classList.remove('cur');
+  lastCur = textEl.children[t]; if(lastCur){ lastCur.classList.add('cur');
+    const r = lastCur.offsetTop - textEl.offsetTop; if(r < textEl.scrollTop || r > textEl.scrollTop + textEl.clientHeight - 24) textEl.scrollTop = r - 20; }
+  bloom.strength = flagged ? 1.5 : 1.0;
+  drawSpark();
 }
 update();
 
-renderer.setAnimationLoop(dt=>{
-  if(playing){ acc++; if(acc%8===0){ t=(t+1)%T; update(); } }
+renderer.setAnimationLoop(()=>{
+  if(playing){ acc++; if(acc % Math.round(60/FPS) === 0){ t=(t+1)%T; update(); } }
   controls.update(); composer.render();
 });
 addEventListener('resize', ()=>{
   cam.aspect=innerWidth/innerHeight; cam.updateProjectionMatrix();
-  renderer.setSize(innerWidth,innerHeight);
-  composer.setSize(innerWidth,innerHeight);
+  renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight); drawSpark();
 });
 </script>"""
 
@@ -337,7 +430,9 @@ def main():
     p.add_argument("--theme", default="ember", choices=sorted(THEMES))
     p.add_argument("--h-neurons")
     p.add_argument("--active-pct", type=float, default=97.0)
-    p.add_argument("--score-z", type=float, default=1.0)
+    add_flag_args(p)
+    p.add_argument("--order", choices=["weight", "index"], default="weight",
+                   help="column order within a layer: by classifier weight (H-neurons as a band) or by index")
     p.add_argument("--max-cells", type=int, default=120000,
                    help="cap on instantiated points; the strongest are kept")
     p.add_argument("--port", type=int, default=7880)
@@ -350,14 +445,18 @@ def main():
     if not a.dump:
         sec.loopback_only(a.host, "the trace viewer", a.allow_unauthenticated)
 
-    blob, meta = build_payload(a.session, a.h_neurons, a.active_pct,
-                               a.score_z, a.max_cells, demo=a.demo)
+    blob, meta = build_payload(a.session, a.h_neurons, a.active_pct, a.max_cells, demo=a.demo,
+                               flag_prob=a.flag_prob, smooth=a.smooth, relative_z=a.relative_z, order=a.order)
     PAYLOAD.update({"blob": blob, "meta": meta, "theme": THEMES[a.theme]})
     print(f"{meta['frames']} frames, {meta['cells']} cells, "
           f"{len(blob) / 1e6:.1f} MB payload, theme '{a.theme}'")
-    if meta["flagged"]:
-        print(f"flagged frames: {meta['flagged'][:12]}"
-              f"{' …' if len(meta['flagged']) > 12 else ''}")
+    if meta["mode"] == "unscored":
+        print("no classifier scores in this trace: nothing can be flagged "
+              "(trace_sample.py --classifier records them)")
+    else:
+        print(f"{len(meta['flagged'])} tokens flagged ({meta['mode']}"
+              + (f", p >= {meta['threshold']}" if meta["mode"] == "absolute" else "")
+              + f"); cells: {meta['cells_note']}")
 
     if a.dump:
         with open(a.dump, "wb") as f:

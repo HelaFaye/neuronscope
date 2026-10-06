@@ -18,7 +18,7 @@
     "cmap": "magma",
     "bg": "black",
     "active": "#EF9F27",
-    "halluc": "#F09595",
+    "halluc": "#36D6FF",
     "size": [
       2.5,
       7.0
@@ -27,13 +27,13 @@
       0.15,
       1.0
     ],
-    "note": "dark field, warm ramp; hallucinating neurons read as flare"
+    "note": "dark field, warm ramp; flagged H-neurons in cyan, which stays distinct from amber for every common colour-vision type"
   },
   "cool": {
     "cmap": "viridis",
     "bg": "#0b1015",
     "active": "#5DCAA5",
-    "halluc": "#ED93B1",
+    "halluc": "#FF8A3D",
     "size": [
       2.0,
       6.0
@@ -42,7 +42,7 @@
       0.2,
       0.95
     ],
-    "note": "low eye strain for long sessions"
+    "note": "cool ramp; flagged H-neurons in orange against teal (colour-blind safe)"
   },
   "mono": {
     "cmap": "gray",

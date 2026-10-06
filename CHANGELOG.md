@@ -32,6 +32,24 @@
   redacted from output. Legacy inline tokens are migrated.
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
+### Changed (visualization)
+- Flagging is absolute: a token is flagged when the classifier's probability
+  reaches `--flag-prob` (0.5, its own decision boundary), optionally smoothed
+  (`--smooth`). Before, a token was flagged when its score was one SD above
+  the reply's own mean, so every reply had flags, even clean ones; that is now
+  only `--relative-z`, labelled as such. Cells are flagged only for H-neurons
+  (an h_neurons.json, or the classifier's positive weights that
+  `trace_sample.py --classifier` now stores in the trace); with neither, risky
+  tokens are shown and no cell is.
+- three.js and Godot show the reply text shaded by risk and a risk-over-time
+  strip with the threshold (click either to jump), draw flagged H-neurons as
+  rings on top of the field in a colour that keeps its hue under glow, order
+  columns by classifier weight so H-neurons form a band, and state the
+  flagging mode in the HUD. Godot: `N` jumps to the next flagged token.
+- Themes: flagged colours chosen to stay distinct from active colours under
+  common colour-vision deficiencies (ember: cyan on amber; cool: orange on teal).
+- Fixed: Godot billboards ignored instance scale, so every cell drew at one size.
+
 ### Added
 - Studio pairing: persistent (until revoked) or temporary access per pairing
   link, with host-configured expirations (`--pair-code-ttl`,
