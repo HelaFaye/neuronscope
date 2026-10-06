@@ -60,6 +60,15 @@ correct vision answers, topped up with text anchors when there are too few.
 python scripts/vision_synth.py --family count_shape -n 4 --out /tmp/preview   # look at what it draws
 ```
 
+### SWE-bench deficits
+
+Repository-level coding failures need longer, real-world data than the bank
+has. `benchmarks.py swebench train-data` builds `sft.jsonl` and `dpo.jsonl` in
+the same layout from SWE-bench's train split: gold patches as targets, the
+model's own failed patches as DPO rejections, failure modes from a test run
+setting priorities, and this directory's `sft.jsonl` as replay. See
+[BENCHMARKS.md](BENCHMARKS.md#retraining-on-swe-bench-deficits).
+
 ## 3. Train
 
 ```bash

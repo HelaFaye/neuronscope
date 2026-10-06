@@ -26,6 +26,17 @@ SWE-bench's own Docker harness.
     python scripts/benchmarks.py swebench import --report my-model.my-model-1.json --model my-model \\
         --publish-stats http://127.0.0.1:7870
 
+Retraining on SWE-bench deficits uses the *train* split (different
+repositories from the test sets, with gold patches), never test instances:
+
+    python scripts/benchmarks.py swebench predict --endpoint ...@my-model \\
+        --dataset princeton-nlp/SWE-bench_bm25_13K --split train --limit 2000 --out runs/swe/train-preds.jsonl
+    python scripts/benchmarks.py swebench train-data --dataset princeton-nlp/SWE-bench_bm25_13K \\
+        --predictions runs/swe/train-preds.jsonl --report my-model.my-model-1.json \\
+        --anchors runs/retrain/sft.jsonl --out runs/swe-retrain
+    python scripts/finetune.py --model org/base-model --data runs/swe-retrain --method qlora --dpo \\
+        --max-length 16384 --out runs/swe-adapter
+
 Published scores (BenchLM.ai and similar leaderboards): CSV or JSON rows of
 model, benchmark, score, recorded as *reference* stats. They describe the
 vendor's model, not your local quant or edit, so they are shown but never
@@ -253,6 +264,126 @@ def swebench_import(a) -> int:
     return 0
 
 
+HUNK_RE = re.compile(r"^@@ -\d+(,\d+)? \+\d+(,\d+)? @@", re.M)
+
+
+def patch_ok(patch: str) -> bool:
+    """Structurally a unified diff: file headers and at least one hunk."""
+    return bool(patch) and bool(re.search(r"^(diff --git |--- )", patch, re.M)) and bool(HUNK_RE.search(patch))
+
+
+def patch_files(patch: str) -> set[str]:
+    return set(re.findall(r"^\+\+\+ b/(\S+)", patch, re.M))
+
+
+def failure_mode(model_patch: str, gold: str) -> str:
+    """Why a model's patch is wrong, as far as can be told without running it."""
+    if not model_patch.strip():
+        return "no_patch"            # no diff in the reply: a format deficit
+    if not patch_ok(model_patch):
+        return "malformed_patch"     # diff-like but not applicable
+    if not patch_files(model_patch) & patch_files(gold):
+        return "wrong_files"         # localisation: edited none of the files the fix touches
+    return "wrong_fix"
+
+
+def swebench_train_data(a) -> int:
+    """SWE-bench train split -> sft.jsonl / dpo.jsonl in deficits.py's layout.
+
+    Targets are the gold patches, kept only when they are well-formed diffs.
+    A prompt is the dataset's retrieval text when present (bm25 / oracle
+    variants), else the issue. With --predictions (the model's own patches on
+    the train split), each instance where the model's patch differs from gold
+    gives a DPO pair, and the failure mode is counted. With --report (a test
+    run's harness report) the test failure modes steer which training
+    instances are taken first: if the model mostly fails to produce a diff,
+    the instances it also failed to produce one for come first, and so on.
+    Instances whose model patch equals the gold patch are anchors, not
+    deficits."""
+    import random
+    import deficits as dfx
+    rng = random.Random(a.seed)
+    rows = load_rows(a.dataset, a.split)
+    test_ids = set()
+    for spec in a.exclude or []:
+        test_ids |= {r["instance_id"] for r in load_rows(spec, "test")}
+    preds = {}
+    if a.predictions:
+        for line in Path(a.predictions).read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                preds[r["instance_id"]] = r.get("model_patch") or ""
+    # failure modes on the *test* run: what to prioritise
+    priority = {}
+    if a.report:
+        rep = json.loads(Path(a.report).read_text())
+        n_empty = len(rep.get("empty_patch_ids", []))
+        n_fail = len(set(rep.get("unresolved_ids", [])) | set(rep.get("error_ids", [])))
+        priority = {"no_patch": n_empty, "malformed_patch": len(rep.get("error_ids", [])),
+                    "wrong_files": n_fail, "wrong_fix": n_fail}
+    skipped, modes, items, anchors = defaultdict(int), defaultdict(int), [], []
+    for r in rows:
+        iid = r["instance_id"]
+        if iid in test_ids:
+            skipped["in an excluded (test) set"] += 1
+            continue
+        gold = (r.get("patch") or "").strip("\n") + "\n"
+        if not patch_ok(gold):
+            skipped["gold patch is not a well-formed diff"] += 1
+            continue
+        prompt = r.get("text") or (SWE_INSTRUCTIONS + "Repository: " + r["repo"] + "\n\nIssue:\n" + r["problem_statement"])
+        if a.max_chars and len(prompt) + len(gold) > a.max_chars:
+            skipped[f"longer than --max-chars {a.max_chars}"] += 1
+            continue
+        target = f"<patch>\n{gold}</patch>"
+        meta = {"task": f"swebench:{iid}", "subject": "code", "repo": r.get("repo")}
+        if iid in preds:
+            mine = extract_patch(preds[iid]) if "<patch>" in preds[iid] or "```" in preds[iid] else preds[iid]
+            if mine.strip() == gold.strip():
+                anchors.append({"messages": dfx.chat(prompt, target), "source": "anchor", **meta})
+                continue
+            mode = failure_mode(mine, gold)
+            modes[mode] += 1
+            item = {"messages": dfx.chat(prompt, target), "source": "correction", "category": "swebench_" + mode,
+                    "target": "gold patch", **meta}
+            dpo = {"prompt": [{"role": "user", "content": prompt}],
+                   "chosen": [{"role": "assistant", "content": target}],
+                   "rejected": [{"role": "assistant", "content": preds[iid] or "(no patch)"}],
+                   "source": "correction", "category": "swebench_" + mode, **meta}
+            items.append((priority.get(mode, 0), item, dpo))
+        else:
+            items.append((-1, {"messages": dfx.chat(prompt, target), "source": "gold", "category": "swebench",
+                               "target": "gold patch", **meta}, None))
+    rng.shuffle(items)
+    items.sort(key=lambda x: -x[0])          # stable: shuffled within each priority
+    if a.limit:
+        items = items[:a.limit]
+    deficits = [i for _, i, _ in items]
+    dpo = [d for _, _, d in items if d]
+    pool = list(anchors)
+    if a.anchors:
+        for line in Path(a.anchors).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                if isinstance(rec.get("messages"), list) and isinstance(rec["messages"][0].get("content"), str):
+                    pool.append({"messages": rec["messages"], "source": rec.get("source", "anchor")})
+    sft, replay = dfx.mix(deficits, pool, a.deficit_fraction, rng)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "sft.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in sft))
+    (out / "dpo.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in dpo))
+    plan = {"source": a.dataset, "split": a.split, "sft_examples": len(sft), "deficit_examples": len(deficits),
+            "replay_examples": len(replay), "dpo_pairs": len(dpo), "train_failure_modes": dict(modes),
+            "test_failure_priority": priority, "skipped": dict(skipped),
+            "method": "LoRA / QLoRA, SFT then DPO; set finetune.py --max-length to fit the prompts"}
+    (out / "plan.json").write_text(json.dumps(plan, indent=2))
+    print(json.dumps(plan, indent=2))
+    if not pool:
+        print("warning: no anchor data; pass --anchors (e.g. deficits.py's sft.jsonl) to avoid forgetting",
+              file=sys.stderr)
+    return 0
+
+
 # ---------------------------------------------------------------- leaderboards
 
 def leaderboard_import(a) -> int:
@@ -335,6 +466,21 @@ def main(argv=None) -> int:
     im.add_argument("--stats-model")
     add_stats_args(im)
 
+    td = sw.add_parser("train-data", help="retraining data from the train split's gold patches")
+    td.add_argument("--dataset", default="princeton-nlp/SWE-bench_bm25_13K",
+                    help="dataset with a train split and gold `patch` (bm25/oracle variants carry code context)")
+    td.add_argument("--split", default="train")
+    td.add_argument("--predictions", help="the model's own predictions on the same split (enables DPO)")
+    td.add_argument("--report", help="harness report from a test run; its failure modes set priorities")
+    td.add_argument("--exclude", nargs="*", default=[],
+                    help="datasets whose instance ids must never be trained on (e.g. SWE-bench_Lite)")
+    td.add_argument("--anchors", help="replay data: JSONL with `messages` (e.g. deficits.py sft.jsonl)")
+    td.add_argument("--deficit-fraction", type=float, default=0.25)
+    td.add_argument("--max-chars", type=int, default=60000, help="drop prompt+patch longer than this (0: keep all)")
+    td.add_argument("--limit", type=int, default=0, help="at most this many training instances")
+    td.add_argument("--seed", type=int, default=0)
+    td.add_argument("--out", required=True)
+
     ld = top.add_parser("leaderboard").add_subparsers(dest="cmd", required=True)
     li = ld.add_parser("import", help="published scores (CSV/JSON) as reference stats")
     li.add_argument("--file", required=True)
@@ -349,7 +495,8 @@ def main(argv=None) -> int:
     if a.bench == "livebench":
         return livebench_run(a) if a.cmd == "run" else livebench_import(a)
     if a.bench == "swebench":
-        return {"predict": swebench_predict, "evaluate": swebench_evaluate, "import": swebench_import}[a.cmd](a)
+        return {"predict": swebench_predict, "evaluate": swebench_evaluate, "import": swebench_import,
+                "train-data": swebench_train_data}[a.cmd](a)
     return leaderboard_import(a)
 
 

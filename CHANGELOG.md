@@ -23,6 +23,9 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- `benchmarks.py swebench train-data`: retraining data from SWE-bench's train
+  split (gold patches, DPO against the model's own patches, failure modes
+  prioritised by a test-run report, test-set exclusion, replay anchors).
 - Vision retraining: deficits.py now writes `sft_vision.jsonl` /
   `dpo_vision.jsonl` with rendered images for failed vision items, and
   `vision_synth.py` adds variations whose answers are known by construction

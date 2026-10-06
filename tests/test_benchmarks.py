@@ -85,3 +85,48 @@ def test_leaderboard_import_is_reference_only(tmp_path):
     assert s["reference"]["GPQA Diamond"] == {"score": 0.62, "subject": "science", "source": "benchlm"}
     assert s["reference"]["SWE-bench Verified"]["subject"] == "code"
     assert s["graded"]["n"] == 0          # never counted toward auto routing
+
+
+def _diff(path, old, new):
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{old}\n+{new}\n")
+
+
+def test_swebench_train_data(tmp_path):
+    import benchmarks
+    rows = [{"instance_id": f"org__r-{i}", "repo": "org/r", "problem_statement": f"bug {i}",
+             "text": f"issue {i} with code", "patch": _diff(f"m{i}.py", "x = 1", "x = 2")} for i in range(8)]
+    rows.append({"instance_id": "org__r-bad", "repo": "org/r", "problem_statement": "p", "patch": "not a diff"})
+    rows.append({"instance_id": "lite__t-1", "repo": "x/y", "problem_statement": "p", "patch": _diff("a.py", "1", "2")})
+    (tmp_path / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "lite.jsonl").write_text(json.dumps({"instance_id": "lite__t-1"}) + "\n")
+    preds = {"org__r-0": rows[0]["patch"],                       # solved: an anchor
+             "org__r-1": "",                                      # no patch
+             "org__r-2": "--- a/m2.py\n+++ b/m2.py\nnonsense",    # malformed
+             "org__r-3": _diff("other.py", "a", "b"),             # wrong file
+             "org__r-4": _diff("m4.py", "x = 1", "x = 3")}        # wrong fix
+    (tmp_path / "preds.jsonl").write_text("".join(json.dumps({"instance_id": k, "model_patch": v}) + "\n"
+                                                  for k, v in preds.items()))
+    (tmp_path / "report.json").write_text(json.dumps({"resolved_ids": [], "empty_patch_ids": ["a", "b", "c"],
+                                                      "unresolved_ids": ["d"], "error_ids": []}))
+    (tmp_path / "anchors.jsonl").write_text("".join(json.dumps({"messages": [
+        {"role": "user", "content": f"q{i}"}, {"role": "assistant", "content": f"a{i}"}]}) + "\n" for i in range(40)))
+    out = tmp_path / "out"
+    assert benchmarks.main(["swebench", "train-data", "--dataset", str(tmp_path / "train.jsonl"),
+                            "--predictions", str(tmp_path / "preds.jsonl"), "--report", str(tmp_path / "report.json"),
+                            "--exclude", str(tmp_path / "lite.jsonl"), "--anchors", str(tmp_path / "anchors.jsonl"),
+                            "--limit", "4", "--out", str(out)]) == 0
+    plan = json.loads((out / "plan.json").read_text())
+    assert plan["train_failure_modes"] == {"no_patch": 1, "malformed_patch": 1, "wrong_files": 1, "wrong_fix": 1}
+    assert plan["skipped"] == {"in an excluded (test) set": 1, "gold patch is not a well-formed diff": 1}
+    sft = [json.loads(l) for l in (out / "sft.jsonl").read_text().splitlines()]
+    dpo = [json.loads(l) for l in (out / "dpo.jsonl").read_text().splitlines()]
+    deficit = [r for r in sft if r.get("category", "").startswith("swebench")]
+    assert len(deficit) == 4 and plan["deficit_examples"] == 4
+    # the test run mostly failed to produce a diff, so that failure mode comes first
+    assert any(r["category"] == "swebench_no_patch" for r in deficit)
+    assert all("lite__t-1" not in r.get("task", "") for r in sft)
+    for r in deficit:
+        assert r["messages"][1]["content"].startswith("<patch>\n")
+        assert benchmarks.patch_ok(benchmarks.extract_patch(r["messages"][1]["content"]))
+    assert dpo and all(p["chosen"][0]["content"] != p["rejected"][0]["content"] for p in dpo)
+    assert 0.2 <= 4 / len(sft) <= 0.3

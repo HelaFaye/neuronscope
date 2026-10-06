@@ -92,8 +92,36 @@ python scripts/benchmarks.py swebench import --report my-model.my-model-1.json -
 - `import` records resolved as correct, empty patches as abstained, and the
   rest as wrong, all under subject `code`.
 
-Do not retrain on the instances you evaluate on. SWE-bench has a separate
-train split for that.
+### Retraining on SWE-bench deficits
+
+Never retrain on the instances you evaluate on. SWE-bench's train split comes
+from different repositories than its test sets and carries gold patches, so
+`train-data` builds the retraining set from it:
+
+```bash
+# the model's own attempts on the train split (for DPO pairs and failure modes)
+python scripts/benchmarks.py swebench predict --endpoint ...@my-model \
+    --dataset princeton-nlp/SWE-bench_bm25_13K --split train --limit 2000 --out runs/swe/train-preds.jsonl
+python scripts/benchmarks.py swebench train-data --dataset princeton-nlp/SWE-bench_bm25_13K \
+    --predictions runs/swe/train-preds.jsonl --report my-model.my-model-1.json \
+    --exclude princeton-nlp/SWE-bench_Lite princeton-nlp/SWE-bench_Verified \
+    --anchors runs/retrain/sft.jsonl --limit 1500 --out runs/swe-retrain
+python scripts/finetune.py --model org/base-model --data runs/swe-retrain --method qlora --dpo \
+    --max-length 16384 --gradient-checkpointing --out runs/swe-adapter
+```
+
+| piece | detail |
+|---|---|
+| targets | the gold patch in `<patch>` tags, the format `predict` asks for; kept only if it is a well-formed diff |
+| failure modes | each train instance the model got wrong is labelled `no_patch` (no diff at all), `malformed_patch`, `wrong_files` (edited none of the files the fix touches) or `wrong_fix` |
+| priority | `--report` from a test run says which failure dominates (e.g. mostly empty patches); training instances with that failure come first under `--limit` |
+| DPO | gold patch chosen, the model's own patch rejected |
+| replay | instances the model already solved, plus `--anchors`, make up the rest at `--deficit-fraction` |
+| leakage | `--exclude` drops any instance id that appears in the named test sets |
+
+Retrieval prompts are long (the 13K variants are about 13K tokens), so set
+`--max-length` to fit and expect memory to scale with it; `--max-chars` drops
+outliers. Measure afterwards on the test set you evaluated before.
 
 ## BenchLM.ai and other leaderboards
 
@@ -118,7 +146,8 @@ harnesses above or TestQA.
 
 The adapters are tested offline: CLIP_benchmark's zero-shot code on a tiny
 CLIP (with and without scaling), LiveBench judgment import, SWE-bench
-prediction (against a fake endpoint, including resume) and report import, and
+prediction (against a fake endpoint, including resume), report import,
+train-data construction (failure modes, priority, exclusion, replay), and
 leaderboard import. Real datasets, the SWE-bench Docker harness and LiveBench
 runs need network access to Hugging Face and the dataset hosts, which this
 environment did not have.
