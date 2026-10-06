@@ -453,12 +453,12 @@ def test_pairing_and_linked_host(studio_srv, remote_studio):
 def test_device_registry_codes_expire_and_are_hashed(tmp_path, monkeypatch):
     import ns_pairing
     reg = ns_pairing.DeviceRegistry(tmp_path / "d.json")
-    code, _ = reg.new_code()
+    code, _, _ = reg.new_code()
     assert reg.claim("WRONGCODE000", "x") is None
     r = reg.claim(code.lower()[:4] + "-" + code[4:], "laptop")          # dashes and case do not matter
     assert r and reg.check(r["token"])["name"] == "laptop"
     assert r["token"] not in (tmp_path / "d.json").read_text()          # only the hash is stored
-    code2, _ = reg.new_code()
+    code2, _, _ = reg.new_code()
     monkeypatch.setattr(ns_pairing.time, "time", lambda: 10 ** 12)      # far future
     assert reg.claim(code2, "late") is None
 
@@ -497,3 +497,104 @@ def test_multi_gpu_flags_and_vram_fit(studio_srv, monkeypatch):
     assert studio.fit_estimate(40 * 2**30)["ok"] is False
     code, adv = call(studio_srv, "/api/gpus")
     assert code == 200 and adv["count"] == 4 and adv["multi_gpu"]["llama_server"] == "-sm layer -ts 1,1,1,1"
+
+
+def test_pairing_policy_persistent_and_temporary(tmp_path, monkeypatch):
+    import json as _json
+    import ns_pairing
+    clock = [1_000_000.0]
+    monkeypatch.setattr(ns_pairing.time, "time", lambda: clock[0])
+    pol = ns_pairing.PairingPolicy(code_ttl="2m", presets=["1h", "8h", "7d"], max_ttl="30d")
+    reg = ns_pairing.DeviceRegistry(tmp_path / "d.json", pol)
+    # persistent (the default) and temporary pairings side by side
+    c1, code_exp, acc = reg.new_code()
+    assert acc is None and code_exp == clock[0] + 120
+    keep = reg.claim(c1, "desktop")
+    c2, _, acc = reg.new_code(persistent=False, ttl="8h")
+    assert acc == 8 * 3600
+    temp = reg.claim(c2, "phone")
+    assert keep["expires"] is None and temp["expires"] == clock[0] + 8 * 3600
+    clock[0] += 8 * 3600 - 1
+    assert reg.check(temp["token"]) and reg.check(keep["token"])
+    clock[0] += 2
+    assert reg.check(temp["token"]) is None                  # temporary access ran out
+    assert reg.check(keep["token"])                          # persistent access did not
+    rows = {d["name"]: d for d in reg.list()}
+    assert rows["phone"]["expired"] and rows["desktop"]["persistent"]
+    # the owner renews, extends or makes persistent; the token is unchanged
+    reg.update(temp["device_id"], persistent=False, ttl="1h")
+    assert reg.check(temp["token"])
+    reg.update(temp["device_id"], persistent=True)
+    clock[0] += 400 * 86400
+    assert reg.check(temp["token"])
+    # host limits
+    for kw in ({"persistent": False, "ttl": "31d"}, {"persistent": False, "ttl": "10s"}):
+        try:
+            reg.new_code(**kw)
+            raise AssertionError(kw)
+        except ValueError:
+            pass
+    strict = ns_pairing.DeviceRegistry(tmp_path / "s.json", ns_pairing.PairingPolicy(allow_persistent=False))
+    try:
+        strict.new_code(persistent=True)
+        raise AssertionError("persistent allowed")
+    except ValueError as e:
+        assert "temporary" in str(e)
+    assert strict.policy.describe()["default"] == "30d"      # default falls back to a temporary preset
+    _, _, acc = strict.new_code()
+    assert acc == 30 * 86400
+    # pairing codes expire on the host's schedule
+    c3, _, _ = reg.new_code(persistent=False, ttl="1h")
+    clock[0] += 121
+    assert reg.claim(c3, "late") is None
+    # long-expired devices are pruned on the next pairing
+    c4, _, _ = reg.new_code(persistent=False, ttl="1h")
+    gone = reg.claim(c4, "short")
+    clock[0] += 3600 + ns_pairing.EXPIRED_KEEP + 1
+    reg.claim(reg.new_code()[0], "next")
+    assert "short" not in {d["name"] for d in reg.list()}
+    # device files from before expiry existed load as persistent
+    (tmp_path / "old.json").write_text(_json.dumps({"devices": [{"id": "a", "name": "old", "token_sha256": "x",
+                                                                 "created": 1, "last_seen": None}]}))
+    assert ns_pairing.DeviceRegistry(tmp_path / "old.json").list()[0]["persistent"]
+    assert ns_pairing.parse_duration("90m") == 5400 and ns_pairing.fmt_duration(7 * 86400) == "7d"
+
+
+def test_temporary_pairing_end_to_end(remote_studio):
+    import ns_pairing
+    base, token, fp = remote_studio
+    r = ns_pairing.request(base, "POST", "/api/pair/start", {"persistent": False, "ttl": "2h"},
+                           token=token, fingerprint=fp)
+    assert r["access_seconds"] == 7200 and not r["persistent"] and "&a=2h" in r["link"]
+    code = ns_pairing.parse_link(r["link"].replace(r["link"].split("/pair")[0], base))[1]
+    resp = ns_pairing.request(base, "POST", "/api/pair/claim", {"code": code, "name": "tablet", "cookie": True},
+                              fingerprint=fp, stream=True)
+    cookie = resp.getheader("Set-Cookie")
+    claimed = json.loads(resp.read())
+    assert 7100 < int(cookie.split("Max-Age=")[1].split(";")[0]) <= 7200      # the cookie ends with the access
+    assert claimed["expires"] and ns_pairing.request(base, "GET", "/v1/models", token=claimed["token"],
+                                                     fingerprint=fp)["data"]
+    devs = ns_pairing.request(base, "GET", "/api/devices", token=token, fingerprint=fp)
+    (dev,) = [d for d in devs["devices"] if d["name"] == "tablet"]
+    assert not dev["persistent"] and devs["policy"]["allow_persistent"]
+    up = ns_pairing.request(base, "POST", "/api/devices/update", {"id": dev["id"], "persistent": True},
+                            token=token, fingerprint=fp)
+    assert up["persistent"] and up["expires"] is None
+    with pytest.raises(RuntimeError, match="400"):          # beyond the host's --pair-max (90d)
+        ns_pairing.request(base, "POST", "/api/pair/start", {"persistent": False, "ttl": "400d"},
+                           token=token, fingerprint=fp)
+    with pytest.raises(RuntimeError, match="403"):          # a device cannot change its own access
+        ns_pairing.request(base, "POST", "/api/devices/update", {"id": dev["id"], "persistent": True},
+                           token=claimed["token"], fingerprint=fp)
+
+
+def test_expired_link_is_reported_not_called(studio_srv):
+    import json as _json
+    studio.LINKS["cache"].clear()
+    with open(studio.STATE["links_path"], "w") as f:
+        _json.dump({"links": [{"name": "old", "url": "https://192.0.2.1:7870", "token": "t", "fingerprint": "",
+                               "expires": time.time() - 60}]}, f)
+    assert studio.link_models(refresh=True) == []          # no request to a host that would refuse it
+    _, d = call(studio_srv, "/api/devices")
+    (ln,) = d["links"]
+    assert "expired" in ln["error"] and ln["expires"]

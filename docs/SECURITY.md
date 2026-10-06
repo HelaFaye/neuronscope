@@ -94,7 +94,9 @@ code.
   compromised worker, which holds the key)
 
 **Studio pairing and links**
-- [x] one-time pairing codes (~59 bits, 5 minutes, single use, throttled claims)
+- [x] one-time pairing codes (~59 bits, single use, throttled claims; claimable for `--pair-code-ttl`, 5 minutes by default)
+- [x] persistent or temporary device access; expiry is enforced on every request, the browser cookie
+  ends with it, and the host caps it (`--pair-max`) or forbids persistent access (`--no-persistent-pairing`)
 - [x] per-device tokens, stored as SHA-256 hashes, revocable; devices are limited to chat, `/v1`, saved
   chats and document search (no jobs, load flags, downloads, MCP tools, pairing or links)
 - [x] pairing links carry the TLS certificate fingerprint; claims and every linked-host request pin it

@@ -189,8 +189,9 @@ keep `autoApprove` to read-only tools.
 The **Link** page (header) does two things, both built on one-time pairing
 links instead of sharing the master token.
 
-**Pair a device.** *Create pairing link* gives a link valid for five minutes
-and usable once, like `https://studio.lan:7870/pair#c=K7QX-M2PA-9DTE&fp=…`.
+**Pair a device.** *Create pairing link* gives a link usable once, like
+`https://studio.lan:7870/pair#c=K7QX-M2PA-9DTE&fp=…`, claimable for five
+minutes by default.
 Opened in a browser, it pairs that browser and logs it in; on the command line,
 `python scripts/ns_pairing.py claim '<link>' --out laptop.token` writes a token
 file for API clients. Each device gets its own token, stored on the host only
@@ -199,6 +200,40 @@ Paired devices can chat (with documents), use `/v1` and keep saved chats.
 Everything that administers the machine needs the master token: jobs (they
 run code), load settings and llama-server flags, downloads, MCP tools (they
 run with the host owner's permissions), pairing, revoking and links.
+
+**Persistent or temporary access.** Each pairing link grants one of:
+
+- **Persistent**: the device keeps access until you revoke it (a paired
+  browser's cookie is renewed for a year at a time; revoking still ends it at
+  once).
+- **Temporary**: access ends a set time after pairing (1 hour, 8 hours, 1 day,
+  7 days, 30 days, or a custom duration). The device's requests are refused
+  from that moment, and a paired browser's cookie expires with it.
+
+Choose under **Access** before creating the link; the page the device opens
+says which it is getting. The device list shows each device's access and time
+left, and **change…** extends or shortens temporary access, renews an expired
+device (same token, no re-pairing) or makes it persistent. Expired devices stay
+listed for 30 days, then drop off. A linked host with temporary access shows
+"access expired" when it runs out, without calling the other machine.
+
+The host's owner sets the policy at startup:
+
+| flag | default | |
+|---|---|---|
+| `--pair-code-ttl` | `5m` | how long a pairing link can be claimed (up to `1d`) |
+| `--pair-durations` | `1h,8h,1d,7d,30d` | the temporary choices offered |
+| `--pair-max` | `90d` | the longest temporary access any pairing or extension may grant |
+| `--pair-default` | `persistent` | what is preselected (`persistent` or a duration) |
+| `--no-persistent-pairing` | off | every device expires; persistent access cannot be granted or restored |
+
+```bash
+# a shared machine: guests get a day at most, nothing permanent, 2-minute links
+python viz/studio.py ... --no-persistent-pairing --pair-durations 1h,8h,1d --pair-max 1d --pair-code-ttl 2m
+```
+
+`POST /api/pair/start` takes `{"persistent": true}` or `{"persistent": false, "ttl": "8h"}`;
+`POST /api/devices/update` takes the same plus the device `id`.
 
 **Use another machine's models.** On the GPU box's Studio create a pairing
 link, and paste it into this Studio's Link page with a name (say `gpu`). Its

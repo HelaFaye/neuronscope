@@ -33,6 +33,12 @@
 - Studio: same bind policy, login throttling, Secure cookie under TLS, bounded bodies.
 
 ### Added
+- Studio pairing: persistent (until revoked) or temporary access per pairing
+  link, with host-configured expirations (`--pair-code-ttl`,
+  `--pair-durations`, `--pair-max`, `--pair-default`,
+  `--no-persistent-pairing`). Expiry is enforced on every request, browser
+  cookies end with it, linked hosts report it, and the owner can extend,
+  shorten, renew or make persistent from the Link page.
 - `viz/bloom.py --demo`: a synthetic, clearly labelled trace for trying the
   three.js and Godot clients without a model. Godot usage (keys, `NS_FRAME`,
   `NS_PAUSED`, renderer fallback) in docs/VISUALIZATION.md.

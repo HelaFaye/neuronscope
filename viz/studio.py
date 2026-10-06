@@ -743,6 +743,11 @@ def link_models(refresh: bool = False) -> list[dict]:
         if hit and not refresh and time.time() - hit[0] < 30:
             out += hit[1]
             continue
+        if ln.get("expires") and ln["expires"] <= time.time():
+            with LINKS["lock"]:
+                LINKS["cache"][ln["name"]] = (time.time(), [], "access expired " + time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(ln["expires"])) + "; ask that host for a new pairing link")
+            continue
         try:
             r = ns_pairing.request(ln["url"], "GET", "/v1/models", token=ln["token"],
                                    fingerprint=ln.get("fingerprint", ""), timeout=5)
@@ -1337,14 +1342,28 @@ class Handler(BaseHTTPRequestHandler):
             if not STATE["token"]:
                 return self._json(400, {"error": "pairing needs Studio to run with a token (and TLS off loopback); "
                                                  "without one, nothing is protected to pair into"})
-            code, exp = reg.new_code()
+            try:
+                code, exp, access = reg.new_code(req.get("persistent"), req.get("ttl"))
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
             host = self.headers.get("Host") or "127.0.0.1"
             scheme = "https" if STATE["tls"] else "http"
-            frag = f"c={code[:4]}-{code[4:8]}-{code[8:]}" + (f"&fp={STATE['fingerprint']}" if STATE.get("fingerprint") else "")
+            # `a` only tells the claiming page what it will get; the host enforces it.
+            frag = (f"c={code[:4]}-{code[4:8]}-{code[8:]}"
+                    + (f"&fp={STATE['fingerprint']}" if STATE.get("fingerprint") else "")
+                    + f"&a={'p' if access is None else ns_pairing.fmt_duration(access)}")
             return self._json(200, {"code": code, "expires": exp, "link": f"{scheme}://{host}/pair#{frag}",
-                                    "fingerprint": STATE.get("fingerprint")})
+                                    "fingerprint": STATE.get("fingerprint"), "persistent": access is None,
+                                    "access_seconds": access})
         if self.path == "/api/devices/revoke":
             return self._json(200, {"ok": reg.revoke(str(req.get("id", "")))})
+        if self.path == "/api/devices/update":
+            try:
+                return self._json(200, reg.update(str(req.get("id", "")), req.get("persistent"), req.get("ttl")))
+            except KeyError:
+                return self._json(404, {"error": "no such device"})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
         if self.path == "/api/links/add":
             name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("name") or "remote"))[:32].strip("-") or "remote"
             links = [x for x in load_links() if x["name"] != name]
@@ -1353,7 +1372,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, RuntimeError, OSError) as e:
                 return self._json(400, {"error": f"could not pair: {e}"})
             links.append({"name": name, "url": r["url"], "token": r["token"], "fingerprint": r["fingerprint"],
-                          "device_id": r["device_id"], "added": time.time()})
+                          "device_id": r["device_id"], "added": time.time(), "expires": r.get("expires")})
             save_links(links)
             with LINKS["lock"]:
                 LINKS["cache"].pop(name, None)
@@ -1458,8 +1477,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._json(200, {"devices": STATE["devices"].list(),
+                                    "policy": STATE["devices"].policy.describe(),
                                     "links": [{"name": x["name"], "url": x["url"],
                                                "pinned": bool(x.get("fingerprint")),
+                                               "expires": x.get("expires"),
                                                "error": (LINKS["cache"].get(x["name"]) or (0, [], None))[2],
                                                "models": len((LINKS["cache"].get(x["name"]) or (0, []))[1])}
                                               for x in load_links()]})
@@ -1612,8 +1633,11 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.dumps(r).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                # The cookie lives as long as the access: a year for persistent pairing (the
+                # host can still revoke it), exactly the granted time for temporary access.
+                age = 31536000 if r["expires"] is None else max(1, int(r["expires"] - time.time()))
                 self.send_header("Set-Cookie", f"ns_token={r['token']}; Path=/; HttpOnly; SameSite=Strict; "
-                                 "Max-Age=31536000" + ("; Secure" if STATE["tls"] else ""))
+                                 f"Max-Age={age}" + ("; Secure" if STATE["tls"] else ""))
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -1626,7 +1650,8 @@ class Handler(BaseHTTPRequestHandler):
             # run code), no load flags or downloads, no MCP reloads, no pairing.
             return self._json(403, {"error": "paired devices can chat and use /v1; this needs the owner"})
         try:
-            if self.path in ("/api/pair/start", "/api/devices/revoke", "/api/links/add", "/api/links/remove"):
+            if self.path in ("/api/pair/start", "/api/devices/revoke", "/api/devices/update", "/api/links/add",
+                             "/api/links/remove"):
                 return self._pairing_post()
             if self.path in ("/v1/chat/completions", "/v1/completions", "/v1/embeddings"):
                 return self._v1(self.path)
@@ -1834,6 +1859,8 @@ main{max-width:900px;margin:0 auto;padding:1rem;display:grid;gap:1rem}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.9rem}
 h2{font-size:13px;margin:0 0 .5rem;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
 input{font:13px ui-monospace,monospace;padding:.35rem .45rem;border:1px solid var(--line);border-radius:5px;width:100%;background:var(--bg);color:var(--fg)}
+select{font:13px ui-sans-serif,system-ui;padding:.3rem .4rem;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--fg)}
+#access{width:100%}
 button{font:500 13px ui-sans-serif,system-ui;padding:.4rem .8rem;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;cursor:pointer}
 button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 .note{font-size:12.5px;color:var(--mut)}.err{color:var(--no)}.ok{color:var(--ok)}
@@ -1850,14 +1877,15 @@ PAIR_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" conte
 <div id="form" style="display:none"><label>Name for this device</label><input id="name">
 <button class="pri" id="go" style="margin-top:.6rem">Pair and open Studio</button></div></div></main>
 <script>
-const p=new URLSearchParams(location.hash.slice(1)), code=p.get('c'), $=s=>document.querySelector(s);
+const p=new URLSearchParams(location.hash.slice(1)), code=p.get('c'), acc=p.get('a'), $=s=>document.querySelector(s);
+const accText=acc==='p'?'Access lasts until the owner revokes it.':acc?`Access is temporary: it ends ${acc} after pairing.`:'';
 history.replaceState(null,'',location.pathname);         // keep the code out of history
 if(!code){ $('#msg').innerHTML='<span class="err">This link has no pairing code. Ask the owner for a new one.</span>'; }
-else { $('#msg').textContent='Pairing code '+code+'. This browser will get its own access, which the owner can revoke.';
+else { $('#msg').textContent='Pairing code '+code+'. This browser will get its own access, which the owner can revoke. '+accText;
   $('#name').value=(navigator.userAgentData?.platform||navigator.platform||'browser')+' browser'; $('#form').style.display=''; }
 $('#go').onclick=async()=>{ const r=await fetch('/api/pair/claim',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({code,name:$('#name').value,cookie:true})}); const j=await r.json().catch(()=>({}));
-  if(r.ok){ location.href='/'; } else { $('#msg').innerHTML='<span class="err">'+(j.error||r.status)+'</span>'; } };
+  if(r.ok){ if(j.expires) alert('Paired. Access ends '+new Date(j.expires*1000).toLocaleString()+'.'); location.href='/'; } else { $('#msg').innerHTML='<span class="err">'+(j.error||r.status)+'</span>'; } };
 </script>"""
 
 LINK_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1865,8 +1893,11 @@ LINK_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" conte
 <header><h1>Studio · Link</h1><a href="/">← Studio</a></header>
 <main>
 <div class="card"><h2>Pair a device with this Studio</h2>
- <div class="note">Creates a one-time link (5 minutes). Open it on a phone or laptop, or paste it into another Studio below. Each device gets its own token, revocable here; the master token is never shared. The link carries this server's certificate fingerprint, so the other side pins it instead of trusting any certificate.</div>
- <button class="pri" id="start" style="margin-top:.6rem">Create pairing link</button>
+ <div class="note">Creates a one-time link (<span id="codettl">5 minutes</span>). Open it on a phone or laptop, or paste it into another Studio below. Each device gets its own token, revocable here; the master token is never shared. The link carries this server's certificate fingerprint, so the other side pins it instead of trusting any certificate.</div>
+ <div class="row" style="margin-top:.5rem"><div style="max-width:260px"><label>Access</label><select id="access"></select></div>
+ <div id="customBox" style="max-width:160px;display:none"><label>Duration (e.g. 12h, 3d)</label><input id="custom"></div>
+ <button class="pri" id="start">Create pairing link</button></div>
+ <div id="policy" class="note" style="margin-top:.3rem"></div>
  <div id="pairout" style="margin-top:.6rem"></div></div>
 <div class="card"><h2>Paired devices</h2><div id="devs" class="note">loading…</div></div>
 <div class="card"><h2>Use another machine's models here</h2>
@@ -1880,14 +1911,33 @@ LINK_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" conte
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
 const when=t=>t?new Date(t*1000).toLocaleString():'never';
+let policy=null;
+const left=t=>{ const s=t-Date.now()/1000; if(s<=0) return 'expired';
+  return s>86400?`${Math.floor(s/86400)}d ${Math.floor(s%86400/3600)}h left`:s>3600?`${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m left`:`${Math.ceil(s/60)}m left`; };
+const accessCell=d=>d.persistent?'persistent':d.expired?`<span class="err">expired ${when(d.expires)}</span>`:`until ${when(d.expires)} <span class="note">(${left(d.expires)})</span>`;
+function accessChoice(){ const v=$('#access').value; if(v==='persistent') return {persistent:true};
+  if(v==='custom') return {persistent:false, ttl:$('#custom').value.trim()}; return {persistent:false, ttl:v}; }
+function renderPolicy(pol){ policy=pol; const keep=$('#access').value;
+  $('#access').innerHTML=(pol.allow_persistent?'<option value="persistent">Persistent (until revoked)</option>':'')+
+    pol.presets.map(p=>`<option value="${p}">Temporary: ${p}</option>`).join('')+`<option value="custom">Temporary: custom…</option>`;
+  $('#access').value=keep||(pol.default==='persistent'?'persistent':pol.default);
+  if(!$('#access').value) $('#access').selectedIndex=0;
+  $('#codettl').textContent=pol.code_ttl>=120?`${Math.round(pol.code_ttl/60)} minutes`:`${pol.code_ttl} seconds`;
+  $('#policy').textContent=`Host policy: temporary access up to ${pol.max_ttl}`+(pol.allow_persistent?'; persistent allowed.':'; persistent pairing is disabled on this host.'); }
+$('#access').onchange=()=>{ $('#customBox').style.display=$('#access').value==='custom'?'':'none'; };
 async function load(){ const r=await fetch('/api/devices'); const j=await r.json();
   if(!r.ok){ $('#devs').innerHTML='<span class="err">'+esc(j.error)+'</span>'; $('#start').disabled=true; $('#add').disabled=true; return; }
-  $('#devs').innerHTML=j.devices.length?'<table><tr><th>device</th><th>paired</th><th>last seen</th><th></th></tr>'+j.devices.map(d=>`<tr><td>${esc(d.name)}</td><td>${when(d.created)}</td><td>${when(d.last_seen)}</td><td><button data-r="${esc(d.id)}">Revoke</button></td></tr>`).join('')+'</table>':'No paired devices.';
+  renderPolicy(j.policy);
+  $('#devs').innerHTML=j.devices.length?'<table><tr><th>device</th><th>paired</th><th>last seen</th><th>access</th><th></th></tr>'+j.devices.map(d=>`<tr><td>${esc(d.name)}</td><td>${when(d.created)}</td><td>${when(d.last_seen)}</td><td>${accessCell(d)}</td><td style="white-space:nowrap"><select data-u="${esc(d.id)}"><option value="">change…</option>${policy.allow_persistent&&!d.persistent?'<option value="persistent">make persistent</option>':''}${policy.presets.map(p=>`<option value="${p}">${d.persistent?'expire in':d.expired?'renew for':'reset to'} ${p}</option>`).join('')}</select> <button data-r="${esc(d.id)}">Revoke</button></td></tr>`).join('')+'</table>':'No paired devices.';
   document.querySelectorAll('[data-r]').forEach(b=>b.onclick=async()=>{ if(confirm('Revoke this device? It loses access immediately.')){ await post('/api/devices/revoke',{id:b.dataset.r}); load(); } });
-  $('#links').innerHTML=j.links.length?'<table><tr><th>name</th><th>host</th><th>models</th><th></th></tr>'+j.links.map(l=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.url)}</code> ${l.pinned?'🔒 pinned':''}</td><td>${l.error?'<span class="err">'+esc(l.error)+'</span>':l.models}</td><td><button data-l="${esc(l.name)}">Unlink</button></td></tr>`).join('')+'</table>':'';
+  document.querySelectorAll('[data-u]').forEach(sel=>sel.onchange=async()=>{ const v=sel.value; if(!v) return;
+    const r=await post('/api/devices/update', v==='persistent'?{id:sel.dataset.u,persistent:true}:{id:sel.dataset.u,persistent:false,ttl:v});
+    if(!r.ok) alert((await r.json()).error); load(); });
+  $('#links').innerHTML=j.links.length?'<table><tr><th>name</th><th>host</th><th>access</th><th>models</th><th></th></tr>'+j.links.map(l=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.url)}</code> ${l.pinned?'🔒 pinned':''}</td><td>${l.expires?accessCell({expires:l.expires,expired:l.expires<Date.now()/1000}):'persistent'}</td><td>${l.error?'<span class="err">'+esc(l.error)+'</span>':l.models}</td><td><button data-l="${esc(l.name)}">Unlink</button></td></tr>`).join('')+'</table>':'';
   document.querySelectorAll('[data-l]').forEach(b=>b.onclick=async()=>{ await post('/api/links/remove',{name:b.dataset.l}); load(); }); }
-$('#start').onclick=async()=>{ const r=await post('/api/pair/start'); const j=await r.json();
-  $('#pairout').innerHTML=r.ok?`<div><span class="code" id="plink">${esc(j.link)}</span> <button id="cp">Copy</button></div><div class="note">Code <b>${esc(j.code)}</b>, valid until ${new Date(j.expires*1000).toLocaleTimeString()}, single use.${j.fingerprint?'':' <span class="err">No TLS on this Studio: use the link only inside a VPN.</span>'}</div>`:'<span class="err">'+esc(j.error)+'</span>';
+$('#start').onclick=async()=>{ const r=await post('/api/pair/start',accessChoice()); const j=await r.json();
+  const grants=j.persistent?'persistent access (until revoked)':`temporary access for ${Math.round(j.access_seconds/3600*10)/10} h after pairing`;
+  $('#pairout').innerHTML=r.ok?`<div><span class="code" id="plink">${esc(j.link)}</span> <button id="cp">Copy</button></div><div class="note">Grants ${grants}. Code <b>${esc(j.code)}</b>, claimable until ${new Date(j.expires*1000).toLocaleTimeString()}, single use.${j.fingerprint?'':' <span class="err">No TLS on this Studio: use the link only inside a VPN.</span>'}</div>`:'<span class="err">'+esc(j.error)+'</span>';
   if(r.ok) $('#cp').onclick=()=>navigator.clipboard.writeText(j.link); };
 $('#add').onclick=async()=>{ $('#addmsg').textContent='pairing…'; const r=await post('/api/links/add',{link:$('#lnk').value.trim(),name:$('#lname').value.trim()||'remote',device_name:location.host});
   const j=await r.json(); $('#addmsg').innerHTML=r.ok?`<span class="ok">Linked ${esc(j.name)}: ${j.models.length} models.</span>`:'<span class="err">'+esc(j.error)+'</span>'; if(r.ok){ $('#lnk').value=''; } load(); };
@@ -2468,6 +2518,15 @@ def main(argv=None):
     p.add_argument("--no-jobs", action="store_true", help="disable /jobs entirely")
     p.add_argument("--devices", default=os.path.expanduser("~/.neuronscope/devices.json"),
                    help="paired devices (token hashes only)")
+    p.add_argument("--pair-code-ttl", default="5m",
+                   help="how long a pairing link can be claimed (e.g. 90s, 5m, 1h; max 1d)")
+    p.add_argument("--pair-durations", default="1h,8h,1d,7d,30d",
+                   help="temporary-access durations offered when pairing")
+    p.add_argument("--pair-max", default="90d", help="longest temporary access a pairing may grant")
+    p.add_argument("--pair-default", default="persistent",
+                   help="what a pairing grants unless chosen otherwise: persistent, or a duration like 8h")
+    p.add_argument("--no-persistent-pairing", action="store_true",
+                   help="only grant temporary access; every paired device expires")
     p.add_argument("--links", default=os.path.expanduser("~/.neuronscope/links.json"),
                    help="linked hosts whose models this Studio serves (holds their device tokens; 0600)")
     p.add_argument("--mcp-config", default=str(ns_mcp.DEFAULT_CONFIG),
@@ -2507,7 +2566,13 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    STATE.update(devices=ns_pairing.DeviceRegistry(a.devices), links_path=os.path.expanduser(a.links),
+    try:
+        policy = ns_pairing.PairingPolicy(a.pair_code_ttl, a.pair_durations.split(","), a.pair_max,
+                                          not a.no_persistent_pairing, a.pair_default)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    STATE.update(devices=ns_pairing.DeviceRegistry(a.devices, policy), links_path=os.path.expanduser(a.links),
                  fingerprint=ns_pairing.cert_fingerprint(a.tls_cert) if a.tls_cert and a.tls_key else None)
     STATE.update(mcp_config=a.mcp_config if os.path.exists(os.path.expanduser(a.mcp_config)) else None, mcp=None)
     STATE.update(rag_dir=a.rag_dir, rag_embed=a.rag_embed, rag_embed_gguf=a.rag_embed_gguf,

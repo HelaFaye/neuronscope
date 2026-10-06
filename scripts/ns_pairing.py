@@ -6,7 +6,13 @@ Device pairing and linked hosts: use one machine's models from another
 On the host, the owner creates a one-time pairing code (Studio: Link page, or
 `POST /api/pair/start`). It is shown as a link:
 
-    https://studio.lan:7870/pair#c=K7QX-M2PA-9DTE&fp=3f9a…   (valid 5 minutes, single use)
+    https://studio.lan:7870/pair#c=K7QX-M2PA-9DTE&fp=3f9a…   (single use, short-lived)
+
+Each link grants either persistent access (until revoked) or temporary access
+that expires after a duration the host's owner chose; the host's policy
+(PairingPolicy, Studio's --pair-* flags) sets how long links stay claimable,
+which durations are offered, the longest allowed, and whether persistent
+access may be granted at all.
 
 `fp` is the SHA-256 of the host's TLS certificate. Whoever claims the link
 checks that the server presents exactly that certificate before sending the
@@ -43,8 +49,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ns_security as sec  # noqa: E402
 
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I/L
-CODE_LEN = 12                                        # ~59 bits; single use, 5 minutes, throttled
+CODE_LEN = 12                                        # ~59 bits; single use, short-lived, throttled
 CODE_TTL = 300
+EXPIRED_KEEP = 30 * 86400                            # expired devices stay listed this long, then go
+
+
+def parse_duration(v) -> int:
+    """'90m', '8h', '7d', '2w' or plain seconds -> seconds."""
+    if isinstance(v, (int, float)):
+        return int(v)
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*", str(v).lower())
+    if not m:
+        raise ValueError(f"not a duration: {v!r} (use e.g. 90m, 8h, 7d)")
+    return int(float(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2)])
+
+
+def fmt_duration(sec: int) -> str:
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if sec >= n and sec % n == 0:
+            return f"{sec // n}{unit}"
+    return f"{sec}s"
+
+
+class PairingPolicy:
+    """What the host allows, set by its owner (Studio flags):
+
+    code_ttl          how long a pairing link can be claimed (seconds)
+    presets           temporary-access durations offered when pairing
+    max_ttl           the longest temporary access allowed
+    allow_persistent  whether access that lasts until revoked may be granted
+    default           what a new pairing grants unless chosen otherwise
+                      ("persistent" or a duration)
+    """
+
+    def __init__(self, code_ttl=CODE_TTL, presets=("1h", "8h", "1d", "7d", "30d"), max_ttl="90d",
+                 allow_persistent=True, default="persistent"):
+        self.code_ttl = max(30, min(parse_duration(code_ttl), 86400))
+        self.max_ttl = parse_duration(max_ttl)
+        self.presets = sorted({parse_duration(p) for p in presets if parse_duration(p) <= self.max_ttl})
+        self.allow_persistent = bool(allow_persistent)
+        if default == "persistent" and not self.allow_persistent:
+            default = self.presets[-1] if self.presets else self.max_ttl
+        self.default = None if default == "persistent" else min(parse_duration(default), self.max_ttl)
+
+    def access(self, persistent=None, ttl=None) -> int | None:
+        """Resolve a requested lifetime against the policy -> seconds, or None for persistent."""
+        if persistent is None and ttl in (None, ""):
+            return self.default
+        if persistent:
+            if not self.allow_persistent:
+                raise ValueError("this host only grants temporary access (persistent pairing is disabled)")
+            return None
+        sec = parse_duration(ttl if ttl not in (None, "") else (self.default or self.max_ttl))
+        if sec < 60:
+            raise ValueError("temporary access must last at least a minute")
+        if sec > self.max_ttl:
+            raise ValueError(f"this host allows temporary access of at most {fmt_duration(self.max_ttl)}")
+        return sec
+
+    def describe(self) -> dict:
+        return {"code_ttl": self.code_ttl, "presets": [fmt_duration(p) for p in self.presets],
+                "max_ttl": fmt_duration(self.max_ttl), "allow_persistent": self.allow_persistent,
+                "default": "persistent" if self.default is None else fmt_duration(self.default)}
 
 
 def _hash(token: str) -> str:
@@ -63,43 +129,53 @@ def cert_fingerprint(certfile: str) -> str:
 
 
 class DeviceRegistry:
-    """Paired devices: {id, name, token_sha256, created, last_seen}. Tokens are
+    """Paired devices: {id, name, token_sha256, created, last_seen, expires}.
+    `expires` is None for persistent access (until revoked) or a Unix time for
+    temporary access; an expired device is refused on every request. Tokens are
     never stored, only their hashes; the file is 0600."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, policy: PairingPolicy | None = None):
         self.path = Path(path).expanduser()
+        self.policy = policy or PairingPolicy()
         self.lock = threading.Lock()
-        self.codes: dict[str, float] = {}       # pairing code -> expiry
+        self.codes: dict[str, dict] = {}        # pairing code -> {expires, access}
         try:
             self.devices = json.loads(self.path.read_text()).get("devices", [])
         except (FileNotFoundError, ValueError):
             self.devices = []
+        for d in self.devices:
+            d.setdefault("expires", None)        # files from before expiry existed: persistent
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         sec.write_secret_file(self.path, json.dumps({"devices": self.devices}, indent=1))
 
-    def new_code(self) -> tuple[str, float]:
+    def new_code(self, persistent=None, ttl=None) -> tuple[str, float, int | None]:
+        """-> (code, code expiry, access seconds or None for persistent)."""
+        access = self.policy.access(persistent, ttl)
         code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LEN))
-        exp = time.time() + CODE_TTL
+        exp = time.time() + self.policy.code_ttl
         with self.lock:
             now = time.time()
-            self.codes = {c: e for c, e in self.codes.items() if e > now}
-            self.codes[code] = exp
-        return code, exp
+            self.codes = {c: v for c, v in self.codes.items() if v["expires"] > now}
+            self.codes[code] = {"expires": exp, "access": access}
+        return code, exp, access
 
     def claim(self, code: str, name: str) -> dict | None:
         code = normalize_code(code)
         with self.lock:
-            exp = self.codes.pop(code, None)          # single use, even when expired
-            if exp is None or exp < time.time():
+            c = self.codes.pop(code, None)            # single use, even when expired
+            if c is None or c["expires"] < time.time():
                 return None
             token = sec.generate_token()
+            now = time.time()
             dev = {"id": secrets.token_hex(6), "name": re.sub(r"[^\w .@-]", "", name)[:60] or "device",
-                   "token_sha256": _hash(token), "created": time.time(), "last_seen": None}
+                   "token_sha256": _hash(token), "created": now, "last_seen": None,
+                   "expires": None if c["access"] is None else now + c["access"]}
             self.devices.append(dev)
+            self._prune(now)
             self._save()
-        return {"device_id": dev["id"], "name": dev["name"], "token": token}
+        return {"device_id": dev["id"], "name": dev["name"], "token": token, "expires": dev["expires"]}
 
     def check(self, token: str | None) -> dict | None:
         if not token:
@@ -109,16 +185,41 @@ class DeviceRegistry:
         for d in self.devices:                        # compare against all, in constant time each
             if hmac.compare_digest(d["token_sha256"], h):
                 found = d
-        if found is not None:
-            now = time.time()
-            if not found.get("last_seen") or now - found["last_seen"] > 60:
-                found["last_seen"] = now
-                with self.lock:
-                    self._save()
+        if found is None:
+            return None
+        now = time.time()
+        if found.get("expires") is not None and found["expires"] <= now:
+            return None                               # temporary access has run out
+        if not found.get("last_seen") or now - found["last_seen"] > 60:
+            found["last_seen"] = now
+            with self.lock:
+                self._save()
         return found
 
+    def _prune(self, now: float) -> None:
+        self.devices = [d for d in self.devices
+                        if d.get("expires") is None or d["expires"] > now - EXPIRED_KEEP]
+
     def list(self) -> list[dict]:
-        return [{k: d[k] for k in ("id", "name", "created", "last_seen")} for d in self.devices]
+        now = time.time()
+        out = []
+        for d in self.devices:
+            e = d.get("expires")
+            out.append({**{k: d.get(k) for k in ("id", "name", "created", "last_seen", "expires")},
+                        "persistent": e is None, "expired": e is not None and e <= now})
+        return out
+
+    def update(self, dev_id: str, persistent=None, ttl=None) -> dict:
+        """Change a device's access: make it persistent, or set it to expire `ttl`
+        from now (extend, shorten, or renew an expired device)."""
+        access = self.policy.access(persistent, ttl)
+        with self.lock:
+            d = next((x for x in self.devices if x["id"] == dev_id), None)
+            if d is None:
+                raise KeyError(dev_id)
+            d["expires"] = None if access is None else time.time() + access
+            self._save()
+        return next(x for x in self.list() if x["id"] == dev_id)
 
     def revoke(self, dev_id: str) -> bool:
         with self.lock:
@@ -199,7 +300,8 @@ def claim(link: str, name: str) -> dict:
     if base.startswith("https") and not fp:
         raise ValueError("an https pairing link must carry the certificate fingerprint (fp=)")
     r = request(base, "POST", "/api/pair/claim", {"code": code, "name": name}, fingerprint=fp)
-    return {"url": base, "token": r["token"], "device_id": r["device_id"], "fingerprint": fp}
+    return {"url": base, "token": r["token"], "device_id": r["device_id"], "fingerprint": fp,
+            "expires": r.get("expires")}
 
 
 def main(argv=None) -> int:
@@ -213,7 +315,10 @@ def main(argv=None) -> int:
     r = claim(a.link, a.name)
     sec.write_secret_file(Path(a.out).expanduser(), r["token"])
     print(json.dumps({"url": r["url"], "device_id": r["device_id"], "fingerprint": r["fingerprint"],
-                      "token_file": str(Path(a.out).expanduser())}, indent=1))
+                      "token_file": str(Path(a.out).expanduser()),
+                      "access": "persistent (until revoked)" if r["expires"] is None else
+                      "temporary, until " + time.strftime("%Y-%m-%d %H:%M", time.localtime(r["expires"]))},
+                     indent=1))
     print("use it as: Authorization: Bearer $(cat token_file); pin the fingerprint, or pass the cert "
           "with --cafile in NeuronScope clients", file=sys.stderr)
     return 0
