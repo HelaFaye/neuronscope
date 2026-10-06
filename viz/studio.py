@@ -71,7 +71,7 @@ STATE = {"models_dirs": [], "server_bin": None, "settings_path": None,
          "chats_dir": None, "stats": None, "min_graded": 20, "min_subject": 5,
          "halluc_cost": 1.0, "traces_dir": None, "cett": None, "score_ngl": 0, "score_every": 1,
          "idle_ttl": 0, "jit": True,
-         "backend_port": 8080, "tls": False}
+         "backend_port": 8080, "tls": False, "max_workers": 2, "worker_idle": 300}
 ACTIVITY = {"last": time.time(), "active": 0}
 ACTIVITY_LOCK = threading.Lock()
 MAX_BODY = 64 * 1024 * 1024        # chat bodies may carry base64 images
@@ -622,6 +622,31 @@ def start_server(model, settings, port):
         # Something else (often an orphaned llama-server) holds the port and would
         # answer our health check while our own server fails to bind.
         return False, f"port {port} is already in use; stop whatever holds it or pass --backend-port"
+    try:
+        cmd, env = server_cmd(model, settings, port)
+    except ValueError as e:
+        return False, str(e)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, env=env)
+    ok, why = wait_healthy(port, proc)
+    if not ok:
+        err = ""
+        try:
+            proc.terminate()
+            err = (proc.stderr.read() or b"").decode(errors="replace")[-800:]
+        except Exception:
+            pass
+        return False, f"{why}\n{err}"
+    PROC.update({"proc": proc, "model": model, "port": port,
+                 "args": cmd, "started": time.time(),
+                 "lora": settings.get("lora") or None,
+                 "lora_scale": settings.get("lora_scale", 1.0)})
+    return True, "ready"
+
+
+def server_cmd(model, settings, port):
+    """llama-server argv and environment for `model` with `settings`.
+    Raises ValueError on a setting that is not safe to pass through."""
     cmd = [STATE["server_bin"], "-m", model["path"],
            "-ngl", str(settings["ngl"]), "-c", str(settings["ctx"]),
            "-b", str(settings["batch"]),
@@ -646,7 +671,7 @@ def start_server(model, settings, port):
     draft = settings.get("draft_model")
     if draft:
         if not os.path.exists(draft):
-            return False, f"draft model not found: {draft}"
+            raise ValueError(f"draft model not found: {draft}")
         cmd += ["-md", draft,
                 "--draft-max", str(settings.get("draft_max", 16)),
                 "--draft-min", str(settings.get("draft_min", 4))]
@@ -664,39 +689,23 @@ def start_server(model, settings, port):
     gpus = str(settings.get("gpus") or "").replace(" ", "")
     if gpus:
         if not re.fullmatch(r"\d+(,\d+)*", gpus):
-            return False, "visible GPUs must look like 0,1,2"
+            raise ValueError("visible GPUs must look like 0,1,2")
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpus}
     if settings.get("split_mode"):
         if settings["split_mode"] not in ("layer", "row", "none"):
-            return False, "split mode must be layer, row or none"
+            raise ValueError("split mode must be layer, row or none")
         cmd += ["-sm", settings["split_mode"]]
     ts = str(settings.get("tensor_split") or "").replace(" ", "")
     if ts:
         if not re.fullmatch(r"\d+(\.\d+)?(,\d+(\.\d+)?)*", ts):
-            return False, "tensor split must look like 1,1,1,1 or 3,1"
+            raise ValueError("tensor split must look like 1,1,1,1 or 3,1")
         cmd += ["-ts", ts]
     mg = settings.get("main_gpu")
     if mg not in (None, "") and int(mg) >= 0:
         cmd += ["-mg", str(int(mg))]
     if settings.get("extra"):
         cmd += settings["extra"].split()
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, env=env)
-    ok, why = wait_healthy(port, proc)
-    if not ok:
-        err = ""
-        try:
-            proc.terminate()
-            err = (proc.stderr.read() or b"").decode(errors="replace")[-800:]
-        except Exception:
-            pass
-        return False, f"{why}\n{err}"
-    PROC.update({"proc": proc, "model": model, "port": port,
-                 "args": cmd, "started": time.time(),
-                 "lora": settings.get("lora") or None,
-                 "lora_scale": settings.get("lora_scale", 1.0)})
-    return True, "ready"
+    return cmd, env
 
 
 def stop_server():
@@ -1194,6 +1203,367 @@ def list_traces(limit=200):
     return out
 
 
+# ------------------------------------------------------------ worker models
+
+class WorkerPool:
+    """llama-server processes for the director's tasks, next to the chat model
+    Studio serves. Placement uses every accelerator scripts/accelerators.py
+    finds (ROCm, Vulkan, CUDA, Metal, the CPU), AMD first by default, each
+    device with its own llama-server build, base settings and environment from
+    the hardware config, and a project's own per-device settings on top. Idle
+    workers stop after --worker-idle seconds, sooner when a new one needs room."""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.workers = {}              # key -> worker
+        self._devs = {"t": 0.0, "list": []}
+
+    def devices(self, refresh=False):
+        import accelerators
+        if refresh or time.time() - self._devs["t"] > 10:
+            cfg = accelerators.load_config(STATE.get("hardware_path"))
+            self._devs = {"t": time.time(), "list": accelerators.detect(cfg),
+                          "prefer": tuple(cfg.get("prefer") or accelerators.PREFER)}
+        return self._devs["list"]
+
+    def _reserved(self):
+        r = {}
+        for w in self.workers.values():
+            for dev, b in w["booked"].items():
+                r[dev] = r.get(dev, 0) + b
+        return r
+
+    @staticmethod
+    def need_bytes(model, ctx):
+        # Weights, plus KV cache and scratch: ~0.5 GiB, more for long contexts.
+        return int(model["size"] * 1.1) + int(512 * 2**20 * max(1, (ctx or 8192) / 8192))
+
+    def _find(self, model, allowed):
+        for w in self.workers.values():
+            if w["model"]["path"] == model["path"] and (not allowed or set(w["device_ids"]) <= set(allowed)):
+                return w
+        return None
+
+    def acquire(self, model, allowed=None, project_settings=None, timeout=900):
+        """-> worker dict (busy += 1), starting the model if needed. Other
+        callers of a worker that is still loading wait until it is healthy."""
+        import accelerators
+        allowed = list(allowed or [])
+        if not allowed and server_running() and PROC["model"] and PROC["model"]["path"] == model["path"]:
+            return {"url": f"http://127.0.0.1:{PROC['port']}/v1", "shared": True, "model": model}
+        with self.lock:
+            w = self._find(model, allowed)
+            if w and w["proc"].poll() is None:
+                w["busy"] += 1
+                w["last"] = time.time()
+                starting = False
+            else:
+                if w:
+                    self._stop(w)
+                base = {**DEFAULTS, **load_settings().get(_key(model["path"]), {})}
+                while True:
+                    placed = None
+                    if len(self.workers) < STATE["max_workers"]:
+                        devs = self.devices()
+                        placed = accelerators.place(devs, self.need_bytes(model, base.get("ctx")),
+                                                    self._reserved(), allowed, self._devs.get("prefer"))
+                    if placed:
+                        break
+                    idle = sorted((x for x in self.workers.values() if x["busy"] == 0), key=lambda x: x["last"])
+                    if not idle:
+                        where = f" on {', '.join(allowed)}" if allowed else ""
+                        raise RuntimeError(f"no room for {model['id']}{where}: "
+                                           f"{len(self.workers)} worker(s) busy (max {STATE['max_workers']})")
+                    self._stop(idle[0])
+                devs = placed["devices"]
+                settings = dict(base)
+                for d in devs:
+                    settings.update(d.get("settings") or {})
+                    settings.update((project_settings or {}).get(d["id"]) or {})
+                settings.update({"gpus": "", "ngl": placed["ngl"] if placed["ngl"] == 0 else settings.get("ngl", 99),
+                                 "split_mode": "layer" if placed["split"] else "",
+                                 "tensor_split": ",".join(map(str, placed["split"])) if placed["split"] else ""})
+                port = STATE["backend_port"] + 10
+                used = {x["port"] for x in self.workers.values()}
+                while port in used or port_busy(port):
+                    port += 1
+                binary = devs[0].get("server") or STATE["server_bin"]
+                if not binary:
+                    raise RuntimeError(f"no llama-server for {devs[0]['backend']}: set servers.{devs[0]['backend']} "
+                                       "in the hardware config, or pass --server")
+                cmd, env = server_cmd(model, settings, port)
+                cmd[0] = binary
+                env = {**(env or os.environ), **accelerators.launch_env(devs)}
+                need = self.need_bytes(model, settings.get("ctx"))
+                tot = sum(max(1, x) for x in (placed["split"] or [1]))
+                booked = {d["id"]: int(need * (placed["split"][i] if placed["split"] else 1) / tot)
+                          for i, d in enumerate(devs)}
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+                w = {"model": model, "proc": proc, "port": port, "url": f"http://127.0.0.1:{port}/v1",
+                     "device_ids": [d["id"] for d in devs], "backend": devs[0]["backend"],
+                     "where": " + ".join(f"{d['id']} ({d['name']})" for d in devs), "booked": booked,
+                     "busy": 1, "last": time.time(), "started": time.time(), "shared": False,
+                     "ready": threading.Event(), "error": None, "unmeasured": bool(placed.get("unmeasured"))}
+                self.workers[f"{model['path']}|{','.join(w['device_ids'])}"] = w
+                starting = True
+        if starting:
+            ok, why = wait_healthy(w["port"], w["proc"])
+            if not ok:
+                err = ""
+                try:
+                    w["proc"].terminate()
+                    err = (w["proc"].stderr.read() or b"").decode(errors="replace")[-500:]
+                except Exception:
+                    pass
+                w["error"] = f"worker {model['id']} on {w['where']} failed to start: {why}\n{err}"
+                with self.lock:
+                    self._stop(w)
+            w["ready"].set()
+        elif not w["ready"].wait(timeout):
+            self.release(w)
+            raise RuntimeError(f"worker {model['id']} still loading after {timeout}s")
+        if w["error"]:
+            raise RuntimeError(w["error"])
+        return w
+
+    def release(self, w):
+        if w.get("shared"):
+            return
+        with self.lock:
+            w["busy"] = max(0, w["busy"] - 1)
+            w["last"] = time.time()
+
+    def _stop(self, w):
+        for k, v in list(self.workers.items()):
+            if v is w:
+                self.workers.pop(k)
+        p = w["proc"]
+        if p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    def stop(self, path=None):
+        with self.lock:
+            for w in list(self.workers.values()):
+                if path is None or w["model"]["path"] == path:
+                    self._stop(w)
+
+    def reap(self, idle):
+        with self.lock:
+            for w in list(self.workers.values()):
+                if not w["ready"].is_set():
+                    continue
+                if w["proc"].poll() is not None or (w["busy"] == 0 and time.time() - w["last"] > idle):
+                    self._stop(w)
+
+    def list(self):
+        with self.lock:
+            return [{"model": w["model"]["id"], "where": w["where"], "backend": w["backend"],
+                     "devices": w["device_ids"], "port": w["port"], "busy": w["busy"],
+                     "loading": not w["ready"].is_set(),
+                     "idle_s": round(time.time() - w["last"]), "up_s": round(time.time() - w["started"]),
+                     "alive": w["proc"].poll() is None} for w in self.workers.values()]
+
+
+class ContextTooLong(RuntimeError):
+    pass
+
+
+POOL = WorkerPool()
+
+
+def worker_chat(url, alias, messages, max_tokens=4096, timeout=1800):
+    body = json.dumps({"model": alias, "messages": messages, "max_tokens": max_tokens,
+                       "temperature": 0.3, "stream": False}).encode()
+    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read()).get("error", {})
+        except Exception:
+            msg = {}
+        text = msg.get("message") if isinstance(msg, dict) else str(msg)
+        if isinstance(msg, dict) and msg.get("type") == "exceed_context_size_error":
+            raise ContextTooLong(f"{text} (pick a model with a longer context, or shorten the task's inputs)")
+        raise RuntimeError(f"HTTP {e.code}: {text or e.reason}")
+    return d["choices"][0]["message"].get("content") or ""
+
+
+# ------------------------------------------------------------ the director
+
+DIRECTOR = {"store": None, "running": set(), "lock": threading.Lock(), "notes": {}}
+
+
+def _director():
+    import director
+    return director
+
+
+def assign_candidates():
+    st = load_settings()
+    out, sums = [], {}
+    for m in scan_models():
+        fit = fit_estimate(m["size"])
+        out.append({"id": m["id"], "size": m["size"], "fits": fit.get("ok"), "context": m.get("context")})
+        try:
+            s = model_summary(m, st)
+            if s.get("eligible"):
+                sums[m["id"]] = s
+        except Exception:
+            pass
+    return out, sums
+
+
+def assign_fn_for(plan):
+    dr = _director()
+    cands, sums = assign_candidates()
+
+    def fn(t):
+        return dr.assign(t, cands, sums, plan["policy"], STATE["min_graded"], STATE["min_subject"],
+                         STATE["halluc_cost"])
+    return fn
+
+
+def next_model_fn(t):
+    """After repeated rejections: the best model other than the one that failed."""
+    dr = _director()
+    cands, sums = assign_candidates()
+    cur = (t.get("assignee") or {}).get("model")
+    tried = {a.get("model") for a in t["attempts"]} | {cur}
+    return dr.assign(t, cands, sums, {}, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"],
+                     exclude=tuple(x for x in tried if x))
+
+
+def run_task(pid, tid):
+    """One attempt at one task, on its assigned worker. Runs in a thread."""
+    dr = _director()
+    store = DIRECTOR["store"]
+    text = err = check = None
+    fatal = False
+    try:
+        with store.lock(pid):
+            plan = store.load(pid)
+            t = dr.task(plan, tid)
+            msgs = dr.worker_messages(plan, t)
+            mid = (t.get("assignee") or {}).get("model")
+            policy = dict(plan["policy"])
+        model = find_model(mid)
+        if model is None:
+            raise RuntimeError(f"assigned model {mid!r} is not in the models directories")
+        w = POOL.acquire(model, policy.get("devices"), policy.get("device_settings"))
+        try:
+            alias = load_settings().get(_key(model["path"]), {}).get("served_name") or model["id"]
+            text = worker_chat(w["url"], alias, msgs)
+        finally:
+            POOL.release(w)
+        if policy.get("check") and STATE["cett"] and text:
+            try:
+                r = trace_reply(model, msgs, text)
+                check = {"id": r["id"], "url": r["url"], "max": r["max"], "mean": r["mean"],
+                         "n_flagged": len(r["flagged"]), "flagged": bool(r["flagged"])}
+            except ValueError:
+                check = None            # no classifier for this model: unchecked, and the page says so
+            except Exception as e:
+                check = {"error": str(e)[:300]}
+    except ContextTooLong as e:
+        err, fatal = str(e), True
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        with store.lock(pid):
+            plan = store.load(pid)
+            t = dr.task(plan, tid)
+            if t["status"] == "running":
+                dr.finish_attempt(plan, t, text, check=check, error=err, fatal=fatal)
+                store.save(plan)
+        with DIRECTOR["lock"]:
+            DIRECTOR["running"].discard((pid, tid))
+
+
+def director_loop():
+    """Start ready tasks of running projects, within each project's parallel
+    limit. Tasks only ever start from an approved plan that a person started."""
+    dr = _director()
+    while True:
+        time.sleep(STATE.get("director_tick", 2))
+        store = DIRECTOR["store"]
+        if store is None:
+            continue
+        try:
+            POOL.reap(STATE["worker_idle"])
+            for row in store.list():
+                if row["status"] != "running":
+                    continue
+                pid = row["id"]
+                with store.lock(pid):
+                    plan = store.load(pid)
+                    with DIRECTOR["lock"]:
+                        mine = sum(1 for p, _ in DIRECTOR["running"] if p == pid)
+                    slots = plan["policy"]["max_parallel"] - mine
+                    started = []
+                    for t in dr.ready_tasks(plan)[:max(0, slots)]:
+                        dr.start_attempt(plan, t)
+                        started.append(t["id"])
+                    if started:
+                        store.save(plan)
+                for tid in started:
+                    with DIRECTOR["lock"]:
+                        DIRECTOR["running"].add((pid, tid))
+                    threading.Thread(target=run_task, args=(pid, tid), daemon=True).start()
+        except Exception as e:
+            print(f"[studio] director: {e}", file=sys.stderr)
+
+
+def recover_projects():
+    """After a restart, attempts that were running have no thread behind them."""
+    dr = _director()
+    store = DIRECTOR["store"]
+    for row in store.list():
+        with store.lock(row["id"]):
+            plan = store.load(row["id"])
+            hit = False
+            for t in plan["tasks"]:
+                if t["status"] == "running":
+                    dr.finish_attempt(plan, t, None, error="Studio restarted during this attempt")
+                    hit = True
+            if hit:
+                store.save(plan)
+
+
+def refine_project(pid, model_id):
+    dr = _director()
+    store = DIRECTOR["store"]
+    note = None
+    try:
+        with store.lock(pid):
+            plan = store.load(pid)
+            msgs = dr.refine_messages(plan)
+        model = find_model(model_id) if model_id else None
+        if model is None:
+            raise RuntimeError("choose a model to plan with")
+        w = POOL.acquire(model, plan["policy"].get("devices"), plan["policy"].get("device_settings"))
+        try:
+            alias = load_settings().get(_key(model["path"]), {}).get("served_name") or model["id"]
+            text = worker_chat(w["url"], alias, msgs, max_tokens=4096)
+        finally:
+            POOL.release(w)
+        refined = dr.parse_refined(text)
+        with store.lock(pid):
+            plan = store.load(pid)
+            dr.replace_tasks(plan, refined, "director", f"re-planned by {model['id']}")
+            store.save(plan)
+        note = f"re-planned by {model['id']}: {len(refined)} task(s)"
+    except Exception as e:
+        note = f"re-planning failed, draft kept: {e}"
+    DIRECTOR["notes"][pid] = {"at": time.time(), "text": note, "busy": False}
+
+
 def ensure_loaded(model, own=1):
     """JIT: load `model` with its saved settings unless it is already serving.
     `own` is how many in-flight requests belong to the caller."""
@@ -1461,6 +1831,109 @@ class Handler(BaseHTTPRequestHandler):
                 LINKS["cache"].pop(name, None)
             return self._json(200, {"ok": True})
 
+    # ---------------------------------------------------------- projects
+    def _projects_get(self):
+        if not self._owner_only():
+            return
+        dr = _director()
+        store = DIRECTOR["store"]
+        if self.path == "/projects":
+            import projects_page
+            body = projects_page.PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/api/workers":
+            return self._json(200, {"workers": POOL.list(), "max_workers": STATE["max_workers"],
+                                    "devices": [{k: d.get(k) for k in ("id", "backend", "name", "vendor", "memory_total",
+                                                                       "memory_free", "unified", "estimated", "enabled",
+                                                                       "twin_of")} for d in POOL.devices()],
+                                    "hardware_config": STATE.get("hardware_path")})
+        if self.path == "/api/projects":
+            return self._json(200, {"projects": store.list(),
+                                    "models": [{"id": m["id"], "size": m["size"]} for m in scan_models()],
+                                    "subjects": dr.sc.SUBJECTS, "checks": bool(STATE["cett"])})
+        m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)", self.path)
+        if m:
+            try:
+                plan = store.load(m.group(1))
+            except dr.PlanError as e:
+                return self._json(404, {"error": str(e)})
+            plan.pop("source", None)
+            plan["skills"] = dr.skill_breakdown(plan["tasks"])
+            plan["gaps"] = dr.coverage_gaps(plan["tasks"], plan.get("census"))
+            plan["ready"] = [t["id"] for t in dr.ready_tasks(plan)] if plan["status"] == "running" else []
+            plan["note"] = DIRECTOR["notes"].get(plan["id"])
+            return self._json(200, plan)
+        return self._json(404, {"error": "not found"})
+
+    def _projects_post(self):
+        if not self._owner_only():
+            return
+        dr = _director()
+        store = DIRECTOR["store"]
+        if self.path == "/api/workers/stop":
+            req = self._read()
+            m = find_model(req.get("model")) if req.get("model") else None
+            POOL.stop(m["path"] if m else None)
+            return self._json(200, {"workers": POOL.list()})
+        try:
+            if self.path == "/api/projects":
+                req = self._read(4 * 1024 * 1024)
+                text = str(req.get("text") or "")
+                if not text.strip():
+                    return self._json(400, {"error": "describe the project: paste its notes, task list or README"})
+                census = dr.analyze_repo(req["repo"]) if req.get("repo") else None
+                plan = dr.new_plan(str(req.get("title") or ""), str(req.get("goal") or ""),
+                                   dr.analyze_text(text), source=text, census=census)
+                store.save(plan)
+                return self._json(200, {"id": plan["id"]})
+            m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)/(edit|approve|start|pause|decide|review|answer|"
+                             r"policy|refine|delete)", self.path)
+            if not m:
+                return self._json(404, {"error": "not found"})
+            pid, action = m.groups()
+            req = self._read(1024 * 1024)
+            if action == "refine":
+                note = DIRECTOR["notes"].get(pid)
+                if note and note.get("busy"):
+                    return self._json(409, {"error": "already re-planning"})
+                DIRECTOR["notes"][pid] = {"at": time.time(), "text": "re-planning…", "busy": True}
+                threading.Thread(target=refine_project, args=(pid, req.get("model")), daemon=True).start()
+                return self._json(200, {"ok": True})
+            with store.lock(pid):
+                plan = store.load(pid)
+                out = {}
+                if action == "delete":
+                    if plan["status"] == "running":
+                        return self._json(409, {"error": "pause the project first"})
+                    import shutil
+                    shutil.rmtree(store.root / pid)
+                    return self._json(200, {"ok": True})
+                if action == "edit":
+                    out = dr.edit(plan, req.get("changes") or [], by="human", reason=str(req.get("reason") or ""))
+                elif action == "approve":
+                    dr.approve(plan, assign_fn=assign_fn_for(plan))
+                elif action in ("start", "pause"):
+                    dr.set_running(plan, action == "start")
+                elif action == "decide":
+                    out = dr.decide(plan, str(req.get("proposal")), bool(req.get("accept")),
+                                    note=str(req.get("note") or ""))
+                elif action == "review":
+                    out = dr.review(plan, str(req.get("task")), bool(req.get("accept")),
+                                    str(req.get("feedback") or ""), next_model_fn=next_model_fn)
+                elif action == "answer":
+                    out = dr.answer(plan, str(req.get("task")), [str(x) for x in req.get("answers") or []])
+                elif action == "policy":
+                    out = dr.set_policy(plan, req.get("policy") or {})
+                store.save(plan)
+            return self._json(200, {"ok": True, "result": out, "version": plan["version"], "status": plan["status"]})
+        except dr.PlanError as e:
+            return self._json(400, {"error": str(e)})
+
     def _jobs_off(self):
         return self._json(403, {"error": STATE.get("jobs_off") or "jobs are disabled"})
 
@@ -1589,6 +2062,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/traces":
             return self._json(200, {"traces": list_traces()})
+        if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
+            return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
             if self._role != "owner":
                 return self._json(403, {"error": "jobs need the owner"})
@@ -1756,6 +2231,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path in ("/api/jobs", "/api/jobs/cancel"):
                 return self._jobs_post()
+
+            if self.path.startswith("/api/projects") or self.path == "/api/workers/stop":
+                return self._projects_post()
 
             if self.path == "/api/trace":
                 req = self._read(MAX_BODY)
@@ -2131,6 +2609,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
   <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
   <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
   <button id="theme" title="toggle theme">◐</button>
   <button id="unload" disabled>Unload</button>
@@ -2656,6 +3135,14 @@ def main(argv=None):
     p.add_argument("--score-ngl", type=int, default=0,
                    help="GPU layers for activation scoring (0 keeps it off the GPU llama-server is using)")
     p.add_argument("--score-every", type=int, default=1, help="score one reply in N")
+    p.add_argument("--projects-dir", default=os.path.expanduser("~/.neuronscope/projects"),
+                   help="director projects: plans, results and history (/projects)")
+    p.add_argument("--max-workers", type=int, default=2,
+                   help="worker models the director may run at once, besides the chat model")
+    p.add_argument("--worker-idle", type=int, default=300, help="stop a worker model after N idle seconds")
+    p.add_argument("--hardware", default=os.path.expanduser("~/.neuronscope/hardware.json"),
+                   help="accelerators for worker models: llama-server per backend (rocm, vulkan, cuda, metal, "
+                        "cpu), per-device settings, devices to skip (see scripts/accelerators.py)")
     p.add_argument("--traces-dir", default=os.path.expanduser("~/.neuronscope/traces"),
                    help="where per-reply checks are saved (open them in the 3D view or timeline.py)")
     p.add_argument("--idle-ttl", type=int, default=0, help="unload the model after N idle seconds (0 = never)")
@@ -2696,6 +3183,10 @@ def main(argv=None):
     STATE["settings_path"] = os.path.expanduser(a.settings)
     STATE["chats_dir"] = os.path.expanduser(a.chats_dir)
     STATE["traces_dir"] = os.path.expanduser(a.traces_dir)
+    STATE.update(max_workers=max(1, a.max_workers), worker_idle=max(30, a.worker_idle),
+                 hardware_path=os.path.expanduser(a.hardware))
+    import director
+    DIRECTOR["store"] = director.ProjectStore(os.path.expanduser(a.projects_dir))
     os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
     STATE["token"] = sec.resolve_token(a.token, a.token_file) or None
     STATE["download_dir"] = (os.path.expanduser(a.download_dir)
@@ -2762,12 +3253,15 @@ def main(argv=None):
             srv.socket, server_side=True, do_handshake_on_connect=False)
     threading.Thread(target=idle_reaper, daemon=True).start()
     threading.Thread(target=score_worker, daemon=True).start()
+    recover_projects()
+    threading.Thread(target=director_loop, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         stop_server()
+        POOL.stop()
         if EMBED["proc"] is not None and EMBED["proc"].poll() is None:
             EMBED["proc"].terminate()
         if STATE.get("mcp") is not None:

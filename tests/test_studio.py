@@ -669,3 +669,92 @@ def test_check_reply_saves_trace_and_serves_3d_view(studio_srv, tmp_path):
     finally:
         studio._SCORERS.clear()
         studio.STATE.update(cett=None)
+
+
+_LOOP = {}
+
+
+def _start_director(tmp_path):
+    import director
+    studio.DIRECTOR["store"] = director.ProjectStore(tmp_path / "projects")
+    studio.STATE.update(max_workers=2, worker_idle=300, director_tick=0.2)
+    if not _LOOP:
+        _LOOP["t"] = threading.Thread(target=studio.director_loop, daemon=True)
+        _LOOP["t"].start()
+
+
+def _wait(pred, timeout=40):
+    end = time.time() + timeout
+    while time.time() < end:
+        v = pred()
+        if v:
+            return v
+        time.sleep(0.2)
+    raise AssertionError("timed out")
+
+
+def test_director_end_to_end(studio_srv, tmp_path):
+    _start_director(tmp_path)
+    text = ("- Shaders: write GLSL vertex and fragment shaders for the terrain mesh.\n"
+            "- Build: set up the CMake build with the toolchain and dependencies.\n")
+    code, r = call(studio_srv, "/api/projects", {"title": "Demo", "goal": "a renderer", "text": text})
+    assert code == 200, r
+    pid = r["id"]
+    code, p = call(studio_srv, f"/api/projects/{pid}")
+    assert [t["labels"][0] for t in p["tasks"]] == ["graphics", "systems"]
+    assert set(p["skills"]) == {"graphics", "systems"} and p["status"] == "draft"
+    # Nothing runs from a draft.
+    assert call(studio_srv, f"/api/projects/{pid}/start", {})[0] == 400
+    call(studio_srv, f"/api/projects/{pid}/edit", {"changes": [{"op": "update", "id": "T1",
+                                                                "fields": {"depends_on": ["T2"]}}]})
+    code, r = call(studio_srv, f"/api/projects/{pid}/approve", {})
+    assert code == 200, r
+    code, p = call(studio_srv, f"/api/projects/{pid}")
+    # No graded results: the largest model that fits, and the plan says why.
+    chosen = p["tasks"][0]["assignee"]["model"]
+    assert chosen in (CODER, VLM) and all(t["assignee"]["model"] == chosen for t in p["tasks"])
+    assert "largest" in p["tasks"][0]["assignee"]["reason"]
+    call(studio_srv, f"/api/projects/{pid}/start", {})
+    p = _wait(lambda: (lambda p: p if d_status(p, "T2") == "review" else None)(call(studio_srv, f"/api/projects/{pid}")[1]))
+    a = p["tasks"][1]["attempts"][0]
+    assert a["text"].startswith(f"model={chosen}") and a["report"]["status"] == "unreported"
+    assert d_status(p, "T1") == "todo"                      # waits for T2's review
+    _, w = call(studio_srv, "/api/workers")
+    assert [x["model"] for x in w["workers"]] == [chosen] and w["workers"][0]["busy"] == 0
+    call(studio_srv, f"/api/projects/{pid}/review", {"task": "T2", "accept": False, "feedback": "add a CI job"})
+    p = _wait(lambda: (lambda p: p if d_status(p, "T2") == "review" and len(p["tasks"][1]["attempts"]) == 2
+                       else None)(call(studio_srv, f"/api/projects/{pid}")[1]))
+    call(studio_srv, f"/api/projects/{pid}/review", {"task": "T2", "accept": True})
+    p = _wait(lambda: (lambda p: p if d_status(p, "T1") == "review" else None)(call(studio_srv, f"/api/projects/{pid}")[1]))
+    call(studio_srv, f"/api/projects/{pid}/review", {"task": "T1", "accept": True})
+    _, p = call(studio_srv, f"/api/projects/{pid}")
+    assert p["status"] == "done"
+    assert [h["action"] for h in p["history"]][:3] == ["created", "edit", "approved"]
+    call(studio_srv, "/api/workers/stop", {})
+    assert call(studio_srv, "/api/workers")[1]["workers"] == []
+    page = urllib.request.urlopen(studio_srv + "/projects").read().decode()
+    assert "Approve plan" in page
+
+
+def d_status(p, tid):
+    return next(t["status"] for t in p["tasks"] if t["id"] == tid)
+
+
+def test_projects_are_owner_only(studio_srv, tmp_path):
+    """Plans hold private project text and start models: paired devices get neither."""
+    _start_director(tmp_path)
+    reg = studio.STATE["devices"]
+    code, _, _ = reg.new_code()
+    dev = reg.claim(code, "phone")
+    studio.STATE["token"] = "o" * 40
+    try:
+        for path, body in (("/api/projects", None), ("/projects", None), ("/api/workers", None),
+                           ("/api/projects", {"text": "- do things with the build system"})):
+            req = urllib.request.Request(studio_srv + path, data=None if body is None else json.dumps(body).encode(),
+                                         headers={"Authorization": f"Bearer {dev['token']}",
+                                                  "Content-Type": "application/json"})
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req, timeout=10)
+            assert e.value.code == 403, path
+    finally:
+        studio.STATE["token"] = None

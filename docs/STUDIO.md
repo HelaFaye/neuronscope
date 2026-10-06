@@ -309,3 +309,9 @@ python viz/studio.py --host 0.0.0.0 --token-file ~/.config/neuronscope/studio.to
   only accept JSON requests, so a cross-site form cannot start one.
 
 See [SECURITY.md](SECURITY.md).
+
+## Projects
+
+`/projects` splits a project into tasks by skill, keeps a plan you approve,
+starts worker models on whatever accelerators the machine has (AMD first), and
+sends every result back for review. See [DIRECTOR.md](DIRECTOR.md).

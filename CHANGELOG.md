@@ -69,6 +69,24 @@
   phrased as tasks rather than quiz questions; keywords match at word starts
   and count once per subject. `evaluate --tasks FILE` scores multi-label task
   files kept outside the repo.
+- Director (`scripts/director.py`, Studio `/projects`): a description (and
+  optionally a checkout) becomes skill-labelled tasks; a versioned plan you
+  approve; after approval the director only proposes changes (follow-ups,
+  a different model after repeated rejections) and you accept or reject them;
+  each task gets the model whose graded results fit its skills (else the
+  default, else the largest that fits, skipping models whose context is too
+  short); workers end with a JSON report; results wait for review by policy
+  (all, flagged, none); rejected work goes back with your feedback; blocked
+  tasks ask questions; errors back off. Owner only.
+- Worker models run as separate llama-servers placed by
+  `scripts/accelerators.py` on ROCm, Vulkan, CUDA, Metal or the CPU, AMD
+  first: per-device llama-server builds, settings, environment and pinned ROCm
+  releases (`~/.neuronscope/hardware.json`), per-project device limits and
+  settings, APU memory counted as VRAM plus GTT and shared with the CPU, Vega
+  APUs (gfx90c) on Vulkan unless ROCm is opted into, automatic
+  `HSA_OVERRIDE_GFX_VERSION` for RDNA2/3 small dies, multi-GPU layer splits
+  before estimated-memory devices. `--max-workers`, `--worker-idle`, `--hardware`.
+- Studio's llama-server command building is shared (`server_cmd`).
 - Hub: Replay lists saved traces (Studio checks and `runs/`) to pick from.
 - Docs: VISUALIZATION.md "Which view when" and how to read the 3D views.
 - Removed tabs with nothing behind them: the planned Recipes tab, and the

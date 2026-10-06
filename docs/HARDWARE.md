@@ -146,6 +146,80 @@ distro-built PyTorch (`./install.sh --system-torch` creates a venv with system
 site packages) over mixing a wheel with kernels from another ROCm major
 version.
 
+## Worker devices
+
+The director's worker models (see [DIRECTOR.md](DIRECTOR.md)) go wherever
+`scripts/accelerators.py` finds room, AMD first. It reads `nvidia-smi`,
+`/sys/class/drm` (AMD VRAM and GTT, with or without ROCm), `rocminfo` (run
+with `HSA_OVERRIDE_GFX_VERSION` unset, so it reports the real chip),
+`vulkaninfo --summary`, and the platform (Metal on Apple silicon). Each device
+gets an id like `rocm:0` or `vulkan:1`.
+
+```bash
+python scripts/accelerators.py      # devices, free memory, notes, which server drives each
+```
+
+Configuration lives in `~/.neuronscope/hardware.json` (Studio `--hardware`):
+
+```json
+{
+  "prefer": ["amd", "nvidia", "intel", "apple", "arm"],
+  "servers": {"vulkan": "~/llama.cpp/build-vulkan/bin/llama-server",
+              "rocm":   "~/llama.cpp/build-rocm/bin/llama-server"},
+  "devices": {
+    "rocm:0":   {"enabled": true, "reserve_gib": 3,
+                 "rocm_path": "/opt/rocm-6.2.4",
+                 "server": "~/llama.cpp/build-rocm624/bin/llama-server",
+                 "settings": {"threads": 8, "ctx": 8192},
+                 "env": {"HSA_OVERRIDE_GFX_VERSION": "9.0.0"}},
+    "vulkan:0": {"enabled": false}
+  },
+  "manual": [{"id": "vulkan:2", "backend": "vulkan", "index": 2, "name": "eGPU", "memory_total_gib": 8}]
+}
+```
+
+- `servers`: a llama-server build per backend; a device's own `server` wins.
+  Without either, Studio's `--server` is used.
+- `rocm_path`: pin a ROCm/HIP release for one device. Its llama-server gets
+  `ROCM_PATH`, `HIP_PATH` and `LD_LIBRARY_PATH` for that release; nothing else
+  on the machine changes. A path that does not exist turns the device off.
+- `env`: only `HSA_*`, `HIP_*`, `ROCR_*`, `ROCM_*`, `GGML_*`, `CUDA_*`, `MTL_*`,
+  `VK_*`, `AMD_*` and `RADV_*` variables pass; anything else (`LD_PRELOAD`, …)
+  is dropped.
+- `settings`: `ngl`, `ctx`, `batch`, `threads`, `flash_attn`, `cache_type`,
+  `parallel`, `extra`. A project can override these per device in its policy.
+- `reserve_gib`: memory to leave alone (default 1 GiB on shared-memory
+  devices, 0.5 GiB on discrete GPUs).
+- `manual`: devices detection misses.
+
+**One GPU, two entries.** A GPU reachable natively and through Vulkan is
+listed twice; the Vulkan entry is off while the native one is on, so one GPU is
+never booked twice.
+
+**AMD APUs.** Usable memory is the VRAM carve-out plus GTT, which is system
+RAM: the APU and CPU workers share it, and placement counts it once. On Linux
+the GTT size is a kernel setting (`amdgpu.gttsize`, in MiB); raise it if
+models that fit in RAM do not fit on the iGPU.
+
+- *Vega-based APUs* (gfx90c: Renoir, Cezanne, Barcelo, e.g. Ryzen 5000U and
+  7030U such as the 7730U): ROCm does not support them. The ROCm entry is
+  **off** and the Vulkan entry for the same GPU is used. To try ROCm, enable
+  `rocm:N`; Studio then applies `HSA_OVERRIDE_GFX_VERSION=9.0.0`, the gfx900
+  masquerade, which can hang the GPU or compute wrong results. Check it with
+  `scripts/try_rocm.sh` first, and pin the ROCm release that worked for you
+  with `rocm_path` and a matching `server`.
+- *RDNA2/RDNA3 APUs and small dies* (gfx1031–1036, gfx1103): the usual
+  override (10.3.0 / 11.0.0) is applied automatically and the ROCm entry is on.
+  On an APU, ROCm workers also get `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` so they
+  can allocate from GTT, not only the carve-out.
+
+**Arm boards with a PCIe GPU** (e.g. a Tesla M10 on an RK3588 with the
+`m10-arm` driver patches): the board's Mali GPU shows up through Vulkan with
+estimated memory, so a model too big for one M10 is split across M10s before
+the Mali is considered. When the patched driver maps system memory uncached,
+the device note suggests trying `GGML_CUDA_NO_PINNED=1` if prompt processing
+is slow (untested on hardware).
+
 ## Sizing
 
 ```bash
