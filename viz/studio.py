@@ -1038,12 +1038,17 @@ def auto_pick(body, models):
     if _has_image(body):
         text += " image photo picture"
         pool = [m for m in models if m.get("mmproj")]
-    proba = default_classifier().predict_proba(text)
+    clf = default_classifier()
+    # Every subject the request involves, weighted; {} when the subject is
+    # unknown, which ranks models on their overall numbers instead of a guess.
+    proba = clf.route_weights(text)
+    if _has_image(body) and not proba:
+        proba = {"vision": 1.0}
     st = load_settings()
     by_id = {m["id"]: m for m in pool}
     sums = {m["id"]: model_summary(m, st) for m in pool}
     pick = model_stats.rank(proba, sums, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
-    pick["proba"] = dict(list(proba.items())[:3])
+    pick["proba"] = {k: round(v, 3) for k, v in list(proba.items())[:3]}
     return by_id.get(pick["model"]), pick
 
 

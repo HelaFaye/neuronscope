@@ -226,6 +226,9 @@ def rank(proba: dict[str, float], summaries: dict[str, dict], min_graded: int = 
     for mid, s in eligible.items():
         total, fallback = 0.0, []
         overall = subject_utility(borrowed(s["graded"], min_subject), hallucination_cost)
+        if not proba:
+            # Subject unknown: rank on overall numbers rather than on a guess.
+            total = overall
         for subj, p in proba.items():
             b = s["subjects"].get(subj, {})
             u = subject_utility(b, hallucination_cost) if b.get("n", 0) >= min_subject else None
@@ -241,7 +244,10 @@ def rank(proba: dict[str, float], summaries: dict[str, dict], min_graded: int = 
     rows.sort(key=lambda r: -r["expected"])
     top = next(iter(proba), "unknown")
     best = rows[0]
-    why = f"subject {top} ({proba.get(top, 0):.0%}) -> expected {best['expected']:+.2f}"
+    if not proba:
+        return {"model": best["model"], "subject": "unknown", "candidates": rows, "excluded": excluded,
+                "reason": f"subject unknown -> best overall model (expected {best['expected']:+.2f})"}
+    why = f"subject {'+'.join(proba)} ({proba.get(top, 0):.0%} {top}) -> expected {best['expected']:+.2f}"
     if best["subject_fallback"]:
         why += f"; no {', '.join(best['subject_fallback'])} stats, used overall (discounted)"
     return {"model": best["model"], "subject": top, "reason": why, "candidates": rows, "excluded": excluded}
@@ -266,7 +272,7 @@ def main(argv=None) -> int:
     else:
         from subject_classifier import default_classifier
         sums = {m: store.summary(m) for m in store.models()}
-        print(json.dumps(rank(default_classifier().predict_proba(a.text), sums, a.min_graded,
+        print(json.dumps(rank(default_classifier().route_weights(a.text), sums, a.min_graded,
                               hallucination_cost=a.hallucination_cost), indent=2))
     return 0
 

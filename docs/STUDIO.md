@@ -66,9 +66,12 @@ Point Cline, Continue, Open WebUI or any OpenAI SDK at `http://host:7870/v1`.
 
 ## How `auto` chooses
 
-1. The subject classifier turns the last user message into a probability per
-   subject (code, math, logic, science, factual, writing, vision). Images
-   restrict the candidates to models with a vision projector.
+1. The subject classifier turns the last user message into the subjects it
+   involves, each weighted (code, math, logic, science, factual, writing,
+   vision, graphics, systems, reverse-engineering; several at once when a
+   request spans them). When the evidence is thin it says **unknown**, and
+   models are ranked on their overall numbers instead. Images restrict the
+   candidates to models with a vision projector.
 2. **Only models with at least `--min-graded` (default 20) graded results
    compete.** A model with no stats is never auto-selected. You can still load
    it, pick it in the chat's model menu, or name it in an API request.

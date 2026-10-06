@@ -141,13 +141,13 @@ def test_expect_abstain_qa():
 def test_bank_ids_unique_and_subjects_known():
     tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
     assert len(tasks) == len({t["id"] for t in tasks}) >= 210
-    assert {t["subject"] for t in tasks} <= set(sc.SUBJECTS)
+    assert {t["subject"] for t in tasks} <= set(sc.QA_SUBJECTS)
 
 
 def test_every_subject_has_enough_graded_items():
     tasks = tq.load_tasks([str(ROOT / "qa" / "bank")], None, None, 0)
     graded = Counter(t["subject"] for t in tasks if t["kind"] != "canary")
-    assert set(graded) == set(sc.SUBJECTS)
+    assert set(graded) == set(sc.QA_SUBJECTS)
     assert min(graded.values()) >= 30, graded
 
 
@@ -296,3 +296,42 @@ def test_docker_sandbox_contains_hostile_code():
         assert tq.run_code("import os\nfor _ in range(200):\n    os.fork()\n" + ok, t, timeout=3)[0] == "wrong"
     finally:
         tq.configure_sandbox(None)
+
+
+def test_subject_unknown_when_evidence_is_thin_and_routes_to_default():
+    clf = sc.default_classifier()
+    for text in ("Handle it.", "Blorf the quandle snivets."):
+        a = clf.analyze(text)
+        assert a["unknown"] and a["labels"] == [] and clf.predict(text) == sc.UNKNOWN
+        assert clf.route_weights(text) == {}
+    table = json.loads((ROOT / "qa" / "routing.example.json").read_text())
+    r = sc.route("Handle it.", table, clf)
+    assert r["subject"] == sc.UNKNOWN and r["model"] == table["default"]
+
+
+def test_subject_returns_every_label_above_the_cutoff():
+    clf = sc.default_classifier()
+    a = clf.analyze("Set up the CMake build and write the GLSL shader for the terrain mesh.")
+    assert a["labels"][:2] == ["graphics", "systems"]
+    assert all(a["proba"][k] >= sc.CUTOFF for k in a["labels"])
+    w = clf.route_weights("Set up the CMake build and write the GLSL shader for the terrain mesh.")
+    assert set(w) == {"graphics", "systems"} and abs(sum(w.values()) - 1) < 1e-9
+
+
+def test_task_subjects_and_word_start_keywords():
+    clf = sc.default_classifier()
+    assert clf.predict("Use Ghidra to find the routine that decrypts the save file.") == "reverse-engineering"
+    assert clf.predict("Get the project building with Meson and fix the linker errors.") == "systems"
+    assert clf.predict("Write a vertex shader that skins the character mesh.") == "graphics"
+    assert sc.keyword_hits("Copy the data from the server", "reverse-engineering") == 0   # "rom" in "from"
+    assert sc.keyword_hits("Dump the ROM and the firmware", "reverse-engineering") == 2
+
+
+def test_rank_uses_overall_numbers_when_subject_is_unknown():
+    import model_stats as ms
+    good = {"graded": {"n": 50, "correct": 40, "wrong": 5, "abstained": 5, "accuracy": 0.8,
+                       "hallucination_rate": 0.1, "abstention_rate": 0.1}, "subjects": {}}
+    weak = {"graded": {"n": 50, "correct": 20, "wrong": 25, "abstained": 5, "accuracy": 0.4,
+                       "hallucination_rate": 0.5, "abstention_rate": 0.1}, "subjects": {}}
+    pick = ms.rank({}, {"good": good, "weak": weak}, 20, 5)
+    assert pick["model"] == "good" and pick["subject"] == "unknown" and "best overall" in pick["reason"]

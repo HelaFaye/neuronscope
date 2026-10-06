@@ -171,12 +171,28 @@ list, not just the net number.
 
 ## Subject classifier
 
-`scripts/subject_classifier.py` labels prompts by subject. It is a
-dependency-free naive Bayes with keyword priors, trained in milliseconds on
-the bank plus `qa/subject_seed.jsonl`.
+`scripts/subject_classifier.py` labels prompts and task descriptions by
+subject. It is a dependency-free naive Bayes with keyword priors, trained in
+milliseconds on the bank plus `qa/subject_seed.jsonl`.
+
+Subjects: the seven with a graded bank (code, math, logic, science, factual,
+writing, vision) and three kinds of work that come up when a project is split
+into tasks (graphics, systems/build, reverse-engineering). The last three have
+seed lines but no graded bank yet, so routing uses a model's overall numbers
+for them.
+
+`analyze` returns **every subject whose share reaches 30%** (a task can be
+graphics and build work at once), and **unknown** when the text has fewer than
+two words the classifier knows or no subject reaches the cutoff. Unknown is an
+answer, not a failure: routing then picks the best model overall instead of
+acting on a guess. Probabilities are softened by text length (plain naive
+Bayes is near-certain of one subject after a dozen words), keywords match at
+the start of a word ("rom" does not match "from"), and a subject's keyword
+bonus counts once however many of its keywords appear.
 
 ```bash
-python scripts/subject_classifier.py evaluate          # leave-one-out accuracy (~0.81 on 240 prompts)
+python scripts/subject_classifier.py evaluate          # leave-one-out: ~0.80 right, ~4% unknown on 445 lines
+python scripts/subject_classifier.py evaluate --tasks my_tasks.jsonl   # also score your own labelled tasks
 python scripts/subject_classifier.py predict "Fix this segfault in my C++ loop"
 python scripts/subject_classifier.py route --table qa/routing.example.json "What is in this photo?"
 ```
@@ -191,7 +207,14 @@ It has three uses:
    scripting.
 3. It is the seed for choosing which model to load for a job based on its
    measured knowledge. Labelled lines added to `qa/subject_seed.jsonl` sharpen
-   it, and `evaluate` tells you whether they did.
+   it, and `evaluate` tells you whether they did. Seed lines phrased as tasks
+   ("Port the renderer to…", "Set up the build for…") carry `"style": "task"`.
+
+A `--tasks` file holds one JSON object per line: `text`, `need` (labels that
+must be returned), optionally `need_any` (at least one of these) and `ok`
+(labels that may also appear), or `unknown: true`. Keep files describing your
+own projects outside the repository; the classifier reads only the bank and
+the seed file.
 
 It is a router hint, not an oracle. At about 80% accuracy, a wrong route
 costs you a weaker model, not a wrong answer, which is the right failure mode.

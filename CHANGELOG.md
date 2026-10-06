@@ -62,6 +62,13 @@
   flagged H-neurons (bloom.py, timeline.py, Godot via the API, Studio's 3D
   view, and the Live page). Studio, Jobs and the pairing pages open in dark
   mode unless light was chosen with the toggle.
+- Subject classifier: returns every subject above a 30% share instead of one,
+  and "unknown" when evidence is thin, which routing (`auto`, `route`,
+  `model_stats.py rank`) treats as "use the best model overall". New task
+  subjects graphics, systems (build) and reverse-engineering; 158 seed lines
+  phrased as tasks rather than quiz questions; keywords match at word starts
+  and count once per subject. `evaluate --tasks FILE` scores multi-label task
+  files kept outside the repo.
 - Hub: Replay lists saved traces (Studio checks and `runs/`) to pick from.
 - Docs: VISUALIZATION.md "Which view when" and how to read the 3D views.
 - Removed tabs with nothing behind them: the planned Recipes tab, and the
