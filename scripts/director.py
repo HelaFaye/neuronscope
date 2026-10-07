@@ -54,6 +54,7 @@ import time
 import uuid
 from pathlib import Path
 
+import ns_requirements as nrq
 import subject_classifier as sc
 
 PLAN_STATES = ("draft", "approved", "running", "paused", "done")
@@ -285,7 +286,13 @@ def new_plan(title: str, goal: str, tasks: list[dict], source: str = "", census:
     plan = {"id": pid, "title": title.strip() or "Untitled project", "goal": goal.strip(), "status": "draft",
             "version": 1, "created": _now(), "updated": _now(), "policy": dict(DEFAULT_POLICY),
             "source": source[:200_000], "census": census, "tasks": [], "proposals": [], "history": [],
-            "next_task": 1, "next_proposal": 1}
+            "next_task": 1, "next_proposal": 1,
+            "requirements": {"root": None, "venv": None, "items": [], "files": [], "last": None}}
+    if census and census.get("path"):
+        try:
+            scan_requirements(plan, census["path"], log=False)
+        except (ValueError, OSError):
+            pass
     for t in tasks:
         _add_task(plan, t)
     _log(plan, "director", "created", f"{len(plan['tasks'])} task(s) from the description", [])
@@ -485,6 +492,59 @@ def set_policy(plan: dict, values: dict, by: str = "human") -> dict:
     return pol
 
 
+# ---------------------------------------------------------------- requirements
+
+def _reqs(plan: dict) -> dict:
+    return plan.setdefault("requirements", {"root": None, "venv": None, "items": [], "files": [], "last": None})
+
+
+def scan_requirements(plan: dict, root: str, by: str = "director", log: bool = True) -> dict:
+    """Infer the toolchain, libraries and packages from a checkout's build files.
+    Items a person added or edited are kept; earlier inferred ones are replaced."""
+    found = nrq.infer_project(root)
+    r = _reqs(plan)
+    human = [i for i in r["items"] if i.get("source") == "human"]
+    names = {(i["kind"], i["name"].lower()) for i in human}
+    r.update(root=found["root"], venv=found["venv"], files=found["files"], last=None,
+             items=human + [i for i in found["items"] if (i["kind"], i["name"].lower()) not in names])
+    if log:
+        _log(plan, by, "requirements", f"scanned {found['root']}: {len(found['items'])} item(s) "
+                                       f"from {len(found['files'])} file(s)", [])
+        plan["updated"] = _now()
+    return r
+
+
+def set_requirements(plan: dict, items: list, by: str = "human", reason: str = "") -> dict:
+    """Replace the requirement list (a person's edit: every item becomes theirs
+    unless it was inferred and left as it was)."""
+    try:
+        clean = nrq.normalize_items(items)
+    except ValueError as e:
+        raise PlanError(str(e))
+    r = _reqs(plan)
+    before = {(i["kind"], i["name"].lower()): i for i in r["items"]}
+    for i in clean:
+        old = before.get((i["kind"], i["name"].lower()))
+        same = old and all(old.get(k) == i.get(k) for k in ("need", "optional"))
+        i["source"] = "inferred" if same and old.get("source") == "inferred" else "human"
+        if same and not i["why"]:
+            i["why"] = old.get("why", "")
+    added = sorted({k for k in (x["kind"] + ":" + x["name"] for x in clean)} -
+                   {k for k in (x["kind"] + ":" + x["name"] for x in r["items"])})
+    removed = sorted({k for k in (x["kind"] + ":" + x["name"] for x in r["items"])} -
+                     {k for k in (x["kind"] + ":" + x["name"] for x in clean)})
+    r["items"], r["last"] = clean, None
+    _log(plan, by, "requirements", reason, [{"op": "requirements", "added": added, "removed": removed}])
+    plan["updated"] = _now()
+    return r
+
+
+def check_requirements(plan: dict, **kw) -> dict:
+    r = _reqs(plan)
+    r["last"] = nrq.check_project(r, **kw)
+    return r["last"]
+
+
 # ---------------------------------------------------------------- lifecycle
 
 def approve(plan: dict, assign_fn=None, by: str = "human") -> dict:
@@ -569,6 +629,9 @@ def worker_messages(plan: dict, t: dict, max_input_chars: int = 12_000) -> list[
         if x["status"] != "dropped":
             mark = "  <- your task" if x["id"] == t["id"] else ""
             lines.append(f"  {x['id']} [{x['status']}] {x['title']}{mark}")
+    env = nrq.environment_brief((plan.get("requirements") or {}).get("last"))
+    if env:
+        lines += ["", env]
     lines += ["", f"Your task ({t['id']}): {t['title']}", t["detail"]]
     if t.get("acceptance"):
         lines += ["", f"Done means: {t['acceptance']}"]

@@ -42,6 +42,9 @@ tr.task{cursor:pointer}tr.task:hover{background:var(--code)}tr.open{background:v
 pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:50vh;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;margin:.4rem 0}
 .attn{border-left:3px solid var(--acc);padding:.4rem .6rem;margin:.4rem 0;background:var(--bg);border-radius:0 6px 6px 0}
 .attn.warn{border-left-color:var(--warn)}
+.st.ok{color:var(--ok)}.st.missing{color:var(--no)}.st.warn{color:var(--warn)}.st.note{color:var(--mut)}
+.src{font-size:10.5px;color:var(--mut);border:1px dashed var(--line);border-radius:4px;padding:0 .3rem}
+.rq td{font-size:12.5px}.rq code{font-size:11.5px;word-break:break-word}
 details summary{cursor:pointer;color:var(--mut);font-size:12px}
 .risk{font-size:11px;padding:0 .4rem;border-radius:4px}.risk.hi{background:color-mix(in srgb,var(--no) 25%,transparent)}
 .risk.lo{background:color-mix(in srgb,var(--ok) 20%,transparent)}
@@ -187,13 +190,58 @@ function render(){
     if(isOpen) h+=`<tr><td></td><td colspan="5" data-d="${esc(t.id)}">${taskDetail(t)}</td></tr>`; }
   h+=`</table></div><details style="margin-top:.6rem"><summary>add a task</summary><label>title</label><input id="atitle"><label>detail</label><textarea id="adetail"></textarea>
      <button id="add" style="margin-top:.4rem">Add task</button></details></section>`;
+  h+=reqCard(p);
   h+=`<section class="card"><details><summary>history (${p.history.length})</summary>`+p.history.slice().reverse().map(e=>`<div class="note">v${e.version} · ${ago(e.at)} · <b>${esc(e.by)}</b> ${esc(e.action)}${e.reason?': '+esc(e.reason):''}</div>`).join('')+`</details></section>`;
   $('#view').innerHTML=h; wire();
 }
 
+// ---------- per-project requirements (scripts/ns_requirements.py)
+function reqCard(p){
+  const r=p.requirements||{items:[]}, last=r.last, byKey={};
+  if(last) for(const i of last.items) byKey[i.kind+':'+i.name.toLowerCase()]=i;
+  const rows=r.items.map((i,n)=>{ const c=byKey[i.kind+':'+i.name.toLowerCase()]||{};
+    const label=i.kind==='feature'?(meta.req_features[i.name]||i.name):i.kind==='hardware'?(meta.req_hardware[i.name]||i.name):i.name;
+    return `<tr><td><span class="st ${esc(c.status||'')}">${esc(c.status||'unchecked')}</span></td><td class="note">${esc(i.kind)}</td>
+      <td><b>${esc(label)}</b>${i.optional?' <span class="note">(optional)</span>':''} <span class="src" title="${esc(i.why||'')}">${esc(i.source)}</span>
+        ${i.why?`<div class="note">${esc(i.why)}</div>`:''}</td>
+      <td class="note">${esc(i.need||'')}</td><td>${c.have!=null?`<code>${esc(c.have)}</code>`:''}${c.fix?`<div class="note">fix: <code>${esc(c.fix)}</code></div>`:''}</td>
+      <td><button data-rq-del="${n}" title="remove">×</button></td></tr>`; }).join('');
+  const summary=last?`${last.status==='ok'?'<span class="st ok">ok</span> everything required is here':last.status==='missing'?`<span class="st missing">missing</span> ${esc(last.missing.join(', '))}`:'<span class="st warn">warn</span> required items are here; some optional ones are not'} · checked ${ago(last.checked)}${last.python_from?` · Python packages checked in ${esc(last.python_from)}`:''}`:'not checked yet';
+  const kindOpts=meta.req_kinds.map(k=>`<option>${k}</option>`).join('');
+  return `<section class="card"><h2>Requirements</h2>
+    <div class="note">What this project needs on the machine that builds it: the toolchain, libraries and Python packages from its build files, hardware, NeuronScope features, and your notes. Workers are told what is available; Start waits until required items are here (or you start anyway).</div>
+    <div class="row" style="margin:.5rem 0"><span class="grow">${summary}</span><button id="rqcheck">Check now</button></div>
+    ${r.items.length?`<div class="tscroll"><table class="rq"><tr><th></th><th>kind</th><th>what</th><th>needs</th><th>this machine</th><th></th></tr>${rows}</table></div>`:'<div class="note">No requirements yet. Scan the checkout, or add them below.</div>'}
+    <div class="row" style="margin-top:.6rem"><input id="rqroot" class="grow" placeholder="project checkout folder" value="${esc(r.root||(p.census&&p.census.path)||'')}"><button id="rqscan">Scan build files</button></div>
+    ${r.files&&r.files.length?`<div class="note">read: ${esc(r.files.join(', '))}</div>`:''}
+    <details style="margin-top:.5rem"><summary>add a requirement</summary><div class="row">
+      <select id="rqkind" style="width:auto">${kindOpts}</select><span id="rqnamebox" class="grow"></span>
+      <input id="rqneed" placeholder="version, e.g. >=3.20" style="width:11rem">
+      <label style="margin:0"><input type="checkbox" id="rqopt">optional</label><button id="rqadd">Add</button></div>
+      <input id="rqwhy" placeholder="why (optional)" style="margin-top:.3rem"></details></section>`;
+}
+function rqNameField(){ const k=$('#rqkind').value, box=$('#rqnamebox'); if(!box) return;
+  box.innerHTML=k==='feature'?`<select id="rqname">${Object.entries(meta.req_features).map(([v,t])=>`<option value="${esc(v)}">${esc(t)}</option>`).join('')}</select>`
+    :k==='hardware'?`<select id="rqname">${Object.entries(meta.req_hardware).map(([v,t])=>`<option value="${esc(v)}">${esc(t)}</option>`).join('')}</select>`
+    :`<input id="rqname" placeholder="${{tool:'e.g. cmake, meson, ninja',library:'pkg-config name, e.g. glfw3',package:'Python package, e.g. numpy',note:'anything to check by hand'}[k]||''}">`;
+  $('#rqneed').placeholder=k==='hardware'?'GiB, or amd/nvidia/intel for gpu':'version, e.g. >=3.20'; $('#rqneed').disabled=['feature','note'].includes(k); }
+async function saveReqs(items,reason){ try{ await api(`/api/projects/${cur}/requirements`,{items,reason}); await api(`/api/projects/${cur}/requirements`); }catch(e){ alert(e.message); } await load(); }
+async function startProject(){
+  const r=await fetch(`/api/projects/${cur}/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); const j=await r.json().catch(()=>({}));
+  if(r.status===409&&j.missing){ if(confirm(`This machine is missing what the project needs:\n\n  ${j.missing.join('\n  ')}\n\nStart anyway? Workers will be told these are not available.`)) await act('start',{force:true}); else await load(); return; }
+  if(!r.ok) alert(j.error||r.status); await load();
+}
+
 function wire(){
   const on=(s,f)=>{const e=$(s); if(e) e.onclick=f};
-  on('#approve',()=>act('approve')); on('#start',()=>act('start')); on('#pause',()=>act('pause'));
+  on('#approve',()=>act('approve')); on('#start',startProject);
+  if($('#rqkind')){ $('#rqkind').onchange=rqNameField; rqNameField(); }
+  on('#rqcheck',async()=>{ $('#rqcheck').disabled=true; $('#rqcheck').textContent='checking…'; try{ await api(`/api/projects/${cur}/requirements`); }catch(e){ alert(e.message); } await load(); });
+  on('#rqscan',async()=>{ try{ await api(`/api/projects/${cur}/requirements/scan`,{root:$('#rqroot').value}); await api(`/api/projects/${cur}/requirements`); }catch(e){ alert(e.message); } await load(); });
+  on('#rqadd',()=>{ const it={kind:$('#rqkind').value,name:($('#rqname').value||'').trim(),need:$('#rqneed').disabled?'':$('#rqneed').value.trim(),optional:$('#rqopt').checked,why:$('#rqwhy').value.trim()};
+    if(!it.name) return alert('name it'); saveReqs([...plan.requirements.items,it],'added by hand'); });
+  document.querySelectorAll('[data-rq-del]').forEach(b=>b.onclick=()=>{ const n=+b.dataset.rqDel; const it=plan.requirements.items[n];
+    saveReqs(plan.requirements.items.filter((_,k)=>k!==n),`removed ${it.kind} ${it.name}`); }); on('#pause',()=>act('pause'));
   on('#refine',()=>{const m=$('#rmodel').value; if(!m) return alert('choose a model to re-plan with'); act('refine',{model:m})});
   on('#del',async()=>{ if(confirm('Delete this project and its history?')){ await api(`/api/projects/${cur}/delete`,{}); cur=null; plan=null; $('#view').innerHTML='<div class="card empty">Deleted.</div>'; loadList(); }});
   on('#add',()=>act('edit',{changes:[{op:'add',task:{title:$('#atitle').value,detail:$('#adetail').value}}],reason:'added by hand'}));

@@ -235,8 +235,22 @@ TOOLS = [
      WRITE, _pact("edit")),
     ("approve_project", "Approve a draft plan: assigns a model to every task and freezes it.",
      _s({"id": STR}, ["id"]), WRITE, _pact("approve")),
-    ("start_project", "Start (or resume) an approved project: worker models begin on ready tasks.",
-     _s({"id": STR}, ["id"]), RISKY, _pact("start")),
+    ("start_project", "Start (or resume) an approved project: worker models begin on ready tasks. Refused while "
+     "the machine lacks something the project requires (see project_requirements) unless force is true; only "
+     "force when the user agreed.",
+     _s({"id": STR, "force": BOOL}, ["id"]), RISKY, _pact("start")),
+    ("project_requirements", "Check a project's own requirements on this machine: the toolchain, libraries and "
+     "Python packages its build files name, hardware, NeuronScope features, notes; each with what is installed "
+     "and the fix for this OS.", _s({"id": STR}, ["id"]), READ,
+     lambda st, a: st.call("GET", f"/api/projects/{a['id']}/requirements", timeout=120)),
+    ("set_project_requirements", "Replace a project's requirement list. items: [{kind: tool|library|package|"
+     "hardware|feature|note, name, need (version spec, or GiB for hardware ram_gib/vram_gib/disk_gib, or a "
+     "vendor for hardware gpu), why, optional}]. Read project_requirements first and send the whole list back.",
+     _s({"id": STR, "items": {"type": "array", "items": {"type": "object"}}, "reason": STR}, ["id", "items"]),
+     WRITE, _pact("requirements")),
+    ("scan_project_requirements", "Infer a project's requirements again from its checkout's build files "
+     "(CMake, Meson, xmake, Cargo, go.mod, package.json, pyproject, requirements.txt, …). Items a person added "
+     "are kept.", _s({"id": STR, "root": STR}, ["id"]), WRITE, _pact("requirements/scan")),
     ("pause_project", "Pause a running project.", _s({"id": STR}, ["id"]), WRITE, _pact("pause")),
     ("review_task", "Accept a task's result, or send it back with feedback for the next attempt.",
      _s({"id": STR, "task": STR, "accept": BOOL, "feedback": STR}, ["id", "task", "accept"]), WRITE,

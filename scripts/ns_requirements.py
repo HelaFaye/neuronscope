@@ -12,6 +12,7 @@ command that fixes each gap on this OS. Also snapshots of the environment, so
     python scripts/ns_requirements.py snapshot               # -> ~/.neuronscope/env/<time>.json
     python scripts/ns_requirements.py diff                   # the last two snapshots
     python scripts/ns_requirements.py freeze > my-env.txt    # exact versions of the catalog's packages
+    python scripts/ns_requirements.py project ~/src/game      # a project's own toolchain, libraries, packages
 
 The package version floors come from requirements*.txt, so the files stay the
 one place a version is decided. doctor.py answers "can I run the pipeline
@@ -546,6 +547,426 @@ def pip_install(pkg: str) -> int:
     return subprocess.call(cmd)
 
 
+# ---------------------------------------------------------------- per project
+# A project (Studio's Projects, scripts/director.py) has its own needs: the
+# toolchain and libraries its build files name, its Python dependencies, the
+# hardware it wants, and which NeuronScope features it relies on. They are
+# inferred from a checkout, edited by a person, and checked like the rest.
+
+PROJECT_KINDS = ("tool", "library", "package", "hardware", "feature", "note")
+HARDWARE_ITEMS = {"ram_gib": "memory (GiB)", "vram_gib": "largest GPU memory (GiB)", "disk_gib": "free disk (GiB)",
+                  "gpu": "a GPU from vendor (amd, nvidia, intel)"}
+
+# Build tools projects use, on top of TOOLS: binaries, version flag, package per manager.
+_SAME = lambda n: {pm: n for pm in ("apt", "dnf", "pacman", "zypper", "brew")}   # noqa: E731
+PROJECT_TOOLS = {
+    "make": (["make", "gmake"], ["--version"], _SAME("make")),
+    "ninja": (["ninja"], ["--version"], {**_SAME("ninja"), "apt": "ninja-build", "dnf": "ninja-build"}),
+    "meson": (["meson"], ["--version"], _SAME("meson")),
+    "xmake": (["xmake"], ["--version"], {**_SAME("xmake"), "apt": "xmake (PPA or xmake.io/#/getting_started)"}),
+    "premake5": (["premake5"], ["--version"], {**_SAME("premake"), "apt": "premake5 (premake.github.io)"}),
+    "pkg-config": (["pkg-config", "pkgconf"], ["--version"], {**_SAME("pkgconf"), "brew": "pkgconf"}),
+    "autoconf": (["autoconf"], ["--version"], _SAME("autoconf")),
+    "automake": (["automake"], ["--version"], _SAME("automake")),
+    "cargo": (["cargo"], ["--version"], {**_SAME("cargo"), "apt": "cargo (or rustup.rs)", "brew": "rust"}),
+    "rustc": (["rustc"], ["--version"], {**_SAME("rust"), "apt": "rustc (or rustup.rs)"}),
+    "go": (["go"], ["version"], {**_SAME("go"), "apt": "golang", "dnf": "golang"}),
+    "npm": (["npm"], ["--version"], _SAME("npm")),
+    "pnpm": (["pnpm"], ["--version"], {pm: "pnpm (npm install -g pnpm)" for pm in ("apt", "dnf", "pacman", "zypper", "brew")}),
+    "yarn": (["yarn"], ["--version"], {pm: "yarn (corepack enable)" for pm in ("apt", "dnf", "pacman", "zypper", "brew")}),
+    "python3": (["python3", "python"], ["--version"], _SAME("python3")),
+    "java": (["java"], ["-version"], {**_SAME("openjdk"), "apt": "default-jdk", "dnf": "java-latest-openjdk-devel",
+                                      "pacman": "jdk-openjdk", "zypper": "java-devel"}),
+    "gradle": (["gradle"], ["--version"], _SAME("gradle")),
+    "mvn": (["mvn"], ["--version"], {**_SAME("maven")}),
+    "zig": (["zig"], ["version"], _SAME("zig")),
+    "nix": (["nix"], ["--version"], {pm: "nix (nixos.org/download)" for pm in ("apt", "dnf", "pacman", "zypper", "brew")}),
+    "vcpkg": (["vcpkg"], ["version"], {pm: "vcpkg (github.com/microsoft/vcpkg)" for pm in ("apt", "dnf", "pacman", "zypper", "brew")}),
+    "conan": (["conan"], ["--version"], {pm: "conan (pip install conan)" for pm in ("apt", "dnf", "pacman", "zypper", "brew")}),
+    "just": (["just"], ["--version"], _SAME("just")),
+    "dotnet": (["dotnet"], ["--version"], {**_SAME("dotnet-sdk"), "apt": "dotnet-sdk-8.0", "dnf": "dotnet-sdk-8.0"}),
+}
+
+# Common C/C++ libraries: pkg-config name -> development package per manager.
+LIBRARIES = {
+    "sdl3": {"apt": "libsdl3-dev", "dnf": "SDL3-devel", "pacman": "sdl3", "zypper": "SDL3-devel", "brew": "sdl3"},
+    "sdl2": {"apt": "libsdl2-dev", "dnf": "SDL2-devel", "pacman": "sdl2", "zypper": "libSDL2-devel", "brew": "sdl2"},
+    "vulkan": {"apt": "libvulkan-dev", "dnf": "vulkan-loader-devel", "pacman": "vulkan-icd-loader vulkan-headers",
+               "zypper": "vulkan-devel", "brew": "vulkan-loader"},
+    "glfw3": {"apt": "libglfw3-dev", "dnf": "glfw-devel", "pacman": "glfw", "zypper": "libglfw-devel", "brew": "glfw"},
+    "gl": {"apt": "libgl-dev", "dnf": "mesa-libGL-devel", "pacman": "mesa", "zypper": "Mesa-libGL-devel"},
+    "x11": {"apt": "libx11-dev", "dnf": "libX11-devel", "pacman": "libx11", "zypper": "libX11-devel"},
+    "openssl": {"apt": "libssl-dev", "dnf": "openssl-devel", "pacman": "openssl", "zypper": "libopenssl-devel",
+                "brew": "openssl"},
+    "zlib": {"apt": "zlib1g-dev", "dnf": "zlib-devel", "pacman": "zlib", "zypper": "zlib-devel", "brew": "zlib"},
+    "libpng": {"apt": "libpng-dev", "dnf": "libpng-devel", "pacman": "libpng", "zypper": "libpng16-devel",
+               "brew": "libpng"},
+    "libcurl": {"apt": "libcurl4-openssl-dev", "dnf": "libcurl-devel", "pacman": "curl", "zypper": "libcurl-devel",
+                "brew": "curl"},
+    "sqlite3": {"apt": "libsqlite3-dev", "dnf": "sqlite-devel", "pacman": "sqlite", "zypper": "sqlite3-devel",
+                "brew": "sqlite"},
+    "freetype2": {"apt": "libfreetype-dev", "dnf": "freetype-devel", "pacman": "freetype2", "zypper": "freetype2-devel",
+                  "brew": "freetype"},
+}
+# CMake find_package() names -> what to check (kind, name). None: nothing to check.
+CMAKE_PACKAGES = {"sdl3": ("library", "sdl3"), "sdl2": ("library", "sdl2"), "vulkan": ("library", "vulkan"),
+                  "glfw3": ("library", "glfw3"), "glfw": ("library", "glfw3"), "opengl": ("library", "gl"),
+                  "x11": ("library", "x11"), "openssl": ("library", "openssl"), "zlib": ("library", "zlib"),
+                  "png": ("library", "libpng"), "curl": ("library", "libcurl"), "sqlite3": ("library", "sqlite3"),
+                  "freetype": ("library", "freetype2"), "pkgconfig": ("tool", "pkg-config"),
+                  "git": ("tool", "git"), "python": ("tool", "python3"), "python3": ("tool", "python3"),
+                  "threads": None, "cuda": ("tool", "nvcc"), "cudatoolkit": ("tool", "nvcc"),
+                  "hip": ("tool", "hipcc"), "openmp": None}
+
+
+def _tool_spec(name: str):
+    return TOOLS.get(name) or PROJECT_TOOLS.get(name)
+
+
+def _item(kind, name, need="", why="", optional=False, source="inferred") -> dict:
+    return {"kind": kind, "name": name, "need": need, "why": why, "optional": optional, "source": source}
+
+
+def _read(p: Path, limit: int = 200_000) -> str:
+    try:
+        return p.read_text(encoding="utf-8", errors="ignore")[:limit]
+    except OSError:
+        return ""
+
+
+def _py_reqs(text: str) -> list[tuple[str, str]]:
+    out = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith(("-", "git+", "http")):
+            continue
+        m = re.match(r"([A-Za-z0-9_.\-]+)(\[[^\]]*\])?\s*([<>=!~][^;]*)?", line)
+        if m:
+            out.append((m.group(1), (m.group(3) or "").replace(" ", "")))
+    return out
+
+
+def infer_project(path: str, max_depth: int = 2) -> dict:
+    """Requirements a checkout's build files name. Reads only build and
+    manifest files near the top (max_depth directories down), never sources.
+    -> {root, items, files, venv}"""
+    root = Path(path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"not a directory: {path}")
+    items: dict[tuple, dict] = {}
+    files = []
+
+    def add(kind, name, need="", why="", optional=False):
+        key = (kind, name.lower())
+        cur = items.get(key)
+        if cur is None:
+            items[key] = _item(kind, name, need, why, optional)
+        else:
+            if need and not cur["need"]:
+                cur["need"] = need
+            if why and why not in cur["why"]:
+                cur["why"] = (cur["why"] + "; " + why).strip("; ")
+            cur["optional"] = cur["optional"] and optional
+
+    skip = {"node_modules", ".git", "build", "dist", "target", ".venv", "venv", "__pycache__", "third_party",
+            "external", "vendor", "deps", "subprojects"}
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = Path(dirpath).relative_to(root)
+        dirnames[:] = sorted(d for d in dirnames if d not in skip and not d.startswith(".")) \
+            if len(rel.parts) < max_depth else []
+        for fn in filenames:
+            found.append(Path(dirpath) / fn)
+    for p in sorted(found):
+        low, rel = p.name.lower(), str(p.relative_to(root))
+        why = rel
+        if low == "cmakelists.txt":
+            t = _read(p)
+            m = re.search(r"cmake_minimum_required\s*\(\s*VERSION\s+([\d.]+)", t, re.I)
+            add("tool", "cmake", f">={m.group(1)}" if m else "", why)
+            add("tool", "c++ compiler", "", why)
+            for name in re.findall(r"find_package\s*\(\s*([A-Za-z0-9_]+)", t, re.I):
+                hit = CMAKE_PACKAGES.get(name.lower(), ("library", name.lower()))
+                if hit:
+                    add(hit[0], hit[1], "", f"{why}: find_package({name})", optional=hit[1] not in LIBRARIES
+                        and hit[0] == "library")
+            for mods in re.findall(r"pkg_check_modules\s*\(\s*\w+\s+(?:REQUIRED\s+|QUIET\s+|IMPORTED_TARGET\s+)*([^)]*)\)",
+                                   t, re.I):
+                for mod in mods.split():
+                    if mod.isupper():
+                        continue
+                    mm = re.match(r"([A-Za-z0-9_.+\-]+)(>=?[\d.]+)?", mod)
+                    if mm:
+                        add("library", mm.group(1), mm.group(2) or "", f"{why}: pkg_check_modules")
+                add("tool", "pkg-config", "", why)
+            files.append(rel)
+        elif low in ("makefile", "gnumakefile"):
+            add("tool", "make", "", why)
+            files.append(rel)
+        elif low == "meson.build":
+            add("tool", "meson", "", why)
+            add("tool", "ninja", "", why)
+            for name in re.findall(r"dependency\s*\(\s*'([^']+)'", _read(p)):
+                add("library", name, "", f"{why}: dependency('{name}')")
+            files.append(rel)
+        elif low == "xmake.lua":
+            add("tool", "xmake", "", why)
+            reqs = re.findall(r'add_requires\s*\(\s*"([^"]+)"', _read(p))
+            if reqs:
+                add("note", f"xmake fetches its own packages: {', '.join(sorted(set(r.split()[0] for r in reqs)))}",
+                    "", why, optional=True)
+            files.append(rel)
+        elif low == "premake5.lua":
+            add("tool", "premake5", "", why)
+            files.append(rel)
+        elif low == "configure.ac":
+            for t in ("autoconf", "automake", "make"):
+                add("tool", t, "", why)
+            files.append(rel)
+        elif low == "cargo.toml":
+            m = re.search(r'rust-version\s*=\s*"([\d.]+)"', _read(p))
+            add("tool", "cargo", "", why)
+            add("tool", "rustc", f">={m.group(1)}" if m else "", why)
+            files.append(rel)
+        elif low in ("rust-toolchain", "rust-toolchain.toml"):
+            m = re.search(r'(\d+\.\d+(?:\.\d+)?)', _read(p))
+            add("tool", "rustc", f">={m.group(1)}" if m else "", why)
+        elif low == "go.mod":
+            m = re.search(r"^go\s+([\d.]+)", _read(p), re.M)
+            add("tool", "go", f">={m.group(1)}" if m else "", why)
+            files.append(rel)
+        elif low == "package.json":
+            try:
+                pj = json.loads(_read(p))
+            except ValueError:
+                pj = {}
+            node = ((pj.get("engines") or {}).get("node") or "").replace(" ", "")
+            add("tool", "node", node if re.fullmatch(r"[<>=~^]*[\d.]+", node or "x") else "", why)
+            pkgm = str(pj.get("packageManager") or "")
+            mgr = pkgm.split("@")[0] if pkgm else ("pnpm" if (p.parent / "pnpm-lock.yaml").exists() else
+                                                   "yarn" if (p.parent / "yarn.lock").exists() else "npm")
+            add("tool", mgr if mgr in PROJECT_TOOLS else "npm", "", why)
+            files.append(rel)
+        elif low == ".nvmrc":
+            v = _read(p).strip().lstrip("v")
+            if re.fullmatch(r"[\d.]+", v):
+                add("tool", "node", f">={v}", why)
+        elif low == "pyproject.toml":
+            t = _read(p)
+            m = re.search(r'requires-python\s*=\s*"([^"]+)"', t)
+            add("tool", "python3", m.group(1).replace(" ", "") if m else "", why)
+            dm = re.search(r"^dependencies\s*=\s*\[(.*?)\]", t, re.M | re.S)
+            for dep in re.findall(r'"([^"]+)"', dm.group(1) if dm else ""):
+                for name, spec in _py_reqs(dep):
+                    add("package", name, spec, why)
+            files.append(rel)
+        elif re.fullmatch(r"requirements[\w.\-]*\.txt", low) and len(p.relative_to(root).parts) == 1:
+            for name, spec in _py_reqs(_read(p)):
+                add("package", name, spec, why, optional="dev" in low or "test" in low)
+            files.append(rel)
+        elif low == ".python-version":
+            v = _read(p).strip()
+            if re.fullmatch(r"[\d.]+", v):
+                add("tool", "python3", f">={v}", why)
+        elif low in ("dockerfile", "containerfile", "docker-compose.yml", "compose.yaml"):
+            add("tool", "docker or podman", "", why, optional=True)
+            files.append(rel)
+        elif low in ("build.gradle", "build.gradle.kts"):
+            add("tool", "java", "", why)
+            if not (p.parent / "gradlew").exists():
+                add("tool", "gradle", "", why)
+            files.append(rel)
+        elif low == "pom.xml":
+            add("tool", "java", "", why)
+            add("tool", "mvn", "", why)
+            files.append(rel)
+        elif low == "build.zig":
+            add("tool", "zig", "", why)
+            files.append(rel)
+        elif low == "build.zig.zon":
+            m = re.search(r'minimum_zig_version\s*=\s*"([\d.]+)', _read(p))
+            if m:
+                add("tool", "zig", f">={m.group(1)}", why)
+        elif low == "project.godot":
+            m = re.search(r'config/features=PackedStringArray\("(\d+\.\d+)', _read(p))
+            add("tool", "godot", f">={m.group(1)}" if m else "", why)
+            files.append(rel)
+        elif low == "flake.nix":
+            add("tool", "nix", "", why, optional=True)
+            files.append(rel)
+        elif low == "vcpkg.json":
+            add("tool", "vcpkg", "", why)
+            files.append(rel)
+        elif low in ("conanfile.txt", "conanfile.py"):
+            add("tool", "conan", "", why)
+            files.append(rel)
+        elif low == "justfile":
+            add("tool", "just", "", why, optional=True)
+            files.append(rel)
+        elif low.endswith((".csproj", ".sln", ".fsproj")):
+            add("tool", "dotnet", "", why)
+            files.append(rel)
+    venv = next((str(root / v) for v in (".venv", "venv", "env") if (root / v / "bin" / "python").exists()
+                 or (root / v / "Scripts" / "python.exe").exists()), None)
+    return {"root": str(root), "items": list(items.values()), "files": files[:50], "venv": venv}
+
+
+def normalize_items(items) -> list[dict]:
+    """Validate requirement items from a person or an agent."""
+    if not isinstance(items, list) or len(items) > 300:
+        raise ValueError("items must be a list (at most 300)")
+    out, seen = [], set()
+    for it in items:
+        if not isinstance(it, dict):
+            raise ValueError("each item is an object")
+        kind, name = str(it.get("kind") or ""), str(it.get("name") or "").strip()
+        if kind not in PROJECT_KINDS:
+            raise ValueError(f"kind must be one of {PROJECT_KINDS}")
+        if not name or len(name) > 300 or any(c in name for c in "\n\r\0"):
+            raise ValueError("each item needs a one-line name")
+        need = str(it.get("need") or "").strip()
+        if kind in ("tool", "library", "package") and need and not re.fullmatch(r"[<>=!~^,.\d\s*]+", need):
+            raise ValueError(f"{name}: need is a version spec like >=3.20")
+        if kind == "hardware":
+            if name not in HARDWARE_ITEMS:
+                raise ValueError(f"hardware is one of {', '.join(HARDWARE_ITEMS)}")
+            if name != "gpu" and not re.fullmatch(r"\d+(\.\d+)?", need):
+                raise ValueError(f"{name}: need is a number of GiB")
+            if name == "gpu" and need not in ("amd", "nvidia", "intel", ""):
+                raise ValueError("gpu: need is amd, nvidia or intel")
+        if kind == "feature" and name not in FEATURES:
+            raise ValueError(f"feature is one of {', '.join(FEATURES)}")
+        if kind in ("tool", "library", "package") and not re.fullmatch(r"[A-Za-z0-9_.+\- ]+", name):
+            raise ValueError(f"{name!r}: letters, digits and . _ + - only")
+        key = (kind, name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(_item(kind, name, need.replace(" ", ""), str(it.get("why") or "")[:300],
+                         bool(it.get("optional")), it.get("source") if it.get("source") in ("inferred", "human")
+                         else "human"))
+    return out
+
+
+def _venv_versions(venv: str | None, names: list[str]) -> tuple[dict, str]:
+    """Installed versions of `names` in the project's virtualenv, else Studio's Python."""
+    py = None
+    if venv:
+        for cand in (Path(venv) / "bin" / "python", Path(venv) / "Scripts" / "python.exe"):
+            if cand.exists():
+                py = str(cand)
+    if not py:
+        return {n: dist_version(n) for n in names}, f"Studio's Python ({sys.executable}); no virtualenv in the project"
+    code = ("import json,sys\nfrom importlib import metadata as m\nout={}\nfor n in sys.argv[1:]:\n"
+            "    try: out[n]=m.version(n)\n    except Exception: out[n]=None\nprint(json.dumps(out))")
+    try:
+        r = subprocess.run([py, "-c", code, *names], capture_output=True, text=True, timeout=30)
+        return json.loads(r.stdout or "{}"), f"the project's virtualenv ({venv})"
+    except Exception as e:
+        return {n: None for n in names}, f"could not ask {py}: {e}"
+
+
+def library_version(name: str) -> str | None:
+    pc = shutil.which("pkg-config") or shutil.which("pkgconf")
+    if not pc:
+        return None
+    try:
+        r = subprocess.run([pc, "--modversion", name], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or None if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def check_project(spec: dict, configured: dict | None = None, hw: dict | None = None,
+                  vendors: set | None = None) -> dict:
+    """spec {items, root?, venv?} -> {status, items (with have/status/fix), checked, python_from}."""
+    pm = package_manager()
+    items = [dict(i) for i in spec.get("items") or []]
+    hw = hw if hw is not None else hardware()
+    feats = sorted({i["name"] for i in items if i["kind"] == "feature"})
+    frep = check(feats, configured=configured, hw=hw, vendors=vendors)["features"] if feats else {}
+    pkgs = [i["name"] for i in items if i["kind"] == "package"]
+    pyv, py_from = _venv_versions(spec.get("venv"), pkgs) if pkgs else ({}, None)
+    has_pc = bool(shutil.which("pkg-config") or shutil.which("pkgconf"))
+    for i in items:
+        k, n, need = i["kind"], i["name"], i.get("need") or ""
+        have, fix, st = None, "", MISSING
+        if k == "tool":
+            ts = _tool_spec(n)
+            path, v = tool_version(ts[0], ts[1]) if ts else tool_version([n], ["--version"])
+            have = (v or "found") if path else None
+            ok = path is not None and (not need or not v or satisfies(v, need))
+            st = OK if ok else MISSING
+            if not ok:
+                pkg = (ts[2].get(pm or "") if ts else None) or n
+                fix = (f"found {v}, needs {need}: upgrade it" if path else install_cmd(pm, pkg))
+        elif k == "library":
+            v = library_version(n)
+            have = v
+            ok = v is not None and (not need or satisfies(v, need.lstrip("=") if need.startswith("=") and
+                                                         not need.startswith("==") else need))
+            st = OK if ok else (WARN if not has_pc else MISSING)
+            if not ok:
+                dev = LIBRARIES.get(n.lower(), {}).get(pm or "")
+                fix = (install_cmd(pm, dev) if dev else f"install the development package that provides {n}.pc")
+                if not has_pc:
+                    fix = "install pkg-config to check libraries; then " + fix
+        elif k == "package":
+            v = pyv.get(n)
+            have = v
+            ok = v is not None and satisfies(v, need)
+            st = OK if ok else MISSING
+            if not ok:
+                fix = (f"{spec['venv']}/bin/pip install '{n}{need}'" if spec.get("venv") else
+                       f"pip install '{n}{need}'" if need else f"pip install {n}")
+        elif k == "hardware":
+            if n == "gpu":
+                vs = vendors if vendors is not None else gpu_vendors()
+                have = ", ".join(sorted(vs)) or "none"
+                ok = bool(vs) and (not need or need in vs)
+                fix = "" if ok else f"this project wants {'an ' + need.upper() if need else 'a'} GPU"
+            else:
+                val = {"ram_gib": hw.get("ram_gib"), "disk_gib": hw.get("disk_free_gib"),
+                       "vram_gib": max([d.get("memory_gib") or 0 for d in hw.get("devices", [])
+                                        if d.get("backend") != "cpu"] or [0])}[n]
+                have = f"{val} GiB" if val is not None else None
+                ok = val is not None and val >= float(need) * 0.95
+                fix = "" if ok else f"needs {need} GiB"
+            st = OK if ok else WARN
+        elif k == "feature":
+            f = frep.get(n, {})
+            have = f.get("status")
+            st = {"ok": OK, "warn": OK, "n/a": WARN}.get(f.get("status"), MISSING)
+            bad = [x for x in f.get("items", []) if x["status"] == MISSING and not x.get("optional")]
+            fix = "; ".join(f"{x['name']}: {x['fix']}" for x in bad[:3]) if bad else (f.get("note") or "")
+            i["title"] = f.get("title")
+        elif k == "note":
+            st, have = "note", None
+        if st == MISSING and i.get("optional"):
+            st = WARN
+        i.update(have=have, status=st, fix=fix)
+    req = [i for i in items if not i.get("optional") and i["status"] == MISSING]
+    status = MISSING if req else WARN if any(i["status"] == WARN for i in items) else OK
+    return {"status": status, "items": items, "checked": time.time(), "python_from": py_from,
+            "os": f"{platform.system()} {platform.release()}", "package_manager": pm,
+            "missing": [i["name"] for i in req]}
+
+
+def environment_brief(last: dict | None, limit: int = 1500) -> str:
+    """A few lines for a worker model: what the machine that builds this has."""
+    if not last:
+        return ""
+    have = [f"{i['name']} {i['have']}" if i.get("have") not in (None, "found") else i["name"]
+            for i in last["items"] if i["status"] == OK and i["kind"] in ("tool", "library", "package")]
+    miss = [i["name"] for i in last["items"] if i["status"] in (MISSING, WARN) and i["kind"] in ("tool", "library",
+                                                                                                "package")]
+    lines = [f"Environment: {last.get('os')} (package manager: {last.get('package_manager') or 'unknown'})."]
+    if have:
+        lines.append("Available: " + ", ".join(have) + ".")
+    if miss:
+        lines.append("Not available, do not rely on them without saying so: " + ", ".join(miss) + ".")
+    return "\n".join(lines)[:limit]
+
 # ---------------------------------------------------------------- CLI
 
 def _print(rep: dict, verbose: bool) -> None:
@@ -585,6 +1006,9 @@ def main(argv=None) -> int:
     d.add_argument("b", nargs="?")
     sub.add_parser("snapshots", help="list saved snapshots")
     sub.add_parser("freeze", help="exact versions of the catalog's packages, as a requirements file")
+    pj = sub.add_parser("project", help="a project's own needs: infer from its build files and check this machine")
+    pj.add_argument("path", help="the project's checkout")
+    pj.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
     if a.cmd in (None, "check"):
         rep = check(getattr(a, "feature", None))
@@ -628,6 +1052,25 @@ def main(argv=None) -> int:
             for k, v in r[sec]["removed"].items():
                 print(f"  - {k} {v}")
         return 0
+    if a.cmd == "project":
+        spec = infer_project(a.path)
+        r = check_project(spec)
+        if a.json:
+            print(json.dumps({**spec, "check": r}, indent=1))
+            return 0
+        mark = {OK: " ok ", WARN: "warn", MISSING: "MISS", "note": "note"}
+        print(f"{spec['root']}: read {', '.join(spec['files']) or 'no build files'}")
+        for i in r["items"]:
+            need = f" {i['need']}" if i.get("need") else ""
+            have = f": {i['have']}" if i.get("have") else ""
+            print(f"  [{mark[i['status']]}] {i['kind']:<8} {i['name']}{need}{have}"
+                  + (" (optional)" if i.get("optional") else ""))
+            if i.get("fix"):
+                print(f"           fix: {i['fix']}")
+        if r["python_from"]:
+            print(f"Python packages checked in {r['python_from']}")
+        print("everything required is here" if r["status"] != MISSING else "missing: " + ", ".join(r["missing"]))
+        return 1 if r["status"] == MISSING else 0
     if a.cmd == "freeze":
         sys.stdout.write(freeze())
         return 0

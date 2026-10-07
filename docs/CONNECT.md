@@ -41,7 +41,8 @@ compare yours (`model_stats` shows the results to an agent).
       "disabled": false,
       "autoApprove": ["studio_status", "list_models", "route_prompt", "model_stats", "devices", "doctor",
                       "job_kinds", "job_status", "job_log", "list_projects", "get_project", "list_traces",
-                      "requirements", "review_sources", "review_summary"]
+                      "requirements", "project_requirements", "review_sources",
+                      "review_summary"]
     }
   }
 }
@@ -99,13 +100,16 @@ HTTP) or start `scripts/ns_mcp.py` (stdio).
 | `get_project` | reads | A project's plan: tasks, their status, assigned models, results awaiting review, pending proposals. |
 | `edit_project` | changes state | Change a plan: changes is a list of {op: add|update|drop|reopen|assign, ...} (see docs/DIRECTOR.md). Logged as the person's edit. |
 | `approve_project` | changes state | Approve a draft plan: assigns a model to every task and freezes it. |
-| `start_project` | **starts or stops work** | Start (or resume) an approved project: worker models begin on ready tasks. |
+| `start_project` | **starts or stops work** | Start (or resume) an approved project: worker models begin on ready tasks. Refused while the machine lacks a required item, unless `force`. |
 | `pause_project` | changes state | Pause a running project. |
 | `review_task` | changes state | Accept a task's result, or send it back with feedback for the next attempt. |
 | `decide_proposal` | changes state | Accept or reject a change the director proposed. |
 | `answer_task` | changes state | Answer a blocked task's questions; it goes back in the queue. |
 | `list_traces` | reads | Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/. |
 | `requirements` | reads | What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), what is missing and the fix for this OS. |
+| `project_requirements` | reads | Check a project's own requirements (toolchain, libraries, packages, hardware, features, notes) on this machine. |
+| `set_project_requirements` | changes state | Replace a project's requirement list. |
+| `scan_project_requirements` | changes state | Infer a project's requirements again from its checkout's build files; a person's items are kept. |
 | `review_sources` | reads | Models with recorded replies, and the sources, subjects and verdicts to filter the neuron review by. |
 | `review_summary` | reads | Neurons that fire more on wrong answers (or with risk, or most often) for a filter, and the error rate per day, week or month. |
 | `review_label` | changes state | Record whether a checked reply was right or wrong, so it counts in the review. |

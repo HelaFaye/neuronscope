@@ -55,6 +55,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |
 | Add TestQA runs and other benchmarks to the review | **Jobs → Review** | `neuron_review.py ingest-testqa`, `ingest-items` | `start_job review_testqa`, `review_items` |
 | Mark a checked chat reply right or wrong | chat → check → *right / wrong* | `POST /api/review/label` | `review_label` |
+| A project's own requirements (toolchain, libraries, packages, hardware), inferred from its build files, checked before Start | **Projects → Requirements** | `python scripts/ns_requirements.py project <dir>` | `project_requirements`, `set_project_requirements`, `scan_project_requirements` |
 | Projects split by skill, worker models, review | **Projects** | `python scripts/director.py analyze`, `/api/projects` | `create_project`, `get_project`, `review_task`, … |
 
 ## Finding and editing H-Neurons

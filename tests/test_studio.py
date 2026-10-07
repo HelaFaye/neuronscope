@@ -807,6 +807,45 @@ def test_director_end_to_end(studio_srv, tmp_path):
     assert "Approve plan" in page
 
 
+def test_project_requirements_gate_start(studio_srv, tmp_path):
+    import director
+    studio.DIRECTOR["store"] = director.ProjectStore(tmp_path / "projects")
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    (repo / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.10)\nfind_package(Git)\n")
+    code, r = call(studio_srv, "/api/projects", {"title": "Req", "text": "- Build: set up CMake.", "repo": str(repo)})
+    assert code == 200, r
+    pid = r["id"]
+    code, p = call(studio_srv, f"/api/projects/{pid}")
+    names = [i["name"] for i in p["requirements"]["items"]]
+    assert "cmake" in names and "git" in names and p["requirements"]["last"] is None
+    code, meta = call(studio_srv, "/api/projects")
+    assert "tool" in meta["req_kinds"] and "amd_vulkan" in meta["req_features"]
+    items = p["requirements"]["items"] + [{"kind": "tool", "name": "no-such-tool-xyz"},
+                                          {"kind": "note", "name": "needs the dev board plugged in"}]
+    code, r = call(studio_srv, f"/api/projects/{pid}/requirements", {"items": items, "reason": "board"})
+    assert code == 200, r
+    assert call(studio_srv, f"/api/projects/{pid}/requirements", {"items": [{"kind": "tool", "name": "a|b"}]})[0] == 400
+    code, rq = call(studio_srv, f"/api/projects/{pid}/requirements")
+    assert code == 200 and rq["last"]["missing"] == ["no-such-tool-xyz"]
+    assert call(studio_srv, f"/api/projects/{pid}/approve", {})[0] == 200
+    code, r = call(studio_srv, f"/api/projects/{pid}/start", {})
+    assert code == 409 and r["missing"] == ["no-such-tool-xyz"]
+    _, p = call(studio_srv, f"/api/projects/{pid}")
+    assert p["status"] == "approved"
+    code, r = call(studio_srv, f"/api/projects/{pid}/start", {"force": True})
+    assert code == 200 and r["status"] == "running"
+    call(studio_srv, f"/api/projects/{pid}/pause", {})
+    code, r = call(studio_srv, f"/api/projects/{pid}/requirements/scan", {"root": str(tmp_path / "nope")})
+    assert code == 400
+    code, r = call(studio_srv, f"/api/projects/{pid}/requirements/scan", {})
+    assert code == 200
+    _, p = call(studio_srv, f"/api/projects/{pid}")
+    assert "no-such-tool-xyz" in [i["name"] for i in p["requirements"]["items"]]   # the person's items stay
+    assert any(h["action"] == "requirements" for h in p["history"])
+    call(studio_srv, "/api/workers/stop", {})
+
+
 def d_status(p, tid):
     return next(t["status"] for t in p["tasks"] if t["id"] == tid)
 

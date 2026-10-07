@@ -1156,6 +1156,10 @@ def _scorer(model, clf):
     return _SCORERS[key]
 
 
+def _configured_bins():
+    return {"llama-server": STATE.get("server_bin"), "llama-cett-dump": STATE.get("cett")}
+
+
 def review_store():
     if "review" not in STATE or STATE["review"] is None:
         import neuron_review
@@ -2118,7 +2122,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/projects":
             return self._json(200, {"projects": store.list(),
                                     "models": [{"id": m["id"], "size": m["size"]} for m in scan_models()],
-                                    "subjects": dr.sc.SUBJECTS, "checks": bool(STATE["cett"])})
+                                    "subjects": dr.sc.SUBJECTS, "checks": bool(STATE["cett"]),
+                                    "req_kinds": dr.nrq.PROJECT_KINDS,
+                                    "req_features": {k: v["title"] for k, v in dr.nrq.FEATURES.items()},
+                                    "req_hardware": dr.nrq.HARDWARE_ITEMS})
+        m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)/requirements", self.path)
+        if m:
+            try:
+                with store.lock(m.group(1)):
+                    plan = store.load(m.group(1))
+                    dr.check_requirements(plan, configured=_configured_bins())
+                    store.save(plan)
+            except dr.PlanError as e:
+                return self._json(404, {"error": str(e)})
+            return self._json(200, plan["requirements"])
         m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)", self.path)
         if m:
             try:
@@ -2126,6 +2143,7 @@ class Handler(BaseHTTPRequestHandler):
             except dr.PlanError as e:
                 return self._json(404, {"error": str(e)})
             plan.pop("source", None)
+            dr._reqs(plan)                    # plans from before per-project requirements
             plan["skills"] = dr.skill_breakdown(plan["tasks"])
             plan["gaps"] = dr.coverage_gaps(plan["tasks"], plan.get("census"))
             plan["ready"] = [t["id"] for t in dr.ready_tasks(plan)] if plan["status"] == "running" else []
@@ -2155,7 +2173,7 @@ class Handler(BaseHTTPRequestHandler):
                 store.save(plan)
                 return self._json(200, {"id": plan["id"]})
             m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)/(edit|approve|start|pause|decide|review|answer|"
-                             r"policy|refine|delete)", self.path)
+                             r"policy|refine|delete|requirements|requirements/scan)", self.path)
             if not m:
                 return self._json(404, {"error": "not found"})
             pid, action = m.groups()
@@ -2180,8 +2198,31 @@ class Handler(BaseHTTPRequestHandler):
                     out = dr.edit(plan, req.get("changes") or [], by="human", reason=str(req.get("reason") or ""))
                 elif action == "approve":
                     dr.approve(plan, assign_fn=assign_fn_for(plan))
-                elif action in ("start", "pause"):
-                    dr.set_running(plan, action == "start")
+                elif action == "start":
+                    # Nothing starts on a machine that lacks what the project needs,
+                    # unless the person says so.
+                    if (plan.get("requirements") or {}).get("items") and not req.get("force"):
+                        last = dr.check_requirements(plan, configured=_configured_bins())
+                        if last["missing"]:
+                            store.save(plan)
+                            return self._json(409, {"error": "this machine is missing what the project needs: "
+                                                             + ", ".join(last["missing"])
+                                                             + " (fix it, or start anyway)",
+                                                    "missing": last["missing"]})
+                    dr.set_running(plan, True)
+                elif action == "pause":
+                    dr.set_running(plan, False)
+                elif action == "requirements":
+                    out = dr.set_requirements(plan, req.get("items"), reason=str(req.get("reason") or ""))
+                elif action == "requirements/scan":
+                    root = str(req.get("root") or (plan.get("requirements") or {}).get("root")
+                               or (plan.get("census") or {}).get("path") or "")
+                    if not root:
+                        return self._json(400, {"error": "which folder? give the project's checkout"})
+                    try:
+                        out = dr.scan_requirements(plan, root, by="human")
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
                 elif action == "decide":
                     out = dr.decide(plan, str(req.get("proposal")), bool(req.get("accept")),
                                     note=str(req.get("note") or ""))
@@ -2360,7 +2401,7 @@ class Handler(BaseHTTPRequestHandler):
         import ns_requirements as nrq
         post = self.command == "POST"
         req = self._read() if post else {}
-        configured = {"llama-server": STATE.get("server_bin"), "llama-cett-dump": STATE.get("cett")}
+        configured = _configured_bins()
         try:
             if not post and self.path == "/api/requirements":
                 return self._json(200, nrq.check(configured=configured))

@@ -50,6 +50,14 @@ without its GPU backend, or a package that moved a major version.
 **Download exact package versions** gives a requirements file that
 reproduces this setup on another machine.
 
+## Per project
+
+Each project in **Projects** has its own requirement list, inferred from
+its checkout's build files (CMake, Meson, xmake, Cargo, go.mod,
+package.json, pyproject, requirements.txt and more), editable, and checked
+the same way; Start waits until required items are present. See
+[DIRECTOR.md](DIRECTOR.md#requirements-of-a-project).
+
 ## Command line
 
     python scripts/ns_requirements.py                       # every feature
@@ -59,6 +67,7 @@ reproduces this setup on another machine.
     python scripts/ns_requirements.py snapshot
     python scripts/ns_requirements.py diff                  # the last two
     python scripts/ns_requirements.py freeze > env.txt
+    python scripts/ns_requirements.py project ~/src/game    # a project's own needs
 
 MCP: the `requirements` tool (optionally one `feature`), and `start_job`
 with `install_package` or `env_snapshot`. `doctor.py` remains the "can I run

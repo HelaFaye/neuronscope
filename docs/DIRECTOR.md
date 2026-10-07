@@ -125,6 +125,41 @@ python scripts/accelerators.py          # what Studio would use, and how
 python scripts/director.py analyze notes.md --repo ~/src/project   # the split, offline
 ```
 
+## Requirements of a project
+
+A project has its own needs, separate from NeuronScope's: the toolchain,
+libraries and Python packages its build files name, the hardware it wants,
+which NeuronScope features it relies on, and anything to check by hand. The
+project page's **Requirements** card keeps that list:
+
+- **Inferred** when the project is created from a checkout (and on **Scan
+  build files**): CMake (`cmake_minimum_required`, `find_package`,
+  `pkg_check_modules`), Meson `dependency()`, Makefiles, xmake (its own
+  packages listed as a note), premake, autotools, Cargo and
+  `rust-toolchain`, `go.mod`, `package.json` (`engines.node`, the package
+  manager from its lock file), `.nvmrc`, `pyproject.toml`, top-level
+  `requirements*.txt` (`dev`/`test` files optional), `.python-version`,
+  Dockerfiles, Gradle, Maven, Zig, Godot, Nix, vcpkg, Conan, `just` and .NET
+  projects. Only build and manifest files in the top two folder levels are
+  read (not `node_modules`, `build`, vendored or third-party folders), never
+  sources.
+- **Edited** by you: add a tool, library (pkg-config name), Python package,
+  hardware (`ram_gib`, `vram_gib`, `disk_gib`, `gpu` vendor), a NeuronScope
+  feature, or a note; remove what doesn't apply. Your items survive
+  re-scans. Every change is in the plan's history.
+- **Checked** on this machine (**Check now**): versions against the
+  needed ones, libraries through pkg-config, Python packages in the
+  project's `.venv`/`venv` when it has one (else Studio's Python, and the
+  page says so), with the install command for this OS for each gap.
+
+**Start** checks first and refuses while a required item is missing,
+listing what; you can start anyway. Workers are told what the machine has
+and what it lacks, so their build steps and commands fit it.
+
+```bash
+python scripts/ns_requirements.py project ~/src/game     # the same, for any checkout
+```
+
 ## API
 
 Owner only (a paired device gets 403), like Jobs.
@@ -135,7 +170,10 @@ Owner only (a paired device gets 403), like Jobs.
 | `POST /api/projects` | `{title, goal, text, repo?}` → draft |
 | `GET /api/projects/<id>` | the plan, skill split, coverage gaps, ready tasks |
 | `POST /api/projects/<id>/edit` | `{changes: [{op: add\|update\|drop\|reopen\|assign, …}], reason}` |
-| `POST /api/projects/<id>/approve`, `/start`, `/pause`, `/delete` | lifecycle |
+| `POST /api/projects/<id>/approve`, `/start`, `/pause`, `/delete` | lifecycle; `/start` answers 409 with `missing` unless `{force: true}` |
+| `GET /api/projects/<id>/requirements` | check the project's requirements on this machine |
+| `POST /api/projects/<id>/requirements` | `{items: [{kind, name, need, why, optional}], reason}`: replace the list |
+| `POST /api/projects/<id>/requirements/scan` | `{root?}`: infer again from the checkout's build files |
 | `POST /api/projects/<id>/refine` | `{model}`: re-plan a draft with a model |
 | `POST /api/projects/<id>/decide` | `{proposal, accept, note?}` |
 | `POST /api/projects/<id>/review` | `{task, accept, feedback}` |

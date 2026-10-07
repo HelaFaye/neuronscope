@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added (per-project requirements)
+- Each project has its own requirement list (tools, libraries, Python
+  packages, hardware, NeuronScope features, notes), inferred from its
+  checkout's build files when created or re-scanned (CMake, Meson, xmake,
+  premake, autotools, Cargo, Go, Node, Python, Docker, Gradle, Maven, Zig,
+  Godot, Nix, vcpkg, Conan, just, .NET), editable on the project page, and
+  checked on this machine with the fix for its OS (pkg-config for libraries,
+  the project's virtualenv for packages). Start answers 409 with what is
+  missing unless forced; workers are told what the machine has and lacks.
+  `ns_requirements.py project <dir>`; MCP `project_requirements`,
+  `set_project_requirements`, `scan_project_requirements`, and `force` on
+  `start_project`.
+
 ### Added (neuron review)
 - Review page (`/review`) and `scripts/neuron_review.py`: every reply
   NeuronScope looks at is stored as an activation profile with its source
