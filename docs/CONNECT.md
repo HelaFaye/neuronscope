@@ -40,7 +40,8 @@ compare yours (`model_stats` shows the results to an agent).
       "url": "http://127.0.0.1:7870/mcp",
       "disabled": false,
       "autoApprove": ["studio_status", "list_models", "route_prompt", "model_stats", "devices", "doctor",
-                      "job_kinds", "job_status", "job_log", "list_projects", "get_project", "list_traces"]
+                      "job_kinds", "job_status", "job_log", "list_projects", "get_project", "list_traces",
+                      "requirements", "review_sources", "review_summary"]
     }
   }
 }
@@ -104,6 +105,10 @@ HTTP) or start `scripts/ns_mcp.py` (stdio).
 | `decide_proposal` | changes state | Accept or reject a change the director proposed. |
 | `answer_task` | changes state | Answer a blocked task's questions; it goes back in the queue. |
 | `list_traces` | reads | Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/. |
+| `requirements` | reads | What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), what is missing and the fix for this OS. |
+| `review_sources` | reads | Models with recorded replies, and the sources, subjects and verdicts to filter the neuron review by. |
+| `review_summary` | reads | Neurons that fire more on wrong answers (or with risk, or most often) for a filter, and the error rate per day, week or month. |
+| `review_label` | changes state | Record whether a checked reply was right or wrong, so it counts in the review. |
 
 `python scripts/ns_mcp.py --list` prints the same list.
 

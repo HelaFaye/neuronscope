@@ -29,6 +29,8 @@ abstain. NeuronScope extends the method in several directions:
 | **Retraining on deficits** | turns measured failures into verified SFT and DPO data with replay and a holdout, trains with QLoRA, LoRA or full fine-tuning (DDP/FSDP), merges and converts to GGUF | [docs/RETRAINING.md](docs/RETRAINING.md) |
 | **Labs** | capability-preserving quantization, scale sweeps, adaptive remote tuning | [docs/LABS.md](docs/LABS.md) |
 | **Connect** | your models as the AI of Cline, Claude Desktop or any OpenAI-compatible app; NeuronScope's harness and lab as MCP tools (models, reply checks, jobs, projects), with a Connect page that writes the settings | [docs/CONNECT.md](docs/CONNECT.md) |
+| **Neuron review** | every neuron's link to wrong answers across tests, benchmarks and checked chat replies, filtered by source, subject and time, played over time in 3D | [docs/REVIEW.md](docs/REVIEW.md) |
+| **Requirements** | what each feature needs (packages, programs, llama.cpp GPU backends, drivers, device access, memory), fixes for your OS, one-click Python installs, environment snapshots and diffs | [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) |
 | **Visualization** | 2D/3D activation maps, token-resolved timelines, live tracing proxy, weight views | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) |
 | **Merging** | neuron-granular selective merges, mergekit plugin, MoE expert-count sweeps | [docs/MERGING.md](docs/MERGING.md) |
 

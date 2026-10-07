@@ -47,7 +47,7 @@ details summary{cursor:pointer;color:var(--mut);font-size:12px}
 .risk.lo{background:color-mix(in srgb,var(--ok) 20%,transparent)}
 .empty{color:var(--mut);padding:2rem;text-align:center}
 </style>
-<header><h1>Studio · Projects</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
+<header><h1>Studio · Projects</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
 <main>
 <div>
  <section class="card"><h2>Projects</h2><div id="plist" class="note">none yet</div></section>

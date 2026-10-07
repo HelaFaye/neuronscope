@@ -49,6 +49,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1121,7 +1122,18 @@ def score_worker():
         while ACTIVITY["active"] > 0:
             time.sleep(1)
         try:
-            res = _scorer(model, clf).score([m for m in messages if m.get("role") != "system"] or messages, text)
+            sc = _scorer(model, clf)
+            msgs = [m for m in messages if m.get("role") != "system"] or messages
+            prof = getattr(sc, "profile", None)
+            res = prof(msgs, text) if prof else sc.score(msgs, text)
+            if "cett" in res:
+                try:
+                    import neuron_review
+                    review_store().record(model["id"], neuron_review.bin_profile(res["cett"]), source="live",
+                                          kind="observed", subjects=[subject] if subject else None,
+                                          risk=res.get("prob"))
+                except Exception as e:
+                    print(f"[studio] review record failed: {e}", file=sys.stderr)
             STATE["stats"].record(model["id"], "activation", size=model["size"], subject=subject,
                                   h_score=res["score"], prob=res["prob"], n_tokens=res["n_tokens"],
                                   threshold=0.0)
@@ -1132,6 +1144,7 @@ def score_worker():
 # ------------------------------------------------------- per-reply checks
 
 TRACES = {"lock": threading.Lock(), "payloads": {}}
+REVIEW_VIEWS = {"lock": threading.Lock(), "views": {}}
 TRACE_ID = re.compile(r"[A-Za-z0-9_-]{6,64}")
 
 
@@ -1143,9 +1156,25 @@ def _scorer(model, clf):
     return _SCORERS[key]
 
 
-def trace_reply(model, messages, text, threshold=0.5):
+def review_store():
+    if "review" not in STATE or STATE["review"] is None:
+        import neuron_review
+        STATE["review"] = neuron_review.ReviewStore(STATE.get("review_dir"))
+    return STATE["review"]
+
+
+def _review_subjects(text):
+    try:
+        from subject_classifier import default_classifier
+        return default_classifier().analyze(text)["labels"] or ["unknown"]
+    except Exception:
+        return ["unknown"]
+
+
+def trace_reply(model, messages, text, threshold=0.5, source="chat-check"):
     """Score one reply token by token and save it as a trace session that the
-    3D view (viz/bloom.py) and timeline.py can open. -> summary for the chat."""
+    3D view (viz/bloom.py) and timeline.py can open. -> summary for the chat.
+    The reply's mean activation also goes into the neuron review store."""
     clf = load_settings().get(_key(model["path"]), {}).get("classifier")
     if not clf:
         raise ValueError(f"{model['id']} has no classifier set (model settings: classifier)")
@@ -1165,10 +1194,19 @@ def trace_reply(model, messages, text, threshold=0.5):
                 question=(_last_user_text({"messages": msgs}) or "")[:500], verdict=None,
                 h_cells=r["h_cells"], col_weight=r["col_weight"].tolist())
     prob = [round(float(p), 4) for p in r["prob"]]
+    review = None
+    try:
+        q = _last_user_text({"messages": msgs}) or ""
+        oid = review_store().record(model["id"], frames.mean(axis=0), source=source, kind="observed",
+                                    subjects=_review_subjects(q), risk=float(sum(prob) / len(prob)),
+                                    item=tid)
+        review = {"model": model["id"], "id": oid}
+    except Exception as e:
+        print(f"[studio] review record failed: {e}", file=sys.stderr)
     return {"id": tid, "pieces": r["pieces"], "prob": prob,
             "flagged": [i for i, p in enumerate(prob) if p >= threshold], "threshold": threshold,
             "max": max(prob), "mean": round(sum(prob) / len(prob), 4),
-            "url": f"viz/{tid}/"}
+            "url": f"viz/{tid}/", "review": review}
 
 
 def trace_payload(tid):
@@ -1649,7 +1687,7 @@ def run_task(pid, tid):
             POOL.release(w)
         if policy.get("check") and STATE["cett"] and text:
             try:
-                r = trace_reply(model, msgs, text)
+                r = trace_reply(model, msgs, text, source="project")
                 check = {"id": r["id"], "url": r["url"], "max": r["max"], "mean": r["mean"],
                          "n_flagged": len(r["flagged"]), "flagged": bool(r["flagged"])}
             except ValueError:
@@ -2226,6 +2264,133 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)[:300]})
         return self._json(404, {"error": "not found"})
 
+    # ------------------------------------------------ neuron review
+
+    def _html(self, page):
+        body = page.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _review_get(self):
+        if not self._owner_only():
+            return
+        if self.path == "/review":
+            import review_page
+            return self._html(review_page.PAGE)
+        if self.path == "/api/review":
+            st = review_store()
+            ms = st.models()
+            return self._json(200, {"models": ms, "facets": {m["model"]: st.facets(m["model"]) for m in ms},
+                                    "store": str(st.root)})
+        m = re.fullmatch(r"/review/view/([0-9a-f]{12})/(|api/meta|api/theme|api/trace)", self.path)
+        with REVIEW_VIEWS["lock"]:
+            pl = REVIEW_VIEWS["views"].get(m.group(1)) if m else None
+        if pl is None:
+            return self._json(404, {"error": "no such view (views last until Studio restarts)"})
+        import bloom
+        kind = m.group(2)
+        if kind == "":
+            return self._html(bloom.PAGE)
+        if kind == "api/trace":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(pl["blob"])))
+            self.end_headers()
+            self.wfile.write(pl["blob"])
+            return
+        return self._json(200, pl["meta" if kind == "api/meta" else "theme"])
+
+    def _review_post(self):
+        if not self._owner_only():
+            return
+        import neuron_review as nrv
+        req = self._read()
+        st = review_store()
+        model = str(req.get("model") or "")
+        if self.path == "/api/review/label":
+            try:
+                st.label(model, str(req.get("id") or ""), str(req.get("verdict") or ""))
+            except KeyError as e:
+                return self._json(404, {"error": str(e).strip("'\"")})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+            return self._json(200, {"ok": True})
+        if self.path not in ("/api/review/summary", "/api/review/view"):
+            return self._json(404, {"error": "not found"})
+        if not any(m["model"] == model for m in st.models()):
+            return self._json(404, {"error": f"no observations for {model!r}"})
+        stat = req.get("stat") or "association"
+        how = req.get("by") or "week"
+        if stat not in nrv.STATS or how not in nrv.BUCKETS:
+            return self._json(400, {"error": f"stat is one of {nrv.STATS}, by one of {nrv.BUCKETS}"})
+
+        def lst(k):
+            v = req.get(k)
+            return [str(x) for x in v] if isinstance(v, list) and v else None
+        filters = {"sources": lst("sources"), "kinds": lst("kinds"), "subjects": lst("subjects"),
+                   "verdicts": lst("verdicts"),
+                   "since": float(req["since"]) if req.get("since") else None,
+                   "until": float(req["until"]) if req.get("until") else None}
+        every = max(0, int(req.get("every") or 0))
+        try:
+            if self.path == "/api/review/summary":
+                return self._json(200, nrv.summary(st, model, stat, how, every, top=int(req.get("top") or 25),
+                                                   **filters))
+            blob, meta = nrv.view_payload(st, model, stat, how, every, **filters)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        import bloom
+        vid = uuid.uuid4().hex[:12]
+        theme = dict(bloom.THEMES.get(STATE.get("viz_theme") or "dark") or next(iter(bloom.THEMES.values())))
+        with REVIEW_VIEWS["lock"]:
+            if len(REVIEW_VIEWS["views"]) >= 8:
+                REVIEW_VIEWS["views"].pop(next(iter(REVIEW_VIEWS["views"])))
+            REVIEW_VIEWS["views"][vid] = {"blob": blob, "meta": meta, "theme": theme}
+        return self._json(200, {"id": vid, "url": f"/review/view/{vid}/", "frames": meta["frames"],
+                                "cells": meta["cells"]})
+
+    # ------------------------------------------------ requirements (scripts/ns_requirements.py)
+
+    def _requirements(self):
+        if not self._owner_only():
+            return
+        import ns_requirements as nrq
+        post = self.command == "POST"
+        req = self._read() if post else {}
+        configured = {"llama-server": STATE.get("server_bin"), "llama-cett-dump": STATE.get("cett")}
+        try:
+            if not post and self.path == "/api/requirements":
+                return self._json(200, nrq.check(configured=configured))
+            if not post and self.path == "/api/requirements/snapshots":
+                return self._json(200, {"snapshots": nrq.list_snapshots(), "dir": str(nrq.SNAP_DIR)})
+            if not post and self.path == "/api/requirements/freeze":
+                body = nrq.freeze().encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="neuronscope-env.txt"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if post and self.path == "/api/requirements/snapshot":
+                path = nrq.save_snapshot(nrq.snapshot(configured))
+                return self._json(200, {"id": path.stem})
+            if post and self.path == "/api/requirements/diff":
+                snaps = [x["id"] for x in nrq.list_snapshots()]
+                a = req.get("a") or (snaps[1] if len(snaps) > 1 else None)
+                b = req.get("b") or (snaps[0] if snaps else None)
+                if not a or not b:
+                    return self._json(400, {"error": "take two snapshots first (one now, one after a change)"})
+                return self._json(200, nrq.diff(nrq.load_snapshot(str(a)), nrq.load_snapshot(str(b))))
+        except FileNotFoundError:
+            return self._json(404, {"error": "no such snapshot"})
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
     def do_GET(self):
         self._route = None
         if self.path.split("?")[0] == "/pair":
@@ -2348,6 +2513,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._json(200, run_doctor())
+        if self.path in ("/review", "/api/review") or self.path.startswith("/review/view/"):
+            return self._review_get()
+        if self.path.startswith("/api/requirements"):
+            return self._requirements()
         if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
             return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
@@ -2523,6 +2692,12 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/mcp":
                 return self._mcp_post()
+
+            if self.path.startswith("/api/review/"):
+                return self._review_post()
+
+            if self.path.startswith("/api/requirements/"):
+                return self._requirements()
 
             if self.path in ("/api/lab/start", "/api/lab/stop"):
                 if not self._owner_only():
@@ -2983,6 +3158,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <a href="/lab" class="chip" style="text-decoration:none" title="labs, live and 3D views, pipeline dashboard">Lab</a>
   <a href="/setup" class="chip" style="text-decoration:none" title="paths, building llama.cpp, hardware, health check">Setup</a>
   <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
+  <a href="/review" class="chip" style="text-decoration:none" title="how each neuron behaves across tests, benchmarks and checked replies, by subject and over time">Review</a>
   <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
   <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
   <button id="theme" title="toggle theme">◐</button>
@@ -3284,7 +3460,14 @@ function showRisk(el,c){
   const verdict=n?`<b class="bad">${n} of ${T} tokens flagged</b>`:`<b class="okc">no tokens flagged</b>`;
   el.innerHTML=`<div class="sum">risk: ${verdict} · peak ${(c.max*100).toFixed(0)}% · mean ${(c.mean*100).toFixed(0)}% `+
     `(flag at ${(c.threshold*100).toFixed(0)}%) · <a href="${esc(c.url)}" target="_blank" rel="noopener">open 3D view ↗</a>`+
-    ` · <a href="#" data-a="tog">${n?'hide':'show'} tokens</a></div><div class="rt"${n?'':' hidden'}></div>`;
+    ` · <a href="#" data-a="tog">${n?'hide':'show'} tokens</a>`+
+    (c.review?` · <span class="lbl">was it right? <a href="#" data-v="correct">right</a> / <a href="#" data-v="wrong">wrong</a>${c.label?` <b>(${esc(c.label==='correct'?'right':c.label)})</b>`:''}</span>`:'')+
+    `</div><div class="rt"${n?'':' hidden'}></div>`;
+  // A person's verdict makes the reply count in the Review page's right-vs-wrong statistics.
+  el.querySelectorAll('[data-v]').forEach(a=>a.onclick=async e=>{ e.preventDefault();
+    const r=await post('/api/review/label',{model:c.review.model,id:c.review.id,verdict:a.dataset.v});
+    if(r.ok){ c.label=a.dataset.v; const m=el.closest('.msg')?._msg; if(m&&m.check){ m.check.label=c.label; await persist(); } showRisk(el,c); }
+    else alert((await r.json()).error||r.statusText); });
   // Shade each token by its risk; underline the ones over the threshold.
   // Shading starts at half the threshold, so tokens the classifier calls clean stay unshaded.
   el.querySelector('.rt').innerHTML=c.pieces.map((p,i)=>{ const r=c.prob[i]||0, a=Math.max(0,Math.min(1,(r-c.threshold/2)/(c.threshold/2)));
@@ -3299,7 +3482,7 @@ async function checkReply(d){
   try{ const r=await post('/api/trace',{model:m.model||$('#modelPick').value||undefined,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)});
     c=await r.json(); if(!r.ok) c={error:c.error||r.statusText}; }catch(e){ c={error:String(e)}; }
   showRisk(el,c);
-  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url}; await persist(); }
+  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url,review:c.review}; await persist(); }
 }
 try{ $('#autoCheck').checked=localStorage.getItem('ns_autocheck')==='1'; }catch{}
 $('#autoCheck').onchange=()=>{ try{ localStorage.setItem('ns_autocheck',$('#autoCheck').checked?'1':'0'); }catch{} };
@@ -3526,6 +3709,8 @@ def main(argv=None):
                         "cpu), per-device settings, devices to skip (see scripts/accelerators.py)")
     p.add_argument("--traces-dir", default=os.path.expanduser("~/.neuronscope/traces"),
                    help="where per-reply checks are saved (open them in the 3D view or timeline.py)")
+    p.add_argument("--review-dir", default=os.path.expanduser("~/.neuronscope/review"),
+                   help="neuron review store: every checked reply's activations, for the /review page")
     p.add_argument("--idle-ttl", type=int, default=0, help="unload the model after N idle seconds (0 = never)")
     p.add_argument("--no-jit", action="store_true", help="/v1 requests never load or swap models")
     p.add_argument("--jobs-dir", default=os.path.expanduser("~/.neuronscope/jobs"),
@@ -3571,6 +3756,7 @@ def main(argv=None):
     STATE["settings_path"] = os.path.expanduser(a.settings)
     STATE["chats_dir"] = os.path.expanduser(a.chats_dir)
     STATE["traces_dir"] = os.path.expanduser(a.traces_dir)
+    STATE["review_dir"], STATE["review"] = os.path.expanduser(a.review_dir), None
     STATE.update(max_workers=max(1, a.max_workers), worker_idle=max(30, a.worker_idle),
                  hardware_path=os.path.expanduser(a.hardware))
     import director

@@ -21,6 +21,9 @@ own options.
 | Health check (packages, GPUs, build, model, pipeline) | **Setup → Health check** | `python scripts/doctor.py` | `doctor` |
 | Hardware for worker models (ROCm, Vulkan, CUDA, Metal, CPU) | **Setup → Hardware** | `~/.neuronscope/hardware.json`, `python scripts/accelerators.py` | `devices` |
 | Restart Studio | **Setup → Restart Studio** | stop and start it | — |
+| What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), with fixes for this OS | **Setup → Requirements** | `python scripts/ns_requirements.py` | `requirements` |
+| Install a missing Python package | **Setup → Requirements → Install**, or Jobs → Setup | `python scripts/ns_requirements.py install <pkg>` | `start_job install_package` |
+| Environment snapshots and what changed | **Setup → Requirements → snapshots** | `ns_requirements.py snapshot`, `diff`, `freeze` | `start_job env_snapshot` |
 
 Network exposure (binding beyond this computer, tokens, TLS, remote jobs) is
 deliberately not on the Setup page: set it in `config.json` or with flags
@@ -49,6 +52,9 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | SWE-bench, LiveBench, CLIP_benchmark | **Jobs → Benchmarks** | `python scripts/benchmarks.py`, `clip_bench.py` | `start_job …` |
 | Retraining on failures (data, fine-tune, merge) | **Jobs → Retrain** | `deficits.py`, `finetune.py`, `merge_export.py` | `start_job …` |
 | Compare models, item by item; does suppression help | **Jobs → Analysis** | `merge_eval.py`, `compare_models.py` | `start_job …` |
+| Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |
+| Add TestQA runs and other benchmarks to the review | **Jobs → Review** | `neuron_review.py ingest-testqa`, `ingest-items` | `start_job review_testqa`, `review_items` |
+| Mark a checked chat reply right or wrong | chat → check → *right / wrong* | `POST /api/review/label` | `review_label` |
 | Projects split by skill, worker models, review | **Projects** | `python scripts/director.py analyze`, `/api/projects` | `create_project`, `get_project`, `review_task`, … |
 
 ## Finding and editing H-Neurons

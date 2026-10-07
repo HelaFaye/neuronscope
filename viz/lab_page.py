@@ -23,7 +23,7 @@ button.pri,a.btn.pri{background:var(--acc);color:var(--accfg);border-color:var(-
 select,input{font:12.5px ui-monospace,monospace;padding:.3rem .4rem;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--fg);width:100%}
 .up{color:var(--ok);font-size:12px}
 </style>
-<header><h1>Studio · Lab</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
+<header><h1>Studio · Lab</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <h3>Live views and labs</h3><div class="grid" id="svcs"></div>
 <h3>Desktop viewers</h3>

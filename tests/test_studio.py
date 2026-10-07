@@ -48,7 +48,8 @@ def studio_srv(tmp_path):
         "jobs": studio.ns_jobs.JobRunner(tmp_path / "jobs", 1), "jobs_off": None,
         "rag": None, "rag_dir": str(tmp_path / "rag"), "rag_embed": None, "rag_embed_gguf": None,
         "devices": studio.ns_pairing.DeviceRegistry(tmp_path / "devices.json"),
-        "links_path": str(tmp_path / "links.json"), "fingerprint": None})
+        "links_path": str(tmp_path / "links.json"), "fingerprint": None,
+        "review_dir": str(tmp_path / "review"), "review": None})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), studio.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -670,6 +671,75 @@ def test_check_reply_saves_trace_and_serves_3d_view(studio_srv, tmp_path):
     finally:
         studio._SCORERS.clear()
         studio.STATE.update(cett=None)
+
+
+
+def test_checked_replies_feed_the_review_page(studio_srv, tmp_path):
+    sc = _fake_scorer(tmp_path)
+    m = studio.find_model(CODER)
+    st = studio.load_settings()
+    st.setdefault(studio._key(m["path"]), {})["classifier"] = str(tmp_path / "clf.npz")
+    studio.save_settings(st)
+    studio.STATE.update(cett=sc.binary, traces_dir=str(tmp_path / "traces"))
+    studio._SCORERS[(m["path"], str(tmp_path / "clf.npz"))] = sc
+    try:
+        code, info = call(studio_srv, "/api/review")
+        assert code == 200 and info["models"] == []
+        ids = []
+        for i, text in enumerate(["abcdef", "abcdefgh", "xyz", "pqrstu", "hello"]):
+            code, r = call(studio_srv, "/api/trace", {"model": CODER, "text": text,
+                                                      "messages": [{"role": "user", "content": f"q{i}"}]})
+            assert code == 200 and r["review"]["model"] == CODER
+            ids.append(r["review"]["id"])
+        for oid, v in zip(ids, ["correct", "wrong", "correct", "wrong"]):
+            assert call(studio_srv, "/api/review/label", {"model": CODER, "id": oid, "verdict": v})[0] == 200
+        assert call(studio_srv, "/api/review/label", {"model": CODER, "id": "nope", "verdict": "wrong"})[0] == 404
+        assert call(studio_srv, "/api/review/label", {"model": CODER, "id": ids[0], "verdict": "maybe"})[0] == 400
+        code, info = call(studio_srv, "/api/review")
+        f = info["facets"][CODER]
+        assert f["n"] == 5 and f["sources"] == {"chat-check": {"kind": "observed", "n": 5}}
+        assert f["verdicts"] == {"correct": 2, "wrong": 2, "unknown": 1}
+        code, r = call(studio_srv, "/api/review/summary", {"model": CODER, "stat": "association", "by": "all"})
+        assert code == 200 and r["n_right"] == 2 and r["n_wrong"] == 2 and len(r["grid"]) == 3
+        code, r = call(studio_srv, "/api/review/summary", {"model": CODER, "stat": "risk", "verdicts": ["unknown"]})
+        assert code == 200 and r["n"] == 1
+        assert call(studio_srv, "/api/review/summary", {"model": "nobody"})[0] == 404
+        assert call(studio_srv, "/api/review/summary", {"model": CODER, "stat": "vibes"})[0] == 400
+        code, v = call(studio_srv, "/api/review/view", {"model": CODER, "stat": "firing", "by": "day"})
+        assert code == 200 and v["url"].startswith("/review/view/")
+        code, page = call(studio_srv, v["url"])
+        assert code == 200 and "three" in page
+        code, meta = call(studio_srv, v["url"] + "api/meta")
+        assert meta["mode"] == "review" and meta["frames"] == 1
+        assert call(studio_srv, "/review/view/000000000000/api/meta")[0] == 404
+        code, page = call(studio_srv, "/review")
+        assert code == 200 and "Studio · Review" in page
+    finally:
+        studio._SCORERS.clear()
+        studio.STATE.update(cett=None)
+
+
+
+def test_requirements_api(studio_srv, tmp_path, monkeypatch):
+    import ns_requirements
+    monkeypatch.setattr(ns_requirements, "SNAP_DIR", tmp_path / "env")
+    code, r = call(studio_srv, "/api/requirements")
+    assert code == 200 and r["features"]["core"]["status"] in ("ok", "warn") and "hardware" in r
+    assert call(studio_srv, "/api/requirements/diff", {})[0] == 400          # no snapshots yet
+    for _ in range(2):
+        code, s = call(studio_srv, "/api/requirements/snapshot", {})
+        assert code == 200
+        time.sleep(1.1)                                                       # ids are per second
+    code, lst = call(studio_srv, "/api/requirements/snapshots")
+    assert len(lst["snapshots"]) == 2
+    code, d = call(studio_srv, "/api/requirements/diff", {})
+    assert code == 200 and d["packages"]["changed"] == {}
+    assert call(studio_srv, "/api/requirements/diff", {"a": "../x", "b": "y"})[0] == 400
+    assert call(studio_srv, "/api/requirements/diff", {"a": "20000101-000000", "b": s["id"]})[0] == 404
+    code, txt = call(studio_srv, "/api/requirements/freeze")
+    assert code == 200 and "numpy==" in txt
+    code, j = call(studio_srv, "/api/jobs", {"kind": "install_package", "values": {"package": "evil"}})
+    assert code == 400
 
 
 _LOOP = {}

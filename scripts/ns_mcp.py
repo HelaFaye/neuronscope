@@ -134,7 +134,22 @@ def _check(st, a):
     flagged = [r["pieces"][i] for i in r.get("flagged", [])]
     return {"flagged_tokens": len(flagged), "of_tokens": len(r.get("prob", [])), "peak_risk": r.get("max"),
             "mean_risk": r.get("mean"), "threshold": r.get("threshold"), "flagged_text": flagged[:80],
-            "view_3d": st.base + "/" + r["url"], "trace_id": r.get("id")}
+            "view_3d": st.base + "/" + r["url"], "trace_id": r.get("id"), "review": r.get("review")}
+
+
+def _requirements(st, a):
+    r = st.call("GET", "/api/requirements")
+    feats = r["features"]
+    if a.get("feature"):
+        if a["feature"] not in feats:
+            raise ToolError(f"no feature {a['feature']!r}; known: {', '.join(feats)}")
+        feats = {a["feature"]: feats[a["feature"]]}
+    # Keep it short for the model: what is wrong, and how to fix it.
+    return {"os": r["os"], "package_manager": r["package_manager"], "hardware": r["hardware"],
+            "features": {k: {"title": f["title"], "status": f["status"], "note": f.get("note"),
+                             "problems": [{x: i.get(x) for x in ("name", "have", "need", "fix", "optional", "installable")}
+                                          for i in f["items"] if i["status"] != "ok"]}
+                         for k, f in feats.items()}}
 
 
 def _job_status(st, a):
@@ -234,6 +249,27 @@ TOOLS = [
      _pact("answer")),
     ("list_traces", "Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/.", _s({}), READ,
      lambda st, a: st.call("GET", "/api/traces")),
+    ("requirements", "What each NeuronScope feature needs (Python packages, programs, llama.cpp builds and their GPU "
+     "backends, drivers, device access, memory) and what this machine is missing, with the fix for its OS. "
+     "Install a missing Python package with start_job kind 'install_package'.",
+     _s({"feature": STR}), READ, _requirements),
+    ("review_sources", "Neuron review: the models with recorded replies, and for each the sources (tests, "
+     "benchmarks, observed chat checks), subjects and verdicts that review_summary can filter by.", _s({}), READ,
+     lambda st, a: {k: v for k, v in st.call("GET", "/api/review").items() if k != "store"}),
+    ("review_summary", "Neuron review: which neurons fire more on wrong answers than right ones (stat "
+     "'association', Cohen's d), track the classifier's risk ('risk'), or fire most ('firing'), for a filter of "
+     "sources, kinds (test, benchmark, observed), subjects and verdicts; plus the error rate per day, week or "
+     "month. Open it in 3D from Studio's /review page.",
+     _s({"model": STR, "stat": {"type": "string", "enum": ["association", "risk", "firing"]},
+         "by": {"type": "string", "enum": ["day", "week", "month", "all"]},
+         "sources": {"type": "array", "items": STR}, "kinds": {"type": "array", "items": STR},
+         "subjects": {"type": "array", "items": STR}, "verdicts": {"type": "array", "items": STR},
+         "top": INT}, ["model"]), READ,
+     lambda st, a: {k: v for k, v in st.call("POST", "/api/review/summary", a).items() if k != "grid"}),
+    ("review_label", "Neuron review: record whether a checked reply was right or wrong (verdict 'correct', "
+     "'wrong' or 'abstained'), so it counts in the association. The id is the 'review' id a check returns.",
+     _s({"model": STR, "id": STR, "verdict": {"type": "string", "enum": ["correct", "wrong", "abstained"]}},
+        ["model", "id", "verdict"]), WRITE, lambda st, a: st.call("POST", "/api/review/label", a)),
 ]
 BY_NAME = {t[0]: t for t in TOOLS}
 

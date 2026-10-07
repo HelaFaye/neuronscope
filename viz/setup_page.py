@@ -31,8 +31,13 @@ th{font-size:11px;color:var(--mut);text-transform:uppercase;font-weight:500}
 .next{border-left:3px solid var(--acc);padding:.5rem .7rem;background:var(--bg);border-radius:0 6px 6px 0;margin-top:.5rem}
 .dstage{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin:.7rem 0 .2rem}
 .check{display:flex;gap:.5rem;padding:.15rem 0;font-size:13px}.check .fix{color:var(--mut);font-size:12px}
+.st.missing{color:var(--no)}.st.n\/a{color:var(--mut)}
+details.feat{border-bottom:1px solid var(--line);padding:.35rem 0}details.feat summary{cursor:pointer;font-size:13.5px}
+.ri{display:grid;grid-template-columns:4.2rem 1fr;gap:.1rem .5rem;padding:.25rem 0 .25rem 1rem;font-size:13px}
+.ri code{font-size:12px}.ri .fx{grid-column:2;color:var(--mut);font-size:12px}
+.diffsec{margin:.4rem 0}.diffsec b{font-size:12px;color:var(--mut);text-transform:uppercase}
 </style>
-<header><h1>Studio · Setup</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
+<header><h1>Studio · Setup</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <section class="card"><h2>Status</h2><div id="status" class="note">…</div><div id="next"></div></section>
 
@@ -58,6 +63,16 @@ th{font-size:11px;color:var(--mut);text-transform:uppercase;font-weight:500}
 
 <section class="card"><h2>Health check</h2><div class="note">Python packages, GPUs, the llama.cpp build, the model, pipeline progress. Each problem says what it blocks and how to fix it.</div>
 <button id="doctor" style="margin-top:.5rem">Run checks</button><div id="checks"></div></section>
+
+<section class="card"><h2>Requirements</h2>
+<div class="note">What each feature needs (Python packages, programs, llama.cpp builds, drivers, device access, memory) and what this machine has. Python packages install from here into Studio’s Python, at the versions <code>requirements*.txt</code> ask for; system packages show the command for your OS. Same as <code>python scripts/ns_requirements.py</code>.</div>
+<div class="row" style="margin-top:.5rem"><button id="reqcheck">Check requirements</button><span class="note" id="reqsys"></span></div>
+<div id="reqs"></div>
+<h2 style="margin-top:1.2rem">Environment snapshots</h2>
+<div class="note">Record packages, programs, llama.cpp builds and devices, then compare after an update or a driver change. <a href="api/requirements/freeze">Download exact package versions</a> (a requirements file that reproduces this setup).</div>
+<div class="row" style="margin-top:.5rem"><button id="snap">Take a snapshot</button>
+<select id="snapA" style="width:auto"></select><span class="note">→</span><select id="snapB" style="width:auto"></select><button id="snapdiff">Compare</button></div>
+<div id="diff"></div></section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -155,5 +170,52 @@ $('#doctor').onclick=async()=>{ $('#doctor').disabled=true; $('#checks').innerHT
 
 load().catch(e=>$('#status').innerHTML=`<span class="err">${esc(e.message)}</span>`);
 api('api/hardware').then(renderHW).catch(e=>$('#devs').innerHTML=`<tr><td class="err">${esc(e.message)}</td></tr>`);
+
+// ---------- requirements (scripts/ns_requirements.py)
+function reqItem(i){
+  const opt=i.optional?' <span class="note">(optional)</span>':'';
+  const need=i.need&&!['installed','built','any'].includes(i.need)?` <span class="note">needs ${esc(i.need)}</span>`:'';
+  const have=i.have?`<code>${esc(i.have)}</code>`:'<span class="note">not found</span>';
+  const be=i.backends&&i.backends.length?` <span class="note">GPU backends: ${esc(i.backends.join(', '))}</span>`:'';
+  const why=i.why?` <span class="note">· ${esc(i.why)}</span>`:'';
+  const fix=i.fix?`<div class="fx">fix: <code>${esc(i.fix)}</code>${i.installable?` <button data-pkg="${esc(i.name)}">Install</button>`:''}</div>`:'';
+  return `<div class="ri"><span class="st ${i.status}">${i.status==='missing'?'missing':i.status}</span><div>${esc(i.name)}${opt}: ${have}${need}${be}${why}</div>${fix}</div>`;
+}
+async function loadReqs(){
+  $('#reqs').innerHTML='<div class="note">checking…</div>';
+  let r; try{ r=await api('api/requirements'); }catch(e){ $('#reqs').innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
+  const hw=r.hardware||{};
+  $('#reqsys').textContent=`${r.os} · Python ${r.python} · ${r.package_manager||'unknown package manager'} · ${hw.cpu||''} · ${hw.ram_gib??'?'} GiB RAM · ${hw.disk_free_gib??'?'} GiB free`;
+  $('#reqs').innerHTML=Object.entries(r.features).map(([k,f])=>{
+    const bad=f.items.filter(i=>i.status!=='ok').length;
+    return `<details class="feat"${f.status==='missing'&&k==='core'?' open':''}><summary><span class="st ${f.status}">${esc(f.status)}</span> ${esc(f.title)}`+
+      (f.note?` <span class="note">· ${esc(f.note)}</span>`:bad?` <span class="note">· ${bad} to look at</span>`:'')+`</summary>${f.items.map(reqItem).join('')}</details>`;}).join('');
+  document.querySelectorAll('[data-pkg]').forEach(b=>b.onclick=()=>installPkg(b));
+}
+async function installPkg(b){
+  b.disabled=true; b.textContent='installing…';
+  try{ const j=await api('api/jobs',{kind:'install_package',values:{package:b.dataset.pkg}});
+    for(;;){ await new Promise(r=>setTimeout(r,2000)); const jobs=await api('api/jobs'); const x=jobs.find(y=>y.id===j.id);
+      if(x&&!['running','queued'].includes(x.status)){ if(x.status!=='done'){ b.textContent='failed: see Jobs'; return; } break; } }
+    loadReqs();
+  }catch(e){ b.textContent=e.message; }
+}
+async function loadSnaps(){
+  const r=await api('api/requirements/snapshots'); const o=r.snapshots.map(x=>`<option value="${esc(x.id)}">${esc(x.when)} · ${esc(x.host||'')}</option>`).join('');
+  $('#snapA').innerHTML=o; $('#snapB').innerHTML=o; if(r.snapshots.length>1) $('#snapA').selectedIndex=1;
+  $('#snapdiff').disabled=r.snapshots.length<2;
+}
+function diffSec(title,d){ const rows=[...Object.entries(d.changed).map(([k,v])=>`<div>${esc(k)}: <code>${esc(v[0])}</code> → <code>${esc(v[1])}</code></div>`),
+  ...Object.entries(d.added).map(([k,v])=>`<div class="okm">+ ${esc(k)} <code>${esc(v)}</code></div>`),
+  ...Object.entries(d.removed).map(([k,v])=>`<div class="err">− ${esc(k)} <code>${esc(v)}</code></div>`)];
+  return rows.length?`<div class="diffsec"><b>${title}</b>${rows.join('')}</div>`:''; }
+$('#reqcheck').onclick=loadReqs;
+$('#snap').onclick=async()=>{ $('#snap').disabled=true; try{ await api('api/requirements/snapshot',{}); await loadSnaps(); }catch(e){ alert(e.message); } $('#snap').disabled=false; };
+$('#snapdiff').onclick=async()=>{ try{ const d=await api('api/requirements/diff',{a:$('#snapA').value,b:$('#snapB').value});
+  const sys=Object.entries(d.system).map(([k,v])=>`<div>${esc(k)}: <code>${esc(v[0])}</code> → <code>${esc(v[1])}</code></div>`).join('');
+  $('#diff').innerHTML=d.unchanged?'<div class="note" style="margin-top:.5rem">Nothing changed.</div>':
+    `<div style="margin-top:.5rem">${sys?`<div class="diffsec"><b>System</b>${sys}</div>`:''}${diffSec('llama.cpp',d.llama)}${diffSec('Devices',d.devices)}${diffSec('Programs',d.tools)}${diffSec('Python packages',d.packages)}</div>`;
+  }catch(e){ $('#diff').innerHTML=`<div class="err">${esc(e.message)}</div>`; } };
+loadReqs(); loadSnaps();
 </script>
 """

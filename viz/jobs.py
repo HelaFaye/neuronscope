@@ -32,6 +32,13 @@ ROOT = Path(__file__).resolve().parents[1]
 S = ROOT / "scripts"
 
 
+def _installable() -> list[str]:
+    """Packages the install_package job may install: scripts/ns_requirements.py's catalog."""
+    sys.path.insert(0, str(S))
+    import ns_requirements
+    return [p for p in ns_requirements.PACKAGES if p not in ns_requirements.NOT_PIP]
+
+
 def F(name, flag=None, kind="str", req=False, default=None, help="", choices=None, multi=False, repeat=False):
     """multi: several values after one flag (nargs); repeat: the flag once per value (action=append)."""
     return {"name": name, "flag": flag if flag is not None else "--" + name.replace("_", "-"), "kind": kind,
@@ -139,6 +146,15 @@ SPECS.update({
                    F("cuda_arch", help="CUDA architectures, e.g. 50-real;61-real (default: this machine's)"),
                    F("portable", kind="bool", help="no -march=native: the binaries run on other CPUs"),
                    F("server_activations", kind="bool", help="also patch llama-server to stream /activations")]},
+    "install_package": {
+        "title": "Install a Python package", "group": "Setup", "argv": [S / "ns_requirements.py", "install"],
+        "help": "pip install one package NeuronScope uses, at the version requirements*.txt asks for, into Studio's "
+                "Python. Only packages from the catalog (scripts/ns_requirements.py); torch comes from install.sh.",
+        "fields": [F("package", flag="", req=True, choices=_installable())]},
+    "env_snapshot": {
+        "title": "Snapshot the environment", "group": "Setup", "argv": [S / "ns_requirements.py", "snapshot"],
+        "help": "Record installed packages, programs, llama.cpp builds and devices, to compare after an update "
+                "(Setup → Requirements → compare).", "fields": []},
     # ---- the text H-Neuron pipeline (docs/PIPELINE.md)
     "preflight": {
         "title": "0 · Preflight", "group": "H-Neurons", "argv": [S / "preflight.py"],
@@ -283,6 +299,26 @@ SPECS.update({
         "help": "Model, KV cache and visualizer memory for a GGUF at a context length.",
         "fields": [F("gguf", req=True), F("ctx", kind="int", default=8192), F("vram", help="e.g. 16GiB"),
                    F("ngl", kind="int")]},
+    # ---- neuron review (scripts/neuron_review.py; Studio's /review page reads the same store)
+    "review_testqa": {
+        "title": "Review: ingest a TestQA run", "group": "Review", "argv": [S / "neuron_review.py", "ingest-testqa"],
+        "help": "Replay a TestQA run's graded replies through the model that wrote them and record each one's "
+                "neuron activity, so the Review page can compare right and wrong answers by subject over time.",
+        "fields": [F("results", req=True, help="testqa.py --out file"),
+                   F("endpoint", help="which endpoint's replies (default: the first in the file)"),
+                   F("gguf", req=True, help="the model file that wrote them"),
+                   F("binary", req=True, help="llama-cett-dump"),
+                   F("classifier", help="classifier.npz, to record each reply's risk as well"),
+                   F("source", default="testqa", help="name shown in the Review filters"),
+                   F("ngl", kind="int", default=99), F("limit", kind="int", default=0)]},
+    "review_items": {
+        "title": "Review: ingest graded replies", "group": "Review", "argv": [S / "neuron_review.py", "ingest-items"],
+        "help": "Any other benchmark: JSONL with prompt, response, verdict (right/wrong/abstained) and optionally "
+                "subject. Recorded the same way, under its own source name.",
+        "fields": [F("items", req=True, help="graded JSONL"), F("source", req=True, help="e.g. livebench, swe-bench"),
+                   F("kind", choices=["benchmark", "test", "observed"], default="benchmark"),
+                   F("gguf", req=True), F("binary", req=True, help="llama-cett-dump"), F("classifier"),
+                   F("ngl", kind="int", default=99), F("limit", kind="int", default=0)]},
     # ---- merging and editing
     "merge_selective": {
         "title": "Selective merge", "group": "Merge", "argv": [S / "merge_selective.py"],
@@ -501,7 +537,7 @@ button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 .st.running{color:var(--acc)}.st.done{color:var(--ok)}.st.failed,.st.lost{color:var(--no)}
 pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;margin:.5rem 0 0}
 </style>
-<header><h1>Studio · Jobs</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
+<header><h1>Studio · Jobs</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
 <main>
  <section class="card"><h2>New job</h2>
   <select id="kind"></select><div id="khelp" class="note" style="margin-top:.3rem"></div>

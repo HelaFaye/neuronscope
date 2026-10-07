@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Added (neuron review)
+- Review page (`/review`) and `scripts/neuron_review.py`: every reply
+  NeuronScope looks at is stored as an activation profile with its source
+  (TestQA, other benchmarks, chat checks, project work, live scoring), kind,
+  subjects, verdict, risk and time. Per neuron: Cohen's d between wrong and
+  right answers, correlation with the classifier's risk, or firing rate,
+  coloured only above a noise floor corrected for the number of neurons and
+  replies. Filters by source, subject, verdict and dates; error rate per
+  day, week or month; heatmap; strongest neurons in each direction; and the
+  periods played as frames in the 3D view.
+- Chat checks and background scoring record observations automatically;
+  *right / wrong* under a check labels the reply. Jobs → Review ingests
+  TestQA results and any graded JSONL (re-running each reply through the
+  model for its activations). `HScorer.profile()` (no classifier needed).
+- MCP tools `review_sources`, `review_summary`, `review_label`; job kinds
+  `review_testqa`, `review_items`.
+
+### Added (requirements)
+- `scripts/ns_requirements.py` and Setup → Requirements: what each feature
+  needs (Python packages at the versions `requirements*.txt` set, programs,
+  llama.cpp builds and their GPU backends, ROCm/Vulkan/CUDA device access and
+  groups, memory), what this machine has, and the fix for its package
+  manager; vendors the machine lacks are n/a. Install buttons for missing
+  Python packages (catalog only, a job); environment snapshots, diffs and a
+  frozen requirements file. MCP tool `requirements`; job kinds
+  `install_package`, `env_snapshot`.
+
 ### Added (everything from the browser)
 - After `./install.sh`, no terminal is needed: an app-menu entry (Linux),
   `./neuronscope` and `NeuronScope.bat` start Studio (`scripts/launch.py`)

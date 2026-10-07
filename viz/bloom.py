@@ -385,10 +385,11 @@ function drawSpark(){
 }
 spark.onclick = e => { const r = spark.getBoundingClientRect(); t = Math.round((e.clientX-r.left)/r.width*(T-1)); update(); };
 
-const modeNote = meta.mode==='absolute' ? `tokens flagged at risk ≥ ${Math.round(thr*100)}% (the classifier's own threshold)`
+const modeNote = meta.mode==='review' ? `${esc(meta.question||'')} · cells: ${esc(meta.cells_note||'')}<br>strip: ${esc(meta.strip||'')}`
+  : meta.mode==='absolute' ? `tokens flagged at risk ≥ ${Math.round(thr*100)}% (the classifier's own threshold)`
   : meta.mode==='relative' ? `<span class="bad">relative mode: tokens ${meta.relative_z} SD above this reply's mean, so some are always flagged</span>`
   : `<span class="bad">no classifier scores: nothing can be flagged</span>`;
-const cellsNote = meta.cells_note && meta.cells_note.startsWith('none') ? `<br><span class="note">${esc(meta.cells_note)}: risky tokens are shown, H-neuron cells are not</span>` : '';
+const cellsNote = meta.mode!=='review' && meta.cells_note && meta.cells_note.startsWith('none') ? `<br><span class="note">${esc(meta.cells_note)}: risky tokens are shown, H-neuron cells are not</span>` : '';
 const orderNote = meta.order==='weight' ? `x: neurons ordered by classifier weight, H-neurons at the left · y: layer` : `x: neuron index · y: layer`;
 
 let lastCur = null;
@@ -397,12 +398,14 @@ function update(){
   for(let k=0;k<trailN;k++) paint(trails[k], Math.max(0,t-(k+1)), 0.45, -(k+1)*6);
   paintFlags(t);
   const flagged = flaggedSet.has(t);
-  hud.innerHTML = `<b>${esc(meta.model||'trace')}</b> <span class="note">${meta.frames} tokens · ${meta.layers} layers</span><br>`+
-    `<span class="dot" style="background:${theme.active};margin-left:0"></span>active`+
-    `<span class="ring" style="border-color:${theme.halluc}"></span>H-neuron on a flagged token<br>`+
+  // Review views (scripts/neuron_review.py) bring their own legend: frames are time buckets, not tokens.
+  const lg = meta.legend || {active:'active', halluc:'H-neuron on a flagged token'};
+  hud.innerHTML = `<b>${esc(meta.model||'trace')}</b> <span class="note">${meta.frames} ${meta.mode==='review'?'time buckets':'tokens'} · ${meta.layers} layers</span><br>`+
+    `<span class="dot" style="background:${theme.active};margin-left:0"></span>${esc(lg.active)}`+
+    (lg.halluc?`<span class="ring" style="border-color:${theme.halluc}"></span>${esc(lg.halluc)}`:'')+'<br>'+
     `<span class="note">${modeNote}</span>${cellsNote}<br><span class="note">${orderNote}</span>`;
   tok.innerHTML = `${t+1}/${T} <span style="color:${flagged?theme.halluc:'#c9c9d2'}">${esc(meta.labels[t]||'·')}</span>`+
-    (prob?` <span class="note">risk ${(prob[t]*100).toFixed(0)}%</span>`:'')+(flagged?` <b style="color:${theme.halluc}">flagged</b>`:'');
+    (prob?` <span class="note">${meta.mode==='review'?'error rate':'risk'} ${(prob[t]*100).toFixed(0)}%</span>`:'')+(flagged?` <b style="color:${theme.halluc}">flagged</b>`:'');
   if(lastCur) lastCur.classList.remove('cur');
   lastCur = textEl.children[t]; if(lastCur){ lastCur.classList.add('cur');
     const r = lastCur.offsetTop - textEl.offsetTop; if(r < textEl.scrollTop || r > textEl.scrollTop + textEl.clientHeight - 24) textEl.scrollTop = r - 20; }
