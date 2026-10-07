@@ -758,3 +758,144 @@ def test_projects_are_owner_only(studio_srv, tmp_path):
             assert e.value.code == 403, path
     finally:
         studio.STATE["token"] = None
+
+
+def _rpc(base, payload, headers=None, raw=False):
+    req = urllib.request.Request(base + "/mcp", data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = r.read()
+            return r.status, (json.loads(body) if body else None)
+    except urllib.error.HTTPError as e:
+        body = e.read()
+        return e.code, (json.loads(body) if body[:1] == b"{" else body)
+
+
+def test_mcp_over_http(studio_srv, tmp_path):
+    _start_director(tmp_path)
+    code, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                                           "clientInfo": {"name": "t", "version": "0"}}})
+    assert code == 200 and r["result"]["protocolVersion"] == "2025-03-26"
+    assert r["result"]["serverInfo"]["name"] == "neuronscope" and "tools" in r["result"]["capabilities"]
+    assert _rpc(studio_srv, {"jsonrpc": "2.0", "method": "notifications/initialized"})[0] == 202
+    code, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    tools = {t["name"]: t for t in r["result"]["tools"]}
+    assert {"chat", "check_reply", "start_job", "create_project", "review_task", "devices"} <= set(tools)
+    assert tools["list_models"]["annotations"]["readOnlyHint"] and tools["start_job"]["annotations"]["destructiveHint"]
+    # A batch: models, a chat through the fake llama-server, routing, a project.
+    code, r = _rpc(studio_srv, [
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_models", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "chat", "arguments": {"model": CODER, "prompt": "hi"}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+         "params": {"name": "route_prompt", "arguments": {"text": "Write a GLSL shader for the terrain mesh"}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "create_project", "arguments": {
+            "title": "t", "text": "- Build: set up the CMake build with the toolchain and dependencies."}}}])
+    out = {x["id"]: x["result"] for x in r}
+    assert CODER in [m["id"] for m in out[3]["structuredContent"]["models"]]
+    assert out[4]["structuredContent"]["reply"].startswith(f"model={CODER}")
+    assert out[5]["structuredContent"]["subjects"] == ["graphics"]
+    pid = out[6]["structuredContent"]["id"]
+    _, p = call(studio_srv, f"/api/projects/{pid}")
+    assert p["tasks"][0]["labels"] == ["systems"]
+    # Errors: a tool's failure is a result the model can read; protocol errors are JSON-RPC errors.
+    _, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                             "params": {"name": "job_log", "arguments": {"id": "000000000000"}}})
+    assert r["result"]["isError"] and "404" in r["result"]["content"][0]["text"]
+    _, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "nope"}})
+    assert r["error"]["code"] == -32602
+    _, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "chat",
+                                                                                         "arguments": {}}})
+    assert "missing model" in r["error"]["message"]
+    _, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 10, "method": "frobnicate"})
+    assert r["error"]["code"] == -32601
+
+
+def test_mcp_refuses_browser_tricks(studio_srv):
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    assert _rpc(studio_srv, msg, {"Origin": "https://evil.example"})[0] == 403
+    req = urllib.request.Request(studio_srv + "/mcp", data=json.dumps(msg).encode(),
+                                 headers={"Content-Type": "text/plain"}, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=10)
+    assert e.value.code == 415                       # a "simple" cross-site form post cannot reach it
+    host = studio_srv.split("//")[1]
+    assert _rpc(studio_srv, msg, {"Origin": f"http://{host}"})[0] == 200
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(studio_srv + "/mcp", timeout=10)
+    assert e.value.code == 405
+
+
+def test_mcp_and_connect_with_tokens(studio_srv, tmp_path):
+    _start_director(tmp_path)
+    owner = "o" * 40
+    studio.STATE["token"] = owner
+    try:
+        msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_projects", "arguments": {}}}
+        assert _rpc(studio_srv, msg)[0] == 401
+        code, r = _rpc(studio_srv, msg, {"Authorization": f"Bearer {owner}"})
+        assert code == 200 and not r["result"]["isError"]
+        # The Connect page mints an app token: a paired device, so it can chat but not run jobs.
+        req = urllib.request.Request(studio_srv + "/api/connect/token", data=b'{"name": "Cline"}',
+                                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {owner}"})
+        app = json.loads(urllib.request.urlopen(req, timeout=10).read())["token"]
+        hdr = {"Authorization": f"Bearer {app}"}
+        _, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                 "params": {"name": "chat", "arguments": {"model": CODER, "prompt": "hi"}}}, hdr)
+        assert not r["result"]["isError"]
+        _, r = _rpc(studio_srv, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                 "params": {"name": "start_job", "arguments": {"kind": "testqa"}}}, hdr)
+        assert r["result"]["isError"] and "403" in r["result"]["content"][0]["text"]
+        req = urllib.request.Request(studio_srv + "/api/connect", headers={"Authorization": f"Bearer {owner}"})
+        sn = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        assert sn["token_required"] and sn["cline_provider"]["API Provider"] == "OpenAI Compatible"
+        entry = sn["cline_mcp_http"]["mcpServers"]["neuronscope"]
+        assert entry["url"].endswith("/mcp") and entry["headers"]["Authorization"].startswith("Bearer <")
+        assert "list_models" in entry["autoApprove"] and "start_job" not in entry["autoApprove"]
+    finally:
+        studio.STATE["token"] = None
+
+
+def test_mcp_with_the_official_client(studio_srv):
+    """Both transports against the reference implementation of the protocol."""
+    mcp = pytest.importorskip("mcp")
+    import asyncio
+    from mcp import Client, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from mcp.client.streamable_http import streamable_http_client
+
+    async def run(transport):
+        async with Client(transport) as c:
+            names = {t.name for t in (await c.list_tools()).tools}
+            r = await c.call_tool("route_prompt", {"text": "Set up the CMake build and the CI toolchain"})
+            return names, json.loads(r.content[0].text)
+
+    for tr in (streamable_http_client(studio_srv + "/mcp"),
+               stdio_client(StdioServerParameters(command=sys.executable, args=[
+                   str(ROOT / "scripts" / "ns_mcp.py"), "--studio", studio_srv]))):
+        names, out = asyncio.run(run(tr))
+        assert "check_reply" in names and out["subjects"] == ["systems"]
+
+
+def test_connect_writes_cline_settings_and_keeps_others(tmp_path, monkeypatch):
+    import ns_connect
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
+    path = ns_connect.cline_settings_path("cursor")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
+    assert ns_connect.main(["--studio", "http://127.0.0.1:9", "cline", "--editor", "cursor", "--write"]) == 0
+    cfg = json.loads(path.read_text())
+    assert cfg["mcpServers"]["other"] == {"command": "x"}
+    assert cfg["mcpServers"]["neuronscope"]["url"] == "http://127.0.0.1:9/mcp"
+    assert list(path.parent.glob("*.bak-*"))
+    tok = tmp_path / "tok"
+    tok.write_text("secret-token\n")
+    ns_connect.main(["--studio", "http://127.0.0.1:9", "--token-file", str(tok), "cline", "--editor", "cursor",
+                     "--write"])
+    e = json.loads(path.read_text())["mcpServers"]["neuronscope"]
+    assert e["headers"] == {"Authorization": "Bearer secret-token"}
+    assert oct(path.stat().st_mode & 0o777) == "0o600"

@@ -725,7 +725,8 @@ def stop_server():
 
 # What a paired device may POST. Everything else needs the owner's token.
 DEVICE_POSTS = {"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/api/chat", "/api/chats",
-                "/api/chats/delete", "/api/rag/search", "/api/tools/approve", "/api/trace"}
+                "/api/chats/delete", "/api/rag/search", "/api/tools/approve", "/api/trace",
+                "/mcp", "/api/route"}
 
 LINKS = {"cache": {}, "lock": threading.Lock()}
 LINK_SEP = ":"
@@ -1405,6 +1406,22 @@ def _director():
     return director
 
 
+def run_doctor():
+    """scripts/doctor.py --json, with this Studio's llama.cpp and model."""
+    env = dict(os.environ)
+    if STATE.get("server_bin"):
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(STATE["server_bin"]))))
+        env.setdefault("NS_LLAMA", root)
+    try:
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                                         "scripts", "doctor.py"), "--json"],
+                           capture_output=True, text=True, timeout=150, env=env)
+        checks = json.loads(r.stdout or "[]")
+    except Exception as e:
+        return {"ok": False, "error": f"doctor failed: {e}", "checks": []}
+    return {"ok": not any(c["status"] == "fail" for c in checks), "checks": checks}
+
+
 def assign_candidates():
     st = load_settings()
     out, sums = [], {}
@@ -1831,6 +1848,46 @@ class Handler(BaseHTTPRequestHandler):
                 LINKS["cache"].pop(name, None)
             return self._json(200, {"ok": True})
 
+    def _self_url(self, public=False):
+        """This Studio's URL: the loopback address for calling itself, or the address
+        the client used (Host header) for settings shown to it."""
+        scheme = "https" if STATE["tls"] else "http"
+        if public and self.headers.get("Host"):
+            return f"{scheme}://{self.headers['Host']}"
+        return f"{scheme}://127.0.0.1:{self.server.server_address[1]}"
+
+    # ---------------------------------------------------------- MCP
+    def _mcp_post(self):
+        """MCP over streamable HTTP: JSON-RPC in, JSON-RPC out (scripts/ns_mcp.py).
+        Every tool call goes back through this API with the caller's own token,
+        so an agent can do exactly what the person or device it acts for can."""
+        import ns_mcp
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and urllib.parse.urlparse(origin).netloc != host:
+            return self._json(403, {"error": "cross-origin MCP requests are refused"})
+        if "application/json" not in self.headers.get("Content-Type", ""):
+            return self._json(415, {"error": "MCP requests must be application/json"})
+        try:
+            payload = self._read(4 * 1024 * 1024)
+        except ValueError as e:
+            body = json.dumps(ns_mcp._err(None, -32700, f"parse error: {e}")).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        token = (self._presented() or [None])[0] if STATE["token"] else None
+        studio = ns_mcp.Studio(self._self_url(), token, insecure_loopback=True)
+        resp = ns_mcp.handle_payload(payload, studio)
+        if resp is None:
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        return self._json(200, resp)
+
     # ---------------------------------------------------------- projects
     def _projects_get(self):
         if not self._owner_only():
@@ -2062,6 +2119,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/traces":
             return self._json(200, {"traces": list_traces()})
+        if self.path in ("/connect", "/api/connect"):
+            if not self._owner_only():
+                return
+            if self.path == "/connect":
+                import connect_page
+                body = connect_page.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            import ns_connect
+            base = self._self_url(public=True)
+            out = ns_connect.snippets(base, "token" if STATE["token"] else None)
+            out["token_required"] = bool(STATE["token"])
+            out["models"] = ["auto"] + [m["id"] for m in scan_models()]
+            return self._json(200, out)
+        if self.path == "/mcp":
+            # Streamable HTTP lets a server offer an SSE stream here; this one answers POSTs only.
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/api/doctor":
+            if not self._owner_only():
+                return
+            return self._json(200, run_doctor())
         if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
             return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
@@ -2234,6 +2320,41 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path.startswith("/api/projects") or self.path == "/api/workers/stop":
                 return self._projects_post()
+
+            if self.path == "/mcp":
+                return self._mcp_post()
+
+            if self.path == "/api/connect/token":
+                # A separate, revocable token for an app (Cline, Claude Desktop): a paired
+                # device with persistent access, minted and claimed in one step.
+                if not self._owner_only():
+                    return
+                reg = STATE.get("devices")
+                if reg is None:
+                    return self._json(400, {"error": "device pairing is not available"})
+                req = self._read()
+                try:
+                    code, _, _ = reg.new_code(True, None)
+                except ValueError:          # this host only grants temporary access
+                    code, _, _ = reg.new_code(False, None)
+                r = reg.claim(code, str(req.get("name") or "app")[:60])
+                return self._json(200, {"token": r["token"], "name": r.get("name"),
+                                        "note": "a paired device: chat, /v1, MCP read tools and reply checks; "
+                                                "revoke it under Link"})
+
+            if self.path == "/api/route":
+                req = self._read()
+                text = str(req.get("text") or "")
+                if not text.strip():
+                    return self._json(400, {"error": "text required"})
+                from subject_classifier import default_classifier
+                a = default_classifier().analyze(text)
+                models = scan_models()
+                _, pick = auto_pick({"messages": [{"role": "user", "content": text}]}, models)
+                return self._json(200, {"subjects": a["labels"] or ["unknown"], "why": a["why"],
+                                        "proba": dict(list(a["proba"].items())[:5]),
+                                        "auto_would_pick": pick.get("model"), "reason": pick.get("reason"),
+                                        "candidates": pick.get("candidates", [])[:5]})
 
             if self.path == "/api/trace":
                 req = self._read(MAX_BODY)
@@ -2609,6 +2730,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
   <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
   <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
   <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
   <button id="theme" title="toggle theme">◐</button>

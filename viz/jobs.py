@@ -225,7 +225,10 @@ class JobRunner:
         return out[:limit]
 
     def log(self, jid: str, tail: int = 20000) -> str:
-        p = self._meta_path(jid).parent / "log.txt"
+        meta = self._meta_path(jid)
+        if not meta.exists():
+            raise FileNotFoundError(f"no job {jid}")     # unknown id, not "no output yet"
+        p = meta.parent / "log.txt"
         if not p.exists():
             return ""
         with open(p, "rb") as f:

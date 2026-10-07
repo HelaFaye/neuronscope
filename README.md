@@ -28,6 +28,7 @@ abstain. NeuronScope extends the method in several directions:
 | **External benchmarks** | CLIP_benchmark (ImageNetV2, ImageNet-Sketch, VTAB, ...) for CLIP and its edits; LiveBench and SWE-bench for chat/coding models, feeding stats; leaderboard (BenchLM) imports as reference | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | **Retraining on deficits** | turns measured failures into verified SFT and DPO data with replay and a holdout, trains with QLoRA, LoRA or full fine-tuning (DDP/FSDP), merges and converts to GGUF | [docs/RETRAINING.md](docs/RETRAINING.md) |
 | **Labs** | capability-preserving quantization, scale sweeps, adaptive remote tuning | [docs/LABS.md](docs/LABS.md) |
+| **Connect** | your models as the AI of Cline, Claude Desktop or any OpenAI-compatible app; NeuronScope's harness and lab as MCP tools (models, reply checks, jobs, projects), with a Connect page that writes the settings | [docs/CONNECT.md](docs/CONNECT.md) |
 | **Visualization** | 2D/3D activation maps, token-resolved timelines, live tracing proxy, weight views | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) |
 | **Merging** | neuron-granular selective merges, mergekit plugin, MoE expert-count sweeps | [docs/MERGING.md](docs/MERGING.md) |
 

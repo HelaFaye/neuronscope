@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added (connect)
+- NeuronScope as an MCP server (`scripts/ns_mcp.py`, dependency-free): 26
+  tools over Studio's API (models, chat, reply checks, routing, stats,
+  devices, doctor, jobs, projects, traces), with read-only and destructive
+  hints. Served by Studio at `/mcp` (streamable HTTP; refuses other web
+  origins and non-JSON) and as a stdio process. Tested with the official
+  `mcp` client over both transports. Every call carries the caller's token.
+- Studio's Connect page (`/connect`): settings for Cline (OpenAI-compatible
+  provider with a picker of this Studio's models, and the MCP entry), Claude
+  Desktop and other OpenAI clients, with copy buttons, and a button that
+  creates a revocable app token (a paired device). `scripts/ns_connect.py`
+  prints the same and writes Cline's or Claude Desktop's config, keeping a
+  backup and other servers. `POST /api/route` and `GET /api/doctor`.
+- Fixed: a job log request for an unknown job id returned an empty log
+  instead of 404.
+
 ### Fixed (from a newcomer dry run of the docs)
 - TestQA crashed while printing per-subject results when a subject had no
   right answers.

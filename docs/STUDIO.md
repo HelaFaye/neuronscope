@@ -315,3 +315,9 @@ See [SECURITY.md](SECURITY.md).
 `/projects` splits a project into tasks by skill, keeps a plan you approve,
 starts worker models on whatever accelerators the machine has (AMD first), and
 sends every result back for review. See [DIRECTOR.md](DIRECTOR.md).
+
+## Connect
+
+`/connect` has ready-made settings for Cline, Claude Desktop and other
+OpenAI-compatible apps, and Studio serves MCP at `/mcp` so agents can use
+NeuronScope's tools. See [CONNECT.md](CONNECT.md).
