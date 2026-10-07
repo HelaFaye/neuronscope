@@ -247,7 +247,9 @@ def configure_sandbox(engine: str | None, image: str | None = None) -> None:
     if engine not in ("docker", "podman"):
         raise ValueError("sandbox must be none, docker or podman")
     if not shutil.which(engine):
-        raise SystemExit(f"--sandbox {engine}: {engine} is not installed")
+        raise SystemExit(f"--sandbox {engine}: {engine} is not installed. Install it, use the other engine "
+                         "(--sandbox docker|podman), or leave --sandbox off to run model code with local "
+                         "CPU/memory limits only, which is not a security boundary")
     SANDBOX["engine"] = engine
     if image:
         SANDBOX["image"] = image
@@ -567,7 +569,8 @@ def print_subjects(summ: dict, min_n: int) -> None:
         for subj, v in sm["subject"].items():
             if "accuracy" not in v:
                 continue
-            n = v["correct"] + v.get("wrong", 0) + v.get("abstained", 0) + v.get("unparsable", 0) + v.get("timeout", 0)
+            # Outcome counts list only outcomes that happened: a subject with no right answers has no "correct".
+            n = sum(v.get(k, 0) for k in ("correct", "wrong", "abstained", "unparsable", "timeout"))
             lo, hi = v["accuracy_ci"]
             flag = "*" if n < min_n else " "
             print(f"    {subj:<9}{flag} n {n:>3}   right {v['accuracy']:5.0%} [{lo:4.0%}-{hi:4.0%}]   "

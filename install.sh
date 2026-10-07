@@ -17,6 +17,8 @@
 #   ./install.sh --cuda       # force a CUDA wheel (chosen by scripts/cuda_info.py)
 #   ./install.sh --cpu        # no GPU, CPU-only torch
 #   ./install.sh --system-torch  # venv that reuses the distro's torch
+#   ./install.sh --no-torch   # skip PyTorch: Studio, TestQA, Projects, transfer and
+#                             # the llama.cpp (GGUF) path do not need it
 #   ./install.sh --docker     # just print the ROCm Docker recipe and exit
 
 set -euo pipefail
@@ -33,7 +35,8 @@ while [[ $# -gt 0 ]]; do
     --cuda) MODE="cuda"; shift ;;
     --system-torch) MODE="system"; shift ;;
     --docker) MODE="docker"; shift ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    --no-torch) MODE="none"; shift ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -169,6 +172,28 @@ esac
 
 # ---------------------------------------------------------------- install
 
+if [[ "$MODE" == "none" ]]; then
+  info "creating venv at $VENV (no PyTorch)"
+  python3 -m venv "$VENV"
+  # shellcheck disable=SC1090
+  source "$VENV/bin/activate"
+  pip install --quiet --upgrade pip wheel
+  info "installing requirements (without the PyTorch-only ones)"
+  pip install --quiet -r requirements-core.txt
+  cat <<EOF
+
+Done, without PyTorch. Activate with:  source $VENV/bin/activate
+
+Works now: Studio (viz/studio.py), TestQA, Projects, transfer, the subject
+classifier, and everything that runs through llama.cpp (cett-dump extraction,
+GGUF editing). Needs PyTorch later: the PyTorch extraction path, CLIP/SigLIP
+H-Neurons, fine-tuning. Re-run ./install.sh without --no-torch to add it.
+
+Next:  python scripts/doctor.py      # what is ready, and the one thing to do next
+EOF
+  exit 0
+fi
+
 if [[ "$MODE" == "system" ]]; then
   # Use the distro's torch instead of a wheel. On Arch, python-pytorch-rocm is
   # built against the same ROCm as /opt/rocm, so its rocBLAS and its Tensile
@@ -218,9 +243,17 @@ else
 fi
 
 if ! pip install "$TORCH_SPEC" ${INDEX:+--index-url "$INDEX"}; then
-  warn "that wheel index failed. Available ROCm indexes are listed at"
-  warn "  https://pytorch.org/get-started/locally/"
-  warn "Retry with ./install.sh --rocm <version>, or use ./install.sh --docker"
+  warn "installing $TORCH_SPEC from ${INDEX:-PyPI} failed (see pip's message above)."
+  case "$MODE" in
+    cpu)  warn "If download.pytorch.org is unreachable from here, PyPI's torch also runs on CPU"
+          warn "(a larger download):  source $VENV/bin/activate && pip install torch && pip install -r requirements.txt" ;;
+    cuda) warn "python scripts/cuda_info.py shows which wheel this GPU needs; install it by hand with"
+          warn "  pip install <spec> --index-url <index>  inside $VENV, then pip install -r requirements.txt" ;;
+    *)    warn "Available ROCm indexes are listed at https://pytorch.org/get-started/locally/"
+          warn "Retry with ./install.sh --rocm <version>, or use ./install.sh --docker" ;;
+  esac
+  warn "Or skip PyTorch for now: ./install.sh --no-torch (Studio, TestQA, Projects and the"
+  warn "llama.cpp path do not need it)."
   exit 1
 fi
 
@@ -288,9 +321,9 @@ cat <<EOF
 
 Done. Activate with:  source $VENV/bin/activate
 
-Next step, which costs no VRAM and downloads no weights:
+Next:  python scripts/doctor.py      # what is ready, and the one thing to do next
 
-  python scripts/preflight.py --model_path Qwen/Qwen3-8B --n_pairs 400
-
-Then see docs/GETTING_STARTED.md.
+Then docs/GETTING_STARTED.md. Before a long extraction run,
+  python scripts/preflight.py --model_path <hf-model> --n_pairs 400
+estimates time and memory without loading the weights.
 EOF

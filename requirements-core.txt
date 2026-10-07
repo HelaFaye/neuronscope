@@ -1,0 +1,15 @@
+# Everything that does not need PyTorch: Studio, TestQA, Projects, transfer,
+# the subject classifier and the llama.cpp (GGUF) path.
+# install.sh --no-torch installs only this file.
+transformers>=4.45   # tokenizers and configs; runs without torch
+safetensors
+scikit-learn>=1.4
+numpy
+pandas
+pyarrow
+openai>=1.40
+gguf
+tqdm
+requests>=2.31
+jinja2>=3.1
+pillow>=10           # qa_images.py (vision bank), finetune.py and clip_neurons.py image inputs

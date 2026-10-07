@@ -23,7 +23,7 @@ abstain. NeuronScope extends the method in several directions:
 | **Vision H-Neurons** | the same method for CLIP/SigLIP: confident image-caption mismatches, `mmproj` editing | [docs/VISION.md](docs/VISION.md) |
 | **Studio** | LM Studio-style model library, chat with images, saved chats, Hugging Face downloads, and an OpenAI-compatible `/v1` server with JIT loading, idle unload and `model: "auto"` routing; chat with your documents (RAG), MCP tools with per-call approval, paired devices and linked machines' models, a jobs page for evaluation and retraining; plus a live suppression slider and MoE expert control | [docs/STUDIO.md](docs/STUDIO.md) |
 | **TestQA** | 210 graded items, 30 in each of seven subjects (reasoning, executable code, API existence, false-premise facts, instruction-following writing, generated-image vision) against any endpoints; per-subject right/hallucinated/abstained rates; paired comparison; feeds routing stats | [docs/TESTQA.md](docs/TESTQA.md) |
-| **Subject classifier + stats routing** | labels prompts (code, math, logic, science, factual, writing, vision); `model: "auto"` picks the model with the best measured record for that subject, from rolling per-model stats | [docs/TESTQA.md](docs/TESTQA.md#subject-classifier-and-routing) |
+| **Subject classifier + stats routing** | labels prompts (code, math, logic, science, factual, writing, vision); `model: "auto"` picks the model with the best measured record for that subject, from rolling per-model stats | [docs/TESTQA.md](docs/TESTQA.md#subject-classifier) |
 | **Transfer** | encrypted P2P browser transfer, resumable HTTPS CLI with watch mode, remote tuning worker, MCP control plane | [docs/TRANSFER.md](docs/TRANSFER.md) |
 | **External benchmarks** | CLIP_benchmark (ImageNetV2, ImageNet-Sketch, VTAB, ...) for CLIP and its edits; LiveBench and SWE-bench for chat/coding models, feeding stats; leaderboard (BenchLM) imports as reference | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | **Retraining on deficits** | turns measured failures into verified SFT and DPO data with replay and a holdout, trains with QLoRA, LoRA or full fine-tuning (DDP/FSDP), merges and converts to GGUF | [docs/RETRAINING.md](docs/RETRAINING.md) |
@@ -31,23 +31,29 @@ abstain. NeuronScope extends the method in several directions:
 | **Visualization** | 2D/3D activation maps, token-resolved timelines, live tracing proxy, weight views | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) |
 | **Merging** | neuron-granular selective merges, mergekit plugin, MoE expert-count sweeps | [docs/MERGING.md](docs/MERGING.md) |
 
+New to the terms (GGUF, CETT, H-Neurons, abstention, MCP…)? The
+[glossary](docs/GLOSSARY.md) explains each one and why it matters here.
+
 ## Quick start
 
 ```bash
 ./install.sh && source venv/bin/activate     # picks CUDA / ROCm / MPS / CPU PyTorch
-python scripts/doctor.py                     # what is ready, and what to do next
+#   ./install.sh --no-torch                  # lighter: Studio, TestQA, Projects and the llama.cpp path need no PyTorch
+python scripts/doctor.py                     # checks Python, packages, GPUs, llama.cpp, your model; says what to do next
+scripts/build_llama_tools.sh --backend vulkan  # llama.cpp + the cett-dump extractor (or cpu, cuda, hip, metal); ~5 min
 ```
 
-Full setup, including building llama.cpp with the `cett-dump` extractor:
-[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). Hardware notes:
-[docs/HARDWARE.md](docs/HARDWARE.md).
+Full setup: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). Hardware notes,
+including AMD APUs: [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ```bash
 # Serve and chat with local GGUFs; OpenAI clients use http://127.0.0.1:7870/v1
 python viz/studio.py --models-dir ~/models --server ~/llama.cpp/build/bin/llama-server
+#   it prints the model ids it found; use one as <model-id> below
 
-# Benchmark endpoints on reasoning, coding (executed), facts and canaries
-python scripts/testqa.py --endpoint base=http://127.0.0.1:7870/v1@<model-id> --allow-exec
+# Benchmark endpoints on reasoning, coding, facts and canaries.
+# --allow-exec runs the model's code to grade it: add --sandbox docker for models you do not trust.
+python scripts/testqa.py --endpoint base=http://127.0.0.1:7870/v1@<model-id> --allow-exec --sandbox docker
 
 # Find H-Neurons in a CLIP model
 python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --images <imagefolder> --out runs/clip

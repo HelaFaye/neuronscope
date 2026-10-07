@@ -2,6 +2,27 @@
 
 The stage-by-stage guide for decoder LLMs. For image-text models see [VISION.md](VISION.md); for the no-PyTorch GGUF path see the section *Extraction without PyTorch* below.
 
+## The idea, in one pass
+
+1. **Collect** many answers to factual questions, several per question, and
+   keep the ones the model gets *consistently* right and consistently wrong:
+   it knows the first, and is confidently mistaken about the second.
+2. **Tag** where the answer sits in each reply, and **split** the questions
+   into balanced training and test sets.
+3. **Extract** CETT: for every MLP neuron, how much it contributed on the
+   answer tokens. This is the expensive step; llama.cpp's `cett-dump` does it
+   from a GGUF, PyTorch from Hugging Face weights.
+4. **Classify**: a sparse classifier learns which few neurons predict "wrong
+   but confident". Those are the H-Neurons (`models/h_neurons.json`).
+5. **Visualise** them, then **tune** how far to scale them down: far enough to
+   cut confident errors, not so far that the model stops answering what it
+   knows.
+6. **Apply and ship**: edit the GGUF in place, export a LoRA, or apply live in
+   Studio.
+
+Terms are explained in [GLOSSARY.md](GLOSSARY.md). `python scripts/doctor.py`
+shows which stages already have output and the command for the next one.
+
 ## PIPELINE
 
 ### 0. Preflight
@@ -17,7 +38,9 @@ is what usually ends these runs. Writes `preflight.json`.
 
 ### 1. Collect responses (LM Studio)
 
-Point at any OpenAI-compatible server, local or over LAN.
+Point at any OpenAI-compatible server, local or over LAN (Studio's
+`http://127.0.0.1:7870/v1` works). The questions come from TriviaQA; how to get
+the files is in [data/README.md](../data/README.md).
 
 ```bash
 python scripts/collect_responses_lmstudio.py \

@@ -11,8 +11,10 @@
 //
 // File layout:
 //     "CETT" | u32 version | u32 n_tokens | i32 token_ids[n_tokens]
-//     then one record per layer:
-//     i32 layer | i32 n_tok | i32 n_ff | f32 acts[n_tok][n_ff] | f32 norms[n_tok]
+//     then, unless --tokenize-only, one aggregate block (see write_aggregate):
+//     per span and layer, the mean (or --max) of the ffn_down input over the
+//     span's tokens. Without spans the whole sequence is one span. Read it with
+//     scripts/extract_activations_gguf.py read_aggregate().
 //
 //     t          = output of down_proj for layer il   [n_embd, n_tokens]
 //     t->src[0]  = the down_proj weight (quantized)
@@ -692,6 +694,21 @@ int main(int argc, char ** argv) {
     std::vector<char *> passthrough;
     passthrough.push_back(argv[0]);
     for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            // Our flags first: llama.cpp's own --help lists hundreds of options and none of these.
+            printf("cett-dump: capture ffn_down activations (CETT inputs) from a llama.cpp forward pass\n\n"
+                   "  --prompt-file F      one sequence from a text file (a quick test)\n"
+                   "  --out F              output for --prompt-file (default dump.bin)\n"
+                   "  --manifest F         JSONL, one {\"id\",\"text\"[,\"spans\"]} per line; model loads once\n"
+                   "  --outdir D           output directory for --manifest (one <id>.bin per line)\n"
+                   "  --n-layers N         decoder layers in the model (required unless --tokenize-only)\n"
+                   "  --tokenize-only      write token ids only, no forward pass\n"
+                   "  --max                max over a span instead of the mean\n"
+                   "  --last-layer-outputs-only\n\n"
+                   "Every other flag goes to llama.cpp (-m, -ngl, -b, --device, ...); its options follow.\n\n");
+            passthrough.push_back(argv[i]);
+            continue;
+        }
         if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
             out_path = argv[++i];
         } else if (strcmp(argv[i], "--prompt-file") == 0 && i + 1 < argc) {

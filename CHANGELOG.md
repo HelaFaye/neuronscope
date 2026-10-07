@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fixed (from a newcomer dry run of the docs)
+- TestQA crashed while printing per-subject results when a subject had no
+  right answers.
+- `install.sh --no-torch` (new) skips PyTorch for Studio, TestQA, Projects,
+  transfer and the llama.cpp path; `requirements-core.txt` holds everything
+  that does not need it (`accelerate` used to pull a multi-GB PyTorch in
+  silently). A failed PyTorch install now gives advice for this machine
+  (CPU, CUDA or ROCm) instead of always pointing at ROCm, and the installer
+  ends by pointing at `doctor.py`.
+- `doctor.py`: hardware advice from the detected devices (it assumed a Vega
+  laptop), a devices section, build hints that use `build_llama_tools.sh` and
+  `NS_LLAMA`, stage names instead of bare numbers, and a next step for Studio
+  as well as for the pipeline.
+- Studio prints the model ids it found at startup (what `"model"` and
+  TestQA's `<model-id>` need).
+- `cett-dump --help` lists its own flags; `ns_transfer_mcp.py --help` prints
+  help instead of waiting on stdin; `--sandbox` without Docker says what to do.
+- Docs: a glossary for enthusiasts (`docs/GLOSSARY.md`), how to get a first
+  model, a way to verify the first extraction, a plain-language overview of
+  the pipeline, the dataset link, the `--allow-exec` / `--sandbox` trade-off in
+  the quick starts, and a broken README link.
+
 ### Security
 - Studio refuses to start a backend on a port something else already holds
   (an orphaned server would otherwise answer the health check).

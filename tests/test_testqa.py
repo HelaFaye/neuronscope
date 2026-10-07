@@ -335,3 +335,11 @@ def test_rank_uses_overall_numbers_when_subject_is_unknown():
                        "hallucination_rate": 0.5, "abstention_rate": 0.1}, "subjects": {}}
     pick = ms.rank({}, {"good": good, "weak": weak}, 20, 5)
     assert pick["model"] == "good" and pick["subject"] == "unknown" and "best overall" in pick["reason"]
+
+
+def test_print_subjects_when_a_subject_has_no_right_answers(capsys):
+    """A model that got every math item wrong has no "correct" count at all."""
+    summ = {"m": {"subject": {"math": {"wrong": 2, "accuracy": 0.0, "accuracy_ci": (0.0, 0.66),
+                                       "hallucination_rate": 1.0, "abstention_rate": 0.0}}}}
+    tq.print_subjects(summ, 30)
+    assert "math     * n   2   right    0%" in capsys.readouterr().out

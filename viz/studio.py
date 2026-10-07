@@ -3240,6 +3240,15 @@ def main(argv=None):
     print("model dirs:")
     for d in STATE["models_dirs"]:
         print(f"  {d}{'' if os.path.isdir(d) else '   (missing)'}")
+    try:
+        found = [m["id"] for m in scan_models()]
+    except Exception:
+        found = []
+    if found:
+        # These ids are what API clients, TestQA (--endpoint x=URL/v1@<id>) and Cline put in "model".
+        print(f"models ({len(found)}): " + ", ".join(found[:8]) + (" …" if len(found) > 8 else ""))
+    else:
+        print("no .gguf models found yet: download some from the Models tab, or pass --models-dir")
     if not STATE["server_bin"]:
         print("\nno --server given: models can be listed but not loaded")
     elif not os.path.exists(STATE["server_bin"]):
