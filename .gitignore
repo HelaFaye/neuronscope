@@ -20,3 +20,4 @@ delegation.json
 env.local.sh
 *.token
 ns-key.pem
+.vscode/settings.json
