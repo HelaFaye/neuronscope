@@ -3,6 +3,7 @@ against a fake llama-server."""
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -899,3 +900,88 @@ def test_connect_writes_cline_settings_and_keeps_others(tmp_path, monkeypatch):
     e = json.loads(path.read_text())["mcpServers"]["neuronscope"]
     assert e["headers"] == {"Authorization": "Bearer secret-token"}
     assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_setup_settings_validate_apply_and_persist(studio_srv, tmp_path):
+    studio.STATE["config_path"] = str(tmp_path / "config.json")
+    studio.STATE.setdefault("max_workers", 2)
+    studio.STATE.setdefault("worker_idle", 300)
+    studio.STATE.setdefault("score_every", 1)
+    studio.STATE.setdefault("score_ngl", 0)
+    code, s = call(studio_srv, "/api/setup")
+    assert code == 200 and s["ready"]["server"] and s["ready"]["models"]
+    assert s["fields"]["server"]["value"] == studio.STATE["server_bin"]
+    # Bad values are refused per field, and nothing is written.
+    code, r = call(studio_srv, "/api/setup", {"values": {"idle_ttl": -1, "models_dir": ["/no/such/dir"],
+                                                         "host": "0.0.0.0"}})
+    assert code == 400 and set(r["fields"]) == {"idle_ttl", "models_dir", "host"}
+    assert not (tmp_path / "config.json").exists()
+    # Good values apply at once and land in the config file.
+    code, r = call(studio_srv, "/api/setup", {"values": {"idle_ttl": 600, "max_workers": 3, "max_jobs": 4}})
+    assert code == 200 and r["restart_needed"] == ["max_jobs"]
+    assert studio.STATE["idle_ttl"] == 600 and studio.STATE["max_workers"] == 3
+    cfg = json.loads((tmp_path / "config.json").read_text())["studio"]
+    assert cfg == {"idle_ttl": 600, "max_workers": 3, "max_jobs": 4}
+    studio.STATE["idle_ttl"] = 0
+
+
+def test_config_file_supplies_studio_defaults(tmp_path, monkeypatch):
+    """main() reads the Setup page's file before parsing flags; flags still win."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"studio": {"idle_ttl": 77, "models_dir": [str(tmp_path)], "port": 1}}))
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_check_bind(*a, **k):
+        seen["idle_ttl"], seen["dirs"] = studio.STATE["idle_ttl"], list(studio.STATE["models_dirs"])
+        raise Stop
+    monkeypatch.setattr(studio.sec, "check_bind", fake_check_bind)
+    with pytest.raises(Stop):
+        studio.main(["--config", str(cfg), "--settings", str(tmp_path / "s.json"), "--projects-dir",
+                     str(tmp_path / "p"), "--idle-ttl", "5"])
+    assert seen == {"idle_ttl": 5, "dirs": [str(tmp_path)]}
+
+
+def test_hardware_config_from_the_ui(studio_srv, tmp_path):
+    studio.STATE["hardware_path"] = str(tmp_path / "hardware.json")
+    code, h = call(studio_srv, "/api/hardware")
+    assert code == 200 and any(d["id"] == "cpu:0" for d in h["devices"])
+    code, r = call(studio_srv, "/api/hardware", {"config": {"servers": {"rocm": "/no/llama-server"}}})
+    assert code == 400 and "does not exist" in r["error"]
+    code, r = call(studio_srv, "/api/hardware", {"config": {"evil": 1}})
+    assert code == 400
+    code, r = call(studio_srv, "/api/hardware", {"config": {"devices": {"cpu:0": {"reserve_gib": 3}}}})
+    assert code == 200
+    assert json.loads((tmp_path / "hardware.json").read_text())["devices"]["cpu:0"]["reserve_gib"] == 3
+
+
+def test_lab_services_start_and_stop_from_studio(studio_srv):
+    code, lab = call(studio_srv, "/api/lab")
+    assert code == 200 and {"pipeline", "quant_lab", "scale_sweep", "replay", "live"} <= set(lab["services"])
+    assert "chat" not in lab["services"]                       # Studio is the chat
+    code, r = call(studio_srv, "/api/lab/start", {"name": "scale_sweep"})
+    try:
+        assert code == 200 and r["port"]
+        with urllib.request.urlopen(f"http://127.0.0.1:{r['port']}/", timeout=10) as resp:
+            assert b"Scale Sweep" in resp.read()
+        assert call(studio_srv, "/api/lab")[1]["services"]["scale_sweep"]["running"]
+    finally:
+        call(studio_srv, "/api/lab/stop", {"name": "scale_sweep"})
+    assert not call(studio_srv, "/api/lab")[1]["services"]["scale_sweep"]["running"]
+    assert call(studio_srv, "/api/lab/start", {"name": "replay"})[0] == 400      # needs a trace
+    assert call(studio_srv, "/api/lab/start", {"name": "../../bin/sh"})[0] == 404
+
+
+def test_launcher_starts_studio_and_opens_setup_first(tmp_path):
+    env = dict(os.environ, HOME=str(tmp_path))
+    port = free_port()
+    launch = [sys.executable, str(ROOT / "scripts" / "launch.py"), "--no-browser", "--port", str(port)]
+    try:
+        out = subprocess.run(launch, env=env, capture_output=True, text=True, timeout=90).stdout
+        assert "starting NeuronScope Studio" in out and out.strip().endswith("/setup")   # nothing set up yet
+        out = subprocess.run(launch, env=env, capture_output=True, text=True, timeout=30).stdout
+        assert "already running" in out
+    finally:
+        subprocess.run(launch[:2] + ["--stop"], env=env, timeout=30)

@@ -23,7 +23,7 @@ button.pri{font:500 13px ui-sans-serif,system-ui;padding:.4rem .8rem;border:1px 
 ol{margin:.3rem 0 .3rem 1.2rem;padding:0}li{margin:.2rem 0}
 .tok{background:color-mix(in srgb,var(--ok) 15%,transparent);border:1px solid var(--ok);border-radius:6px;padding:.6rem;margin-top:.5rem;word-break:break-all}
 </style>
-<header><h1>Studio · Connect</h1><a href="/">← Studio</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a></header>
+<header><h1>Studio · Connect</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <section class="card"><h2>What connects to what</h2>
 <div class="note">Studio offers two things to other apps. Set up either or both:</div>

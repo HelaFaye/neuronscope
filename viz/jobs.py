@@ -117,6 +117,226 @@ SPECS: dict[str, dict] = {
                    F("out", req=True)]},
 }
 
+def U(name, **kw):
+    """A field whose flag keeps the underscores (--input_path), as the pipeline scripts spell them."""
+    return F(name, flag="--" + name, **kw)
+
+
+TRUST = U("no_trust_remote_code", kind="bool", help="refuse custom model code from the Hub")
+LOCS = ["input", "output", "answer_tokens", "all_except_answer_tokens"]
+
+SPECS.update({
+    # ---- setup
+    "build_llama": {
+        "title": "Build llama.cpp", "group": "Setup", "interp": ["bash"],
+        "argv": [S / "build_llama_tools.sh"],
+        "help": "Clone llama.cpp, add cett-dump, build llama-server and the tools (~5 min on CPU). "
+                "Then set the paths it prints on the Setup page.",
+        "fields": [F("backend", choices=["vulkan", "cpu", "cuda", "hip", "metal"], default="vulkan",
+                     help="vulkan runs on AMD (incl. APUs), Intel and NVIDIA"),
+                   F("dir", help="checkout folder (default ~/llama.cpp)"),
+                   F("ref", help="llama.cpp tag or commit (default: tested)"),
+                   F("cuda_arch", help="CUDA architectures, e.g. 50-real;61-real (default: this machine's)"),
+                   F("portable", kind="bool", help="no -march=native: the binaries run on other CPUs"),
+                   F("server_activations", kind="bool", help="also patch llama-server to stream /activations")]},
+    # ---- the text H-Neuron pipeline (docs/PIPELINE.md)
+    "preflight": {
+        "title": "0 · Preflight", "group": "H-Neurons", "argv": [S / "preflight.py"],
+        "help": "Layer count, neuron count and the RAM the classifier will need, without loading weights.",
+        "fields": [U("model_path", req=True, help="HF id or local folder, e.g. Qwen/Qwen3-8B"),
+                   U("n_pairs", kind="int", default=400)]},
+    "collect": {
+        "title": "1 · Collect answers", "group": "H-Neurons", "argv": [S / "collect_responses_lmstudio.py"],
+        "help": "Ask each TriviaQA question several times; keep consistent right and consistent wrong answers.",
+        "fields": [U("base_url", default="http://127.0.0.1:7870/v1", help="any OpenAI-compatible server, e.g. Studio"),
+                   U("model", req=True, help="model id on that server"),
+                   U("data_path", default="data/TriviaQA/rc.nocontext/train-00000-of-00001.parquet",
+                     help="TriviaQA parquet (see data/README.md)"),
+                   U("output_path", default="data/consistency_samples.jsonl"),
+                   U("sample_num", kind="int", default=5), U("max_questions", kind="int", default=200),
+                   U("concurrency", kind="int", default=4)]},
+    "tag": {
+        "title": "2 · Tag answer tokens", "group": "H-Neurons", "argv": [S / "make_answer_tokens.py"],
+        "help": "Find each answer's tokens in the model's tokenization.",
+        "fields": [U("input_path", default="data/consistency_samples.jsonl"),
+                   U("output_path", default="data/answer_tokens.jsonl"),
+                   U("model_path", req=True, help="HF id or folder with the tokenizer"), TRUST]},
+    "split": {
+        "title": "3 · Balanced split", "group": "H-Neurons", "argv": [S / "sample_balanced_ids.py"],
+        "help": "Equal numbers of right and wrong questions. Run once for train, again for test with exclude.",
+        "fields": [U("input_path", default="data/answer_tokens.jsonl"),
+                   U("output_path", default="data/train_qids.json"), U("num_samples", kind="int", default=400),
+                   U("exclude", help="e.g. data/train_qids.json when making the test split"),
+                   U("seed", kind="int")]},
+    "extract_gguf": {
+        "title": "4 · Extract CETT (llama.cpp)", "group": "H-Neurons", "argv": [S / "extract_activations_gguf.py"],
+        "help": "Activations from a GGUF with cett-dump: no PyTorch, any GPU llama.cpp supports. Use a Q8_0/F16 file.",
+        "fields": [U("gguf", help="model file (default $NS_GGUF)"), U("binary", help="llama-cett-dump (default $NS_CETT)"),
+                   U("input_path", default="data/answer_tokens.jsonl"), U("ids_path", default="data/train_qids.json"),
+                   U("output_root", default="data/activations"),
+                   U("locations", multi=True, choices=LOCS, default=["answer_tokens", "all_except_answer_tokens"]),
+                   U("ngl", kind="int", default=99), U("batch", kind="int", default=4096), TRUST]},
+    "extract_torch": {
+        "title": "4 · Extract CETT (PyTorch)", "group": "H-Neurons", "argv": [S / "extract_activations.py"],
+        "help": "Activations from Hugging Face weights; needs PyTorch.",
+        "fields": [U("model_path", req=True), U("input_path", default="data/answer_tokens.jsonl"),
+                   U("ids_path", default="data/train_qids.json"), U("output_root", default="data/activations"),
+                   U("locations", multi=True, choices=LOCS, default=["answer_tokens", "all_except_answer_tokens"]),
+                   U("gpu_mem", help="e.g. 14GiB; empty = CPU"), U("cpu_mem", help="e.g. 40GiB"), TRUST]},
+    "classify": {
+        "title": "5 · Find H-Neurons", "group": "H-Neurons", "argv": [S / "classifier.py"],
+        "help": "Sparse classifier on the activations; writes models/h_neurons.json and classifier.npz.",
+        "fields": [U("acts_root", default="data/activations"), U("train_ids", default="data/train_qids.json"),
+                   U("test_ids", default="data/test_qids.json"), U("test_acts_root", default="data/activations_test"),
+                   U("train_mode", choices=["1-vs-1", "3-vs-1"], default="3-vs-1"),
+                   U("penalty", choices=["l1", "l2"], default="l1"),
+                   F("C", flag="--C", kind="float", default=1.0, help="sparsity: lower keeps fewer neurons"),
+                   U("out_dir", default="models")]},
+    "tune": {
+        "title": "7 · Tune the scale", "group": "H-Neurons", "argv": [S / "tune_scale.py"],
+        "help": "Measure answers at several suppression scales; --save writes a profile.",
+        "fields": [U("model_path", req=True), U("h_neurons", default="models/h_neurons.json"),
+                   U("eval_path", default="data/consistency_samples.jsonl"),
+                   U("scales", multi=True, default=["1.0", "0.5", "0.25", "0.1", "0.0"]),
+                   U("n_eval", kind="int", default=50), U("gpu_mem"), U("config_name", default="trivia"),
+                   U("save", kind="bool", default=True), TRUST]},
+    "suppress_gguf": {
+        "title": "9 · Edit a GGUF", "group": "H-Neurons", "argv": [S / "suppress_gguf.py"],
+        "help": "Scale the H-Neurons inside a GGUF; the copy loads anywhere a GGUF does.",
+        "fields": [U("gguf", req=True), U("h_neurons", default="models/h_neurons.json"),
+                   U("scale", kind="float", req=True, default=0.5), U("out", req=True)]},
+    "export_lora": {
+        "title": "9 · Export a LoRA", "group": "H-Neurons", "argv": [S / "export_lora.py"],
+        "help": "The suppression as an adapter (HF, or GGUF with gguf set).",
+        "fields": [U("model_path", req=True), U("profile", req=True), U("output_dir", default="adapters/suppress"),
+                   U("scale", kind="float"), U("gguf", help="base GGUF, to write a GGUF adapter"), TRUST]},
+    "intervene": {
+        "title": "9 · Apply to HF weights", "group": "H-Neurons", "argv": [S / "intervene_model.py"],
+        "help": "A suppressed copy of a Hugging Face model.",
+        "fields": [U("model_path", req=True), U("profile"), U("h_neurons"), U("scale", kind="float"),
+                   U("output_path", default="models/suppressed"), TRUST]},
+    "judge": {
+        "title": "Check the judge", "group": "H-Neurons", "argv": [S / "judge_agreement.py"],
+        "help": "How often the right/wrong labels agree with an LLM judge, before trusting them.",
+        "fields": [U("input_path", default="data/consistency_samples.jsonl"),
+                   U("base_url", default="http://127.0.0.1:7870/v1"), U("model", req=True),
+                   U("n", kind="int", default=100), U("out")]},
+    "trace": {
+        "title": "Trace one sample", "group": "H-Neurons", "argv": [S / "trace_sample.py"],
+        "help": "Per-token CETT for one answer, for the 3D views (Replay).",
+        "fields": [U("gguf"), U("binary"), U("input_path", default="data/consistency_samples.jsonl"), U("qid"),
+                   U("out", req=True, help="e.g. runs/trace-1"), U("classifier", help="models/classifier.npz"),
+                   F("bin_neurons", kind="int", default=512)]},
+    # ---- vision (docs/VISION.md)
+    **{f"clip_{sub}": {
+        "title": f"CLIP · {sub}", "group": "Vision", "argv": [S / "clip_neurons.py", sub],
+        "help": {"collect": "Zero-shot label images; keep consistent right and wrong ones.",
+                 "extract": "CETT for the image or text tower.",
+                 "evaluate": "Error and abstention rates at each scale.",
+                 "export": "A suppressed copy of the model."}[sub],
+        "fields": fields} for sub, fields in {
+        "collect": [U("model", req=True, help="e.g. openai/clip-vit-base-patch32"), U("images", help="image folder"),
+                    U("manifest"), U("labels"), U("out", req=True, help="e.g. runs/clip")],
+        "extract": [U("model", req=True), U("run", req=True), U("ids", req=True),
+                    U("tower", choices=["vision", "text"], default="vision"), U("out", req=True)],
+        "evaluate": [U("model", req=True), U("run", req=True), U("ids", req=True), U("h_neurons", req=True),
+                     U("tower", choices=["vision", "text"], default="vision"),
+                     U("scales", multi=True, default=["1", "0.5", "0"]), U("out")],
+        "export": [U("model", req=True), U("h_neurons", req=True), U("tower", choices=["vision", "text"],
+                   default="vision"), U("scale", kind="float", req=True), U("out", req=True)]}.items()},
+    # ---- analysis
+    "compare_models": {
+        "title": "Does suppression help?", "group": "Analysis", "argv": [S / "compare_models.py"],
+        "help": "Ask the original and the edited model the same fresh questions; count fixes and new errors.",
+        "fields": [U("target", req=True, repeat=True, help="label=URL@model, e.g. base=http://127.0.0.1:7870/v1@m"),
+                   U("data_path"), U("n", kind="int", default=200), U("out", req=True)]},
+    "merge_eval": {
+        "title": "Compare models item by item", "group": "Analysis", "argv": [S / "merge_eval.py"],
+        "help": "What improved and what regressed between two or more endpoints on the same tasks.",
+        "fields": [F("endpoint", req=True, repeat=True, help="label=URL@model"), U("tasks", req=True),
+                   U("reference"), U("out")]},
+    "cv": {
+        "title": "Cross-validate the detector", "group": "Analysis", "argv": [S / "cv.py"],
+        "help": "Cross-validated AUROC with permutation tests: is the H-Neuron signal real for this model?",
+        "fields": [U("roots", req=True, multi=True, help="activation folders"), U("ids", req=True, multi=True),
+                   U("samples"), F("C", flag="--C", multi=True), U("folds", kind="int", default=5), U("out")]},
+    "score_tokens": {
+        "title": "Score tokens (HTML)", "group": "Analysis", "argv": [S / "score_tokens.py"],
+        "help": "H-Neuron activity token by token, written as an HTML page.",
+        "fields": [U("model_path", req=True), U("classifier", default="models/classifier.npz"),
+                   U("input_path"), U("question"), U("n", kind="int", default=5), U("out"), TRUST]},
+    "when": {
+        "title": "Where does the score spike?", "group": "Analysis", "argv": [S / "when.py"],
+        "help": "Peaks of the hallucination score along one or more traces (pass a wrong and a right one).",
+        "fields": [F("traces", flag="", req=True, multi=True, help="trace folders")]},
+    "task_neurons": {
+        "title": "Neurons per task", "group": "Analysis", "argv": [S / "task_neurons.py"],
+        "help": "Which neurons a model recruits for which kind of task.",
+        "fields": [U("acts_root", req=True), U("ids", req=True), U("samples", req=True), U("out_dir")]},
+    "code_halluc": {
+        "title": "Code hallucination vs scale", "group": "Analysis", "argv": [S / "eval_code_hallucination.py"],
+        "help": "Invented packages and APIs, checked against a real package index, at each suppression scale.",
+        "fields": [U("base_url", req=True, default="http://127.0.0.1:7870/v1"), U("tasks", req=True),
+                   U("model"), U("alphas", multi=True, default=["1.0", "0.5", "0.0"]), U("out")]},
+    "vram_budget": {
+        "title": "Memory budget", "group": "Analysis", "argv": [S / "vram_budget.py"],
+        "help": "Model, KV cache and visualizer memory for a GGUF at a context length.",
+        "fields": [F("gguf", req=True), F("ctx", kind="int", default=8192), F("vram", help="e.g. 16GiB"),
+                   F("ngl", kind="int")]},
+    # ---- merging and editing
+    "merge_selective": {
+        "title": "Selective merge", "group": "Merge", "argv": [S / "merge_selective.py"],
+        "help": "Take chosen neurons (e.g. the H-Neurons) from a donor model into a base model.",
+        "fields": [F("base", req=True), F("donor", req=True), F("h_neurons"), F("layers"),
+                   F("alpha", kind="float", default=1.0), U("output_path", req=True), F("dry_run", kind="bool"), TRUST]},
+    "sweep_experts": {
+        "title": "MoE expert sweep", "group": "Merge", "argv": [S / "sweep_experts.py"],
+        "help": "Accuracy and speed of a mixture-of-experts GGUF at each active expert count.",
+        "fields": [F("gguf", req=True), F("server", req=True, help="llama-server binary"), F("tasks", req=True),
+                   F("experts", req=True, multi=True, default=["2", "4", "8"]), F("ngl", kind="int", default=99),
+                   F("out")]},
+    "suppress_mmproj": {
+        "title": "Edit a vision projector", "group": "Vision", "argv": [S / "suppress_mmproj.py"],
+        "help": "Scale CLIP/SigLIP H-Neurons inside a llama.cpp mmproj GGUF.",
+        "fields": [U("mmproj", req=True), U("h_neurons", req=True), U("scale", kind="float", req=True),
+                   U("out", req=True)]},
+    # ---- data
+    "export_sft": {
+        "title": "Abstention dataset", "group": "Retrain", "argv": [S / "export_sft_dataset.py"],
+        "help": "Collected pairs -> an SFT dataset that teaches saying \"I don't know\".",
+        "fields": [U("input_path", default="data/consistency_samples.jsonl"), U("output_path", req=True),
+                   U("val_fraction", kind="float", default=0.1), U("max_pairs", kind="int")]},
+    "vision_synth": {
+        "title": "Synthetic vision items", "group": "Vision", "argv": [S / "vision_synth.py"],
+        "help": "Images with questions whose answers are true by construction (counting, colours, text).",
+        "fields": [F("family", req=True, choices=["arith_minus", "arith_sum", "color_of_shape", "count_color",
+                                                  "count_shape", "count_total", "larger_choice", "largest_color",
+                                                  "left_right", "left_shape", "letter_count", "ocr_color", "ocr_number",
+                                                  "ocr_word", "shape_of_color", "single_shape", "top_bottom"]),
+                   F("n", flag="-n", kind="int", default=50), F("out", req=True)]},
+    # ---- viewers that open a window on this machine's desktop, or write a report
+    "view_timeline": {
+        "title": "Timeline (window)", "group": "Views", "argv": [ROOT / "viz" / "timeline.py"],
+        "help": "Exact, unbloomed per-token view of a trace, in a desktop window (pygfx).",
+        "fields": [F("session", flag="", req=True, help="trace folder, e.g. runs/trace-1 or ~/.neuronscope/traces/<id>"),
+                   F("h_neurons"), F("play", kind="bool")]},
+    "view_explore": {
+        "title": "Explorer (window)", "group": "Views", "argv": [ROOT / "viz" / "explore.py"],
+        "help": "Mean and contrast maps, 3D volume, click to inspect, in a desktop window (fastplotlib).",
+        "fields": [F("session", flag="", req=True, help="activations session"), F("h_neurons"),
+                   F("max_samples", kind="int")]},
+    "view_weights": {
+        "title": "Weights (window)", "group": "Views", "argv": [ROOT / "viz" / "weights.py"],
+        "help": "Weight magnitude, quantization error and H-Neuron enrichment for a GGUF.",
+        "fields": [F("gguf", req=True), F("reference", help="higher-precision GGUF to compare against"),
+                   F("h_neurons")]},
+    "compare": {
+        "title": "Compare sessions", "group": "Views", "argv": [ROOT / "viz" / "compare.py"],
+        "help": "Depth profiles, concentration and failure overlap between two or more sessions (report).",
+        "fields": [F("sessions", flag="", req=True, multi=True), F("json", help="also write the report here"),
+                   F("assert_lineage", kind="bool")]},
+})
+
 SAFE = re.compile(r"^[^\x00-\x1f]*$")
 
 
@@ -124,7 +344,7 @@ def build_argv(kind: str, values: dict) -> list[str]:
     if kind not in SPECS:
         raise ValueError(f"unknown job kind {kind!r}")
     spec = SPECS[kind]
-    argv = [sys.executable, *[str(x) for x in spec["argv"]]]
+    argv = [*(spec.get("interp") or [sys.executable]), *[str(x) for x in spec["argv"]]]
     for f in spec["fields"]:
         v = values.get(f["name"], f["default"])
         if f["kind"] == "bool":
@@ -154,7 +374,7 @@ def build_argv(kind: str, values: dict) -> list[str]:
             for x in out:
                 argv += [f["flag"], x]
         elif out:
-            argv += [f["flag"], *out]
+            argv += ([f["flag"]] if f["flag"] else []) + out       # flag "" = positional
         elif f["required"]:
             raise ValueError(f"{f['name']} is required")
     return argv
@@ -259,6 +479,7 @@ def public_specs() -> dict:
 PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Studio Jobs</title><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
 <style>
+a{color:var(--acc)}
 :root{--bg:#fafaf9;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b66;--line:#e4e4df;--acc:#2d5bd7;--accfg:#fff;--ok:#1f8a4c;--no:#c0392b;--code:#f3f3f0}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#151514;--panel:#1d1d1b;--fg:#ececea;--mut:#9a9a94;--line:#33332f;--acc:#6f93ff;--accfg:#0b0b0a;--ok:#4cc27e;--no:#ff7a6b;--code:#262624}}
 :root[data-theme=dark]{--bg:#151514;--panel:#1d1d1b;--fg:#ececea;--mut:#9a9a94;--line:#33332f;--acc:#6f93ff;--accfg:#0b0b0a;--ok:#4cc27e;--no:#ff7a6b;--code:#262624}
@@ -280,7 +501,7 @@ button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 .st.running{color:var(--acc)}.st.done{color:var(--ok)}.st.failed,.st.lost{color:var(--no)}
 pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;margin:.5rem 0 0}
 </style>
-<header><h1>Studio · Jobs</h1><a href="/">← Studio</a><span class="note" id="hint"></span></header>
+<header><h1>Studio · Jobs</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
 <main>
  <section class="card"><h2>New job</h2>
   <select id="kind"></select><div id="khelp" class="note" style="margin-top:.3rem"></div>

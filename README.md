@@ -38,7 +38,20 @@ New to the terms (GGUF, CETT, H-Neurons, abstention, MCP…)? The
 ## Quick start
 
 ```bash
-./install.sh && source venv/bin/activate     # picks CUDA / ROCm / MPS / CPU PyTorch
+./install.sh            # picks CUDA / ROCm / MPS / CPU PyTorch, adds NeuronScope to the app menu
+./neuronscope           # or the app menu: starts Studio and opens it in your browser
+```
+
+From there everything is in the browser: **Setup** builds llama.cpp and finds
+your models, **Jobs** runs evaluations, retraining and every pipeline stage,
+**Lab** opens the labs and 3D views, **Projects** plans work for worker models,
+**Connect** sets up Cline. [docs/UI_AND_CLI.md](docs/UI_AND_CLI.md) maps every
+feature to its place in the UI, its command and its MCP tool.
+
+From a terminal instead:
+
+```bash
+source venv/bin/activate
 #   ./install.sh --no-torch                  # lighter: Studio, TestQA, Projects and the llama.cpp path need no PyTorch
 python scripts/doctor.py                     # checks Python, packages, GPUs, llama.cpp, your model; says what to do next
 scripts/build_llama_tools.sh --backend vulkan  # llama.cpp + the cett-dump extractor (or cpu, cuda, hip, metal); ~5 min

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Added (everything from the browser)
+- After `./install.sh`, no terminal is needed: an app-menu entry (Linux),
+  `./neuronscope` and `NeuronScope.bat` start Studio (`scripts/launch.py`)
+  and open it, on Setup until llama-server and models are found. Studio's
+  main page points at Setup while they are missing.
+- Setup page (`/setup`): models folders, llama-server, cett-dump, unloading,
+  routing thresholds and worker limits, saved to `~/.neuronscope/config.json`
+  (read at startup, flags still win) and applied at once where possible;
+  build llama.cpp with a live log; hardware (devices on/off, a llama-server
+  per backend or device, pinned ROCm, environment); the health check;
+  restart Studio. Network exposure stays in the file and flags only.
+- Lab page (`/lab`): start, open and stop the live view, 3D replay (with a
+  trace picker), the pipeline dashboard, the quantization, scale-sweep and
+  adaptive-tuning labs and the transfer page, from Studio.
+- Jobs: 46 kinds (was 10): the H-Neuron pipeline stage by stage, building
+  llama.cpp, vision, analysis (cross-validation, per-task neurons, score
+  spikes, code hallucination, memory budget), selective merge, MoE expert
+  sweep, and the desktop viewers. Jobs support positional arguments and a
+  non-Python interpreter; a test checks every field against its script.
+- `docs/UI_AND_CLI.md`: every feature's place in the UI, its command and its
+  MCP tool. One navigation bar across Studio's pages.
+- Fixed: the timeline's theme list offered `_ui`, which is not a theme.
+
 ### Added (connect)
 - NeuronScope as an MCP server (`scripts/ns_mcp.py`, dependency-free): 26
   tools over Studio's API (models, chat, reply checks, routing, stats,

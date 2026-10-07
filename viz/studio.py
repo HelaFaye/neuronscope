@@ -1406,6 +1406,174 @@ def _director():
     return director
 
 
+# ------------------------------------------------------------ studio settings
+
+# Settings the Setup page may change, with their type and whether they apply
+# without a restart. Network exposure (host, token, TLS, remote jobs) is never
+# editable from the web: those stay in the config file and on the command line.
+SETUP_FIELDS = {
+    "models_dir": ("dirs", True, "Folders searched for .gguf models"),
+    "server": ("file", True, "llama-server binary"),
+    "cett": ("file", True, "llama-cett-dump binary (activation checks, the GGUF pipeline)"),
+    "download_dir": ("dir", True, "Where model downloads go (default: the first models folder)"),
+    "idle_ttl": ("int", True, "Unload the chat model after this many idle seconds (0 = never)"),
+    "no_jit": ("bool", True, "Never load or swap models for API requests"),
+    "min_graded": ("int", True, "Graded results a model needs before auto routing considers it"),
+    "hallucination_cost": ("float", True, "How much a wrong answer costs against a right one, for routing"),
+    "max_workers": ("int", True, "Worker models the director may run at once"),
+    "worker_idle": ("int", True, "Stop an idle worker model after this many seconds"),
+    "score_every": ("int", True, "Score one live reply in N with the activation classifier"),
+    "score_ngl": ("int", True, "GPU layers for activation scoring (0 keeps it off the GPU)"),
+    "max_jobs": ("int", False, "Jobs that may run at once"),
+    "rag_embed_gguf": ("file", False, "Embedding GGUF for document search"),
+}
+
+
+def load_config(path=None):
+    p = os.path.expanduser(path or STATE.get("config_path") or "~/.neuronscope/config.json")
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        return d.get("studio", {}) if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(values):
+    p = os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json")
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("studio", {}).update(values)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, p)
+
+
+def clean_setup(values):
+    """Validate Setup page values -> (clean, errors)."""
+    out, errs = {}, {}
+    for k, v in values.items():
+        if k not in SETUP_FIELDS:
+            errs[k] = "not editable here"
+            continue
+        kind = SETUP_FIELDS[k][0]
+        try:
+            if kind == "dirs":
+                v = [os.path.expanduser(str(x).strip()) for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
+                bad = [x for x in v if not os.path.isdir(x)]
+                if bad:
+                    raise ValueError(f"not a folder: {', '.join(bad)}")
+            elif kind in ("file", "dir"):
+                v = os.path.expanduser(str(v or "").strip()) or None
+                if v and kind == "file" and not (os.path.isfile(v) and (k == "rag_embed_gguf" or os.access(v, os.X_OK))):
+                    raise ValueError("not an executable file" if k != "rag_embed_gguf" else "no such file")
+                if v and kind == "dir" and not os.path.isdir(v):
+                    raise ValueError("not a folder")
+            elif kind == "int":
+                v = int(v)
+                if v < 0:
+                    raise ValueError("must be 0 or more")
+            elif kind == "float":
+                v = float(v)
+            elif kind == "bool":
+                v = bool(v)
+            out[k] = v
+        except (TypeError, ValueError) as e:
+            errs[k] = str(e) or "invalid"
+    return out, errs
+
+
+def apply_setup(values):
+    """Apply what can change without a restart; -> keys that need one."""
+    later = []
+    for k, v in values.items():
+        if k == "models_dir":
+            STATE["models_dirs"] = v or STATE["models_dirs"]
+        elif k == "server":
+            STATE["server_bin"] = v
+        elif k == "cett":
+            STATE["cett"] = v
+            _SCORERS.clear()
+        elif k == "download_dir":
+            STATE["download_dir"] = v
+        elif k == "idle_ttl":
+            STATE["idle_ttl"] = v
+        elif k == "no_jit":
+            STATE["jit"] = not v
+        elif k == "min_graded":
+            STATE["min_graded"] = max(1, v)
+        elif k == "hallucination_cost":
+            STATE["halluc_cost"] = v
+        elif k == "max_workers":
+            STATE["max_workers"] = max(1, v)
+        elif k == "worker_idle":
+            STATE["worker_idle"] = max(30, v)
+        elif k in ("score_every", "score_ngl"):
+            STATE[k] = v
+        else:
+            later.append(k)
+    return later
+
+
+def setup_state():
+    cfg = load_config()
+    eff = {"models_dir": STATE["models_dirs"], "server": STATE["server_bin"], "cett": STATE["cett"],
+           "download_dir": STATE["download_dir"], "idle_ttl": STATE["idle_ttl"], "no_jit": not STATE["jit"],
+           "min_graded": STATE["min_graded"], "hallucination_cost": STATE["halluc_cost"],
+           "max_workers": STATE["max_workers"], "worker_idle": STATE["worker_idle"],
+           "score_every": STATE["score_every"], "score_ngl": STATE["score_ngl"],
+           "max_jobs": cfg.get("max_jobs"), "rag_embed_gguf": STATE.get("rag_embed_gguf")}
+    # Binaries a llama.cpp build would have produced, to offer when nothing is set.
+    found = {}
+    for root in [os.path.expanduser("~/llama.cpp"), os.environ.get("NS_LLAMA") or ""]:
+        for name, key in (("llama-server", "server"), ("llama-cett-dump", "cett")):
+            pth = os.path.join(root, "build", "bin", name)
+            if root and os.path.isfile(pth):
+                found.setdefault(key, pth)
+    return {"fields": {k: {"kind": v[0], "live": v[1], "help": v[2], "value": eff.get(k)}
+                       for k, v in SETUP_FIELDS.items()},
+            "config_path": os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"),
+            "found": found, "models": len(scan_models()),
+            "ready": {"server": bool(STATE["server_bin"] and os.path.exists(STATE["server_bin"])),
+                      "models": bool(scan_models()), "cett": bool(STATE["cett"])}}
+
+
+_HUB = {}
+
+
+def lab_hub():
+    """viz/hub.py's service manager, run inside Studio: the labs, live and replay
+    views and the pipeline dashboard. Studio holds what it starts until stopped."""
+    if "m" not in _HUB:
+        import hub
+        root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        hub.STATE["root"] = root
+        hub.SERVICES.update({k: v for k, v in hub.declare(root, sys.executable).items() if k != "chat"})
+        _HUB["m"] = hub
+    return _HUB["m"]
+
+
+def stop_labs():
+    if "m" in _HUB:
+        for name in list(_HUB["m"].RUNNING):
+            _HUB["m"].stop(name)
+
+
+def restart_studio():
+    """Re-exec Studio with the same arguments, after stopping the model servers it
+    started (an orphaned llama-server would hold their ports)."""
+    time.sleep(0.5)                       # let the response reach the browser
+    stop_server()
+    POOL.stop()
+    stop_labs()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def run_doctor():
     """scripts/doctor.py --json, with this Studio's llama.cpp and model."""
     env = dict(os.environ)
@@ -2119,6 +2287,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/traces":
             return self._json(200, {"traces": list_traces()})
+        if self.path in ("/lab", "/api/lab"):
+            if not self._owner_only():
+                return
+            if self.path == "/lab":
+                import lab_page
+                body = lab_page.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            hub = lab_hub()
+            return self._json(200, {"services": hub.service_state(), "traces": hub.find_traces()})
+        if self.path in ("/setup", "/api/setup", "/api/hardware"):
+            if not self._owner_only():
+                return
+            if self.path == "/setup":
+                import setup_page
+                body = setup_page.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/api/setup":
+                return self._json(200, setup_state())
+            import accelerators
+            path = STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG)
+            return self._json(200, {"path": path, "config": accelerators.load_config(path),
+                                    "devices": POOL.devices(refresh=True)})
         if self.path in ("/connect", "/api/connect"):
             if not self._owner_only():
                 return
@@ -2323,6 +2523,56 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/mcp":
                 return self._mcp_post()
+
+            if self.path in ("/api/lab/start", "/api/lab/stop"):
+                if not self._owner_only():
+                    return
+                req = self._read()
+                hub = lab_hub()
+                name = str(req.get("name") or "")
+                if name not in hub.SERVICES:
+                    return self._json(404, {"error": f"no lab service {name!r}"})
+                if self.path == "/api/lab/stop":
+                    hub.stop(name)
+                    return self._json(200, {"ok": True})
+                ok, why, port = hub.acquire(name, "studio", req.get("cfg") or {})
+                return self._json(200 if ok else 400, {"ok": ok, "port": port, "message": why} if ok
+                                  else {"error": why})
+
+            if self.path in ("/api/setup", "/api/hardware", "/api/restart"):
+                if not self._owner_only():
+                    return
+                if self.path == "/api/restart":
+                    threading.Thread(target=restart_studio, daemon=True).start()
+                    return self._json(200, {"ok": True, "note": "Studio restarts in a moment"})
+                req = self._read()
+                if self.path == "/api/setup":
+                    clean, errs = clean_setup(req.get("values") or {})
+                    if errs:
+                        return self._json(400, {"error": "; ".join(f"{k}: {v}" for k, v in errs.items()), "fields": errs})
+                    save_config(clean)
+                    later = apply_setup(clean)
+                    return self._json(200, {"saved": sorted(clean), "restart_needed": later, **setup_state()})
+                cfg = req.get("config")
+                if not isinstance(cfg, dict) or set(cfg) - {"prefer", "servers", "devices", "manual"}:
+                    return self._json(400, {"error": "hardware config must be an object with prefer, servers, "
+                                                     "devices and manual"})
+                for b, pth in (cfg.get("servers") or {}).items():
+                    if pth and not os.path.isfile(os.path.expanduser(pth)):
+                        return self._json(400, {"error": f"servers.{b}: {pth} does not exist"})
+                for dev, c in (cfg.get("devices") or {}).items():
+                    if not isinstance(c, dict):
+                        return self._json(400, {"error": f"devices.{dev} must be an object"})
+                    if c.get("server") and not os.path.isfile(os.path.expanduser(c["server"])):
+                        return self._json(400, {"error": f"{dev}: llama-server {c['server']} does not exist"})
+                import accelerators
+                path = os.path.expanduser(STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                os.replace(tmp, path)
+                return self._json(200, {"ok": True, "devices": POOL.devices(refresh=True)})
 
             if self.path == "/api/connect/token":
                 # A separate, revocable token for an app (Cline, Claude Desktop): a paired
@@ -2730,6 +2980,8 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
   <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/lab" class="chip" style="text-decoration:none" title="labs, live and 3D views, pipeline dashboard">Lab</a>
+  <a href="/setup" class="chip" style="text-decoration:none" title="paths, building llama.cpp, hardware, health check">Setup</a>
   <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
   <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
   <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
@@ -3209,6 +3461,13 @@ async function mcp(reload){
 $('#mcpreload').onclick=()=>mcp(true);
 
 refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
+// First run: point at Setup while llama-server or models are missing (owner only; devices get 403).
+fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server&&s.ready.models)) return;
+  const miss=[!s.ready.server&&'llama-server',!s.ready.models&&'models'].filter(Boolean).join(' and ');
+  const d=document.createElement('div'); d.id='setupBanner';
+  d.style.cssText='padding:.55rem 1rem;background:color-mix(in srgb,var(--acc) 18%,var(--panel));border-bottom:1px solid var(--line);font-size:13px';
+  d.innerHTML=`Almost there: Studio needs ${miss}. <a href="/setup" style="color:var(--acc);font-weight:600">Open Setup →</a>`;
+  document.querySelector('header').after(d); }).catch(()=>{});
 </script>"""
 
 
@@ -3295,6 +3554,13 @@ def main(argv=None):
     p.add_argument("--rag-embed-gguf", help="embedding GGUF; Studio runs it with llama-server --embedding on demand")
     p.add_argument("--rag-embed-ngl", type=int, default=0, help="GPU layers for the embedding model")
     sec.add_server_security_args(p)
+    p.add_argument("--config", default=os.environ.get("NS_CONFIG", "~/.neuronscope/config.json"),
+                   help="settings file (\"studio\" section); the Setup page writes it, and flags override it")
+    pre, _ = p.parse_known_args(argv)
+    STATE["config_path"] = pre.config
+    cfg = load_config(pre.config)
+    dests = {x.dest for x in p._actions}
+    p.set_defaults(**{k: (list(v) if isinstance(v, list) else v) for k, v in cfg.items() if k in dests})
     a = p.parse_args(argv)
 
     STATE["models_dirs"] = [os.path.expanduser(d) for d in a.models_dir] or [
@@ -3393,6 +3659,7 @@ def main(argv=None):
     finally:
         stop_server()
         POOL.stop()
+        stop_labs()
         if EMBED["proc"] is not None and EMBED["proc"].poll() is None:
             EMBED["proc"].terminate()
         if STATE.get("mcp") is not None:

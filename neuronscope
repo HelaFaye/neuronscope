@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Start NeuronScope Studio (if it is not running) and open it in the browser.
+# Same as the "NeuronScope" entry install.sh adds to the app menu.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+py="$here/venv/bin/python"; [[ -x "$py" ]] || py="$(command -v python3)"
+exec "$py" "$here/scripts/launch.py" "$@"

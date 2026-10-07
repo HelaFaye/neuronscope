@@ -39,7 +39,8 @@ from records import Session  # noqa: E402
 _THEME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "themes.json")
 with open(_THEME_PATH) as _f:
-    THEMES = json.load(_f)
+    # Keys starting with "_" (the UI palette) are not viewer themes.
+    THEMES = {k: v for k, v in json.load(_f).items() if not k.startswith("_")}
 
 
 def add_flag_args(p):

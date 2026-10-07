@@ -19,6 +19,20 @@ want either PyTorch (any backend) or a llama.cpp build.
 ¹ The code interpreter's CPU/memory limits use POSIX `resource`; on Windows
 only the wall-clock timeout applies.
 
+## The short way
+
+```bash
+git clone <this repo> neuronscope && cd neuronscope
+./install.sh            # add --no-torch for a lighter install without PyTorch
+./neuronscope           # or start "NeuronScope" from the app menu
+```
+
+Studio opens in your browser on its **Setup** page: build llama.cpp with one
+button (or point it at an existing build), add your models folder, run the
+health check. Everything after that is in the browser; see
+[UI_AND_CLI.md](UI_AND_CLI.md) for where each feature lives, and the steps
+below for doing the same from a terminal.
+
 ## 1. Install
 
 ```bash

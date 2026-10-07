@@ -7,6 +7,7 @@ as text (escaped), never as markup.
 PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Studio Projects</title><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
 <style>
+a{color:var(--acc)}
 :root{--bg:#fafaf9;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b66;--line:#e4e4df;--acc:#2d5bd7;--accfg:#fff;--ok:#1f8a4c;--no:#c0392b;--warn:#a8701c;--code:#f3f3f0;--chip:#eef1fb}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#151514;--panel:#1d1d1b;--fg:#ececea;--mut:#9a9a94;--line:#33332f;--acc:#6f93ff;--accfg:#0b0b0a;--ok:#4cc27e;--no:#ff7a6b;--warn:#e7b65c;--code:#262624;--chip:#22283a}}
 :root[data-theme=dark]{--bg:#151514;--panel:#1d1d1b;--fg:#ececea;--mut:#9a9a94;--line:#33332f;--acc:#6f93ff;--accfg:#0b0b0a;--ok:#4cc27e;--no:#ff7a6b;--warn:#e7b65c;--code:#262624;--chip:#22283a}
@@ -46,7 +47,7 @@ details summary{cursor:pointer;color:var(--mut);font-size:12px}
 .risk.lo{background:color-mix(in srgb,var(--ok) 20%,transparent)}
 .empty{color:var(--mut);padding:2rem;text-align:center}
 </style>
-<header><h1>Studio · Projects</h1><a href="/">← Studio</a><a href="/jobs">Jobs</a><span class="note" id="hint"></span></header>
+<header><h1>Studio · Projects</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
 <main>
 <div>
  <section class="card"><h2>Projects</h2><div id="plist" class="note">none yet</div></section>

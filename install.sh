@@ -170,6 +170,27 @@ case "$GFX" in
      [[ -z "$ROCM_VERSION" ]] && ROCM_VERSION="6.4" ;;
 esac
 
+# ---------------------------------------------------------------- launcher
+
+install_launcher() {
+  # An app-menu entry, so nobody needs a terminal after this script.
+  local here; here="$(pwd)"
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    local apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$apps"
+    cat > "$apps/neuronscope.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=NeuronScope
+Comment=Run, test and look inside local models
+Exec=$here/neuronscope
+Terminal=false
+Categories=Development;Science;
+DESKTOP
+    info "added NeuronScope to the app menu ($apps/neuronscope.desktop)"
+  fi
+}
+
 # ---------------------------------------------------------------- install
 
 if [[ "$MODE" == "none" ]]; then
@@ -182,7 +203,11 @@ if [[ "$MODE" == "none" ]]; then
   pip install --quiet -r requirements-core.txt
   cat <<EOF
 
-Done, without PyTorch. Activate with:  source $VENV/bin/activate
+Done, without PyTorch.
+
+Start it from the app menu (NeuronScope), or:  ./neuronscope
+It opens Studio in your browser; the Setup page there takes care of the rest.
+Command line: source $VENV/bin/activate
 
 Works now: Studio (viz/studio.py), TestQA, Projects, transfer, the subject
 classifier, and everything that runs through llama.cpp (cett-dump extraction,
@@ -191,6 +216,7 @@ H-Neurons, fine-tuning. Re-run ./install.sh without --no-torch to add it.
 
 Next:  python scripts/doctor.py      # what is ready, and the one thing to do next
 EOF
+  install_launcher
   exit 0
 fi
 
@@ -319,7 +345,11 @@ rm -f /tmp/ns_smoke.py
 
 cat <<EOF
 
-Done. Activate with:  source $VENV/bin/activate
+Done.
+
+Start it from the app menu (NeuronScope), or:  ./neuronscope
+It opens Studio in your browser; the Setup page there takes care of the rest.
+Command line: source $VENV/bin/activate
 
 Next:  python scripts/doctor.py      # what is ready, and the one thing to do next
 
@@ -327,3 +357,4 @@ Then docs/GETTING_STARTED.md. Before a long extraction run,
   python scripts/preflight.py --model_path <hf-model> --n_pairs 400
 estimates time and memory without loading the weights.
 EOF
+install_launcher
