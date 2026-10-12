@@ -18,11 +18,13 @@ affects your work:
 | workspaces, models per subject, tool approval | ✓ (edit everything) | ✓ switch, pick, quick settings | ✓ switch, pick, quick settings |
 | setup: health check, requirements, build llama.cpp, restart | ✓ | ✓ `doctor`, `requirements`, `start-job --kind build_llama`, `restart` | ✓ |
 | labs | ✓ | `python viz/hub.py` | start, stop, open |
+| remote hosts (LM Studio, Ollama… without NeuronScope) | ✓ add, pair, send models | ✓ `remote-hosts`, `remote-call` | their models in the model list |
 
 Edited only on the web pages (or their own command-line tools): workspace
 folders, ordered tool rules with argument regexes (`scripts/tool_rules.py`),
-per-model llama-server settings, MCP servers, documents for chat, pairing
-and linked machines. These are set up once, not used from minute to minute.
+per-model llama-server settings, MCP servers, documents for chat, pairing,
+linked machines and adding remote hosts ([REMOTE.md](REMOTE.md)). These are
+set up once, not used from minute to minute.
 
 ## Client and server on different machines
 

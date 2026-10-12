@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Added (remote hosts)
+- NeuronScope Remote (`remote/`): an agent for computers that run LLMs but
+  not NeuronScope. It is distributed on its own: a pip package, a zip from
+  Studio, and launchers for Windows and macOS/Linux. It uses only the
+  standard library.
+  - Its MCP server is the host's one control surface. Tools: host info,
+    LLM servers, models, chat, load/unload (LM Studio's `lms`, Ollama),
+    receive and install model files into LM Studio or Ollama, and delete
+    (off by default).
+  - It also offers an OpenAI-compatible pass-through for chat.
+  - A browser console, on the host only, shows who is the host and who are
+    the controllers, the pairing code, permissions and activity, and
+    revokes controllers.
+- Link methods:
+  - same network, with a pinned self-signed certificate and LAN discovery;
+  - any VPN address;
+  - SSH tunnels, which Studio runs itself;
+  - public tunnels;
+  - call-home for hosts behind NAT: the host long-polls Studio, needs no
+    open port, and has its own token.
+- Pairing: a 10-minute, single-use code. The code never travels; HMAC
+  proofs are bound to the TLS certificate the controller sees, and the
+  host proves itself back.
+- Studio → **Remote** (`/remote`):
+  - a wizard (install, link method, pair) with *This computer:
+    CONTROLLER*;
+  - per-host info, models, load/unload, a test chat, and *Send model*
+    (resumable, checksummed, optional install).
+  - Hosts' models join Studio's model list as `<host>:<model>`.
+  - MCP tools `remote_hosts` and `remote_call` (also terminal commands).
+- Other MCP clients as controllers: `neuronscope-remote add-host` pairs
+  from the command line, and `bridge` carries MCP over stdio to the host
+  with the certificate pinned (Claude Desktop, Cline, Cursor).
+
 ### Added (settings)
 - Workspaces (`scripts/ns_workspace.py`, Settings → Workspaces): named sets
   of folders and binaries (pipeline data root, models folders, downloads,

@@ -287,6 +287,14 @@ TOOLS = [
      "'wrong' or 'abstained'), so it counts in the association. The id is the 'review' id a check returns.",
      _s({"model": STR, "id": STR, "verdict": {"type": "string", "enum": ["correct", "wrong", "abstained"]}},
         ["model", "id", "verdict"]), WRITE, lambda st, a: st.call("POST", "/api/review/label", a)),
+    ("remote_hosts", "Computers this Studio controls that run models but not NeuronScope (LM Studio, Ollama or "
+     "llama.cpp with the NeuronScope Remote agent): how each is reached, whether it answers, its models. Studio is "
+     "the controller, they are hosts. Their models work everywhere as '<host>:<model>'.", _s({}), READ,
+     lambda st, a: st.call("GET", "/api/remote?refresh=1")),
+    ("remote_call", "Run one of a remote host's own tools: host_info, list_backends, list_models, chat, load_model, "
+     "unload_model, list_files, receive_file, transfers, install_model, delete_file. The host's owner decides which "
+     "of them controllers may use.", _s({"host": STR, "tool": STR, "args": {"type": "object"}}, ["host", "tool"]),
+     RISKY, lambda st, a: st.call("POST", "/api/remote/call", a, timeout=900)),
 ]
 BY_NAME = {t[0]: t for t in TOOLS}
 

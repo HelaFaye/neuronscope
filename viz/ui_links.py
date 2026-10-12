@@ -27,6 +27,7 @@ TARGETS = [
     (r"Studio\s*(?:->|→|&gt;)\s*Tools", "/#tools"),
     (r"Studio\s*(?:->|→|&gt;)\s*Models", "/#models"),
     (r"Studio\s*(?:->|→|&gt;)\s*Docs", "/#docs"),
+    (r"Remote\s*(?:->|→|&gt;)\s*Add a host", "/remote#add"),
 ]
 
 JS = r"""

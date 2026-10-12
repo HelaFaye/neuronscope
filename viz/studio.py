@@ -42,6 +42,9 @@ import json
 import os
 import queue
 import re
+import secrets
+import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -745,8 +748,19 @@ def save_links(links: list[dict]) -> None:
     sec.write_secret_file(Path(STATE["links_path"]), json.dumps({"links": links}, indent=1))
 
 
+REMOTE: dict = {"obj": None}
+
+
+def remote():
+    """Remote hosts: computers that run models and the NeuronScope Remote agent, not Studio."""
+    if REMOTE["obj"] is None:
+        import remote_hosts
+        REMOTE["obj"] = remote_hosts.Remote(load_links, save_links)
+    return REMOTE["obj"]
+
+
 def link_models(refresh: bool = False) -> list[dict]:
-    """Models of every linked host, as '<link>:<remote id>' (cached 30 s)."""
+    """Models of every linked Studio and remote host, as '<link>:<remote id>' (cached 30 s)."""
     out = []
     for ln in load_links():
         with LINKS["lock"]:
@@ -760,11 +774,17 @@ def link_models(refresh: bool = False) -> list[dict]:
                     "%Y-%m-%d %H:%M", time.localtime(ln["expires"])) + "; ask that host for a new pairing link")
             continue
         try:
-            r = ns_pairing.request(ln["url"], "GET", "/v1/models", token=ln["token"],
-                                   fingerprint=ln.get("fingerprint", ""), timeout=5)
-            ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"link:{ln['name']}",
-                   "remote_id": m["id"], "link": ln["name"], "vision": m.get("vision", False)}
-                  for m in r.get("data", []) if m.get("id") != "auto"]
+            if ln.get("kind") == "agent":
+                ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"remote:{ln['name']}",
+                       "remote_id": m["id"], "link": ln["name"], "vision": False, "loaded": m.get("loaded"),
+                       "backend": m.get("backend")}
+                      for m in remote().models(ln) if m.get("type") not in ("embeddings", "embedding")]
+            else:
+                r = ns_pairing.request(ln["url"], "GET", "/v1/models", token=ln["token"],
+                                       fingerprint=ln.get("fingerprint", ""), timeout=5)
+                ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"link:{ln['name']}",
+                       "remote_id": m["id"], "link": ln["name"], "vision": m.get("vision", False)}
+                      for m in r.get("data", []) if m.get("id") != "auto"]
             err = None
         except Exception as e:
             ms, err = [], f"{type(e).__name__}: {e}"[:200]
@@ -782,6 +802,8 @@ def link_target(model_id: str | None):
     ln = next((x for x in load_links() if x["name"] == name), None)
     if ln is None:
         return None
+    if ln.get("kind") == "agent":
+        return remote().upstream(ln), rid
     return {"base": ln["url"], "token": ln["token"], "fingerprint": ln.get("fingerprint", "")}, rid
 
 
@@ -962,6 +984,8 @@ def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
     With hold_done the final [DONE] is not forwarded (a tool round follows),
     and streamed tool calls are assembled and returned.
     """
+    if upstream is not None and upstream.get("callhome"):
+        return _callhome_chat(upstream["callhome"], path, payload, stream_to, hold_done)
     if upstream is not None:
         # a linked host's model: same OpenAI API, its device token, its pinned certificate
         if stream_to is None:
@@ -1004,6 +1028,31 @@ def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
                 except (ValueError, KeyError, IndexError, TypeError):
                     pass
     return {"text": "".join(text), "tool_calls": [calls[k] for k in sorted(calls)], "finish_reason": finish}
+
+
+def _callhome_chat(host, path, payload, stream_to, hold_done):
+    """A host that calls in has no address to proxy to: chat goes as its MCP chat tool
+    and comes back whole (streamed to the client as one piece)."""
+    if path != "/v1/chat/completions":
+        raise RuntimeError(f"{host} calls in to this Studio; only chat is available through it")
+    args = {k: payload[k] for k in ("model", "messages", "temperature", "max_tokens", "top_p", "seed", "stop")
+            if payload.get(k) is not None}
+    r = remote().call(host, "chat", args)
+    resp = r.get("response") or {"choices": [{"index": 0, "message": {"role": "assistant", "content": r.get("reply", "")},
+                                              "finish_reason": "stop"}], "model": args.get("model")}
+    if stream_to is None:
+        return resp
+    text = r.get("reply", "")
+    base = {"id": resp.get("id", "callhome"), "object": "chat.completion.chunk", "model": resp.get("model")}
+    for ch in ({"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None},
+               {"index": 0, "delta": {}, "finish_reason": "stop"}):
+        stream_to.write(f"data: {json.dumps({**base, 'choices': [ch]})}\n\n".encode())
+    if resp.get("usage"):
+        stream_to.write(f"data: {json.dumps({**base, 'choices': [], 'usage': resp['usage']})}\n\n".encode())
+    if not hold_done:
+        stream_to.write(b"data: [DONE]\n\n")
+    stream_to.flush()
+    return {"text": text, "tool_calls": [], "finish_reason": "stop"}
 
 
 # ------------------------------------------------------- OpenAI-compatible API
@@ -2403,6 +2452,203 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)[:300]})
         return self._json(404, {"error": "not found"})
 
+    # ------------------------------------------------ remote hosts (this Studio is the controller)
+
+    def _host_token(self):
+        auth = self.headers.get("Authorization", "")
+        tok = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        rec = remote().host_for_token(tok) if tok else None
+        if rec is None:
+            THROTTLE.fail(self.client_address[0])
+            self._json(401, {"error": "this host is not joined to this Studio (removed?): join again with a new invite"})
+        return rec
+
+    def _remote_public(self, method):
+        """The routes a host that calls in uses. They carry the host's own token, never the owner's."""
+        ip = self.client_address[0]
+        if THROTTLE.blocked(ip):
+            return self._json(429, {"error": "too many attempts; wait a few minutes"})
+        path = self.path.split("?")[0]
+        hub = remote().hub
+        if method == "POST" and path == "/api/remote/claim":
+            req = self._read()
+            got = hub.claim(str(req.get("proof", "")))
+            if got is None:
+                THROTTLE.fail(ip)
+                return self._json(403, {"error": "the invite is wrong, used or expired: make a new one in Studio "
+                                                 "(Remote → Add a host)"})
+            inv, code = got
+            name = re.sub(r"[^A-Za-z0-9_.-]", "-", inv["name"] or str(req.get("name") or "host"))[:32].strip("-") or "host"
+            tok = secrets.token_urlsafe(32)
+            import remote_hosts
+            remote().add({"name": name, "method": "callhome", "url": f"callhome:{name}", "token": "",
+                          "host_token_sha256": remote_hosts.token_hash(tok), "host": str(req.get("name", ""))[:40],
+                          "studio_fingerprint": inv["fingerprint"], "agent_version": str(req.get("version", ""))[:20]})
+            with LINKS["lock"]:
+                LINKS["cache"].pop(name, None)
+            return self._json(200, {"token": tok, "name": name, "controller": inv["controller"],
+                                    "confirm": remote_hosts.nsr.pair_proof(code, inv["fingerprint"], "accept")})
+        rec = None
+        if path in ("/api/remote/next", "/api/remote/reply"):
+            rec = self._host_token()
+            if rec is None:
+                return
+        if method == "GET" and path == "/api/remote/next":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            return self._json(200, {"messages": hub.next(rec["name"], float((q.get("wait") or ["25"])[0]))})
+        if method == "POST" and path == "/api/remote/reply":
+            req = self._read(MAX_BODY)
+            return self._json(200, {"ok": hub.reply(str(req.get("id", "")), req.get("response"))})
+        m = re.fullmatch(r"/api/remote/file/([A-Za-z0-9_-]+)", path)
+        if method == "GET" and m:
+            fp = hub.ticket_path(m.group(1))
+            if not fp or not os.path.isfile(fp):
+                THROTTLE.fail(ip)
+                return self._json(404, {"error": "no such file, or the link expired"})
+            return self._send_file(fp)
+        return self._json(404, {"error": "not found"})
+
+    def _send_file(self, fp):
+        size = os.path.getsize(fp)
+        start = 0
+        rng = re.fullmatch(r"bytes=(\d+)-", self.headers.get("Range", "").strip())
+        if rng:
+            start = min(int(rng.group(1)), size)
+        self.send_response(206 if rng else 200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size - start))
+        if rng:
+            self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+        self.end_headers()
+        with open(fp, "rb") as f:
+            f.seek(start)
+            shutil.copyfileobj(f, self.wfile, 1 << 20)
+
+    def _remote_state(self):
+        import remote_hosts
+        r = remote()
+        hosts = []
+        for h in r.hosts():
+            st = r.status(h)
+            with LINKS["lock"]:
+                hit = LINKS["cache"].get(h["name"])
+            st["models"] = [m["remote_id"] for m in (hit[1] if hit else [])]
+            st["error"] = hit[2] if hit else None
+            hosts.append(st)
+        bind = STATE.get("bind_host") or "127.0.0.1"
+        return {"role": "controller", "hosts": hosts, "sends": list(r.sends.values())[-20:],
+                "studio": {"bind": bind, "network": not sec.is_loopback(bind), "tls": bool(STATE.get("tls")),
+                           "token": bool(STATE.get("token")),
+                           "short_fingerprint": remote_hosts.nsr.short_fp(STATE.get("fingerprint") or ""),
+                           "url": self._self_url(public=True)},
+                "local_models": [{"id": m["id"], "path": m["path"], "size": m["size"]} for m in scan_models()]}
+
+    def _remote_get(self):
+        if not self._owner_only():
+            return
+        if self.path == "/remote":
+            import remote_page
+            return self._html(remote_page.PAGE)
+        if self.path == "/remote/download":
+            import remote_hosts
+            body = remote_hosts.package_zip()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="neuronscope-remote.zip"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in ("/api/remote", "/api/remote?refresh=1"):
+            if self.path.endswith("refresh=1"):
+                link_models(refresh=True)
+            return self._json(200, self._remote_state())
+        return self._json(404, {"error": "not found"})
+
+    def _remote_post(self):
+        if not self._owner_only():
+            return
+        import remote_hosts
+        r = remote()
+        req = self._read()
+        controller = f"NeuronScope Studio ({socket.gethostname()})"
+        try:
+            if self.path == "/api/remote/discover":
+                return self._json(200, {"hosts": remote_hosts.discover(float(req.get("seconds") or 3))})
+            if self.path == "/api/remote/pair":
+                method = req.get("method") or "lan"
+                address, code, fp = str(req.get("address", "")).strip(), str(req.get("code", "")), ""
+                if req.get("link"):
+                    inv = remote_hosts.nsr.parse_invite(str(req["link"]))
+                    address, code, fp = inv["url"], inv["code"], inv["fingerprint"]
+                    req.setdefault("name", inv["name"])
+                ssh = None
+                if method == "ssh":
+                    ssh = {"target": str(req.get("ssh_target", "")).strip(), "port": req.get("ssh_port") or None,
+                           "remote_port": int(req.get("remote_port") or remote_hosts.nsr.DEFAULT_PORT),
+                           "local_port": remote_hosts.Tunnels.free_port()}
+                    if not ssh["target"]:
+                        raise remote_hosts.RemoteError("the SSH login is needed, like you@host")
+                    tmp = {"name": "__pairing__", "ssh": ssh}
+                    r.tunnels.ensure(tmp)
+                    address = f"http://127.0.0.1:{ssh['local_port']}"
+                if not address or not remote_hosts.nsr.norm_code(code):
+                    raise remote_hosts.RemoteError("the host's address and its pairing code are needed")
+                try:
+                    out = remote_hosts.pair_direct(address, code, controller, fp)
+                finally:
+                    if ssh:
+                        r.tunnels.stop("__pairing__")
+                name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("name") or out["host"] or "host"))[:32].strip("-") \
+                    or "host"
+                rec = {"name": name, "method": method, "url": out["url"], "token": out["token"],
+                       "fingerprint": out["fingerprint"], "host": out["host"]}
+                if ssh:
+                    rec["ssh"] = ssh
+                r.add(rec)
+                with LINKS["lock"]:
+                    LINKS["cache"].pop(name, None)
+                models = [m["remote_id"] for m in link_models(refresh=True) if m["link"] == name]
+                return self._json(200, {"name": name, "host": out["host"], "models": models,
+                                        "short_fingerprint": remote_hosts.nsr.short_fp(out["fingerprint"]),
+                                        "error": (LINKS["cache"].get(name) or (0, [], None))[2]})
+            if self.path == "/api/remote/invite":
+                url = str(req.get("url") or self._self_url(public=True)).rstrip("/")
+                same = urllib.parse.urlsplit(url).netloc == (self.headers.get("Host") or "")
+                fp = (STATE.get("fingerprint") or "") if (STATE.get("tls") and same) else ""
+                name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("name") or ""))[:32].strip("-")
+                out = r.hub.invite(url, name, fp, controller)
+                warn = None
+                host = urllib.parse.urlsplit(url).hostname or ""
+                if sec.is_loopback(host) or sec.is_loopback(STATE.get("bind_host") or "127.0.0.1"):
+                    warn = ("This Studio listens on this computer only, so another computer cannot call it. Start "
+                            "Studio for the network (with a token and TLS, see Security), or put a tunnel in front "
+                            "of it and give its address here.")
+                out["warning"] = warn
+                out["command"] = f"neuronscope-remote connect {out['invite']}"
+                return self._json(200, out)
+            if self.path == "/api/remote/call":
+                return self._json(200, r.call(str(req["host"]), str(req["tool"]), req.get("args") or {},
+                                              timeout=float(req.get("timeout") or 900)))
+            if self.path == "/api/remote/tools":
+                return self._json(200, {"tools": r.tools(str(req["host"]))})
+            if self.path == "/api/remote/send":
+                path = str(req.get("path", ""))
+                if path not in {m["path"] for m in scan_models()} and not req.get("any_file"):
+                    raise remote_hosts.RemoteError("pick one of this Studio's models to send")
+                return self._json(200, {"id": r.send(str(req["host"]), path, self._self_url(public=True),
+                                                       bool(req.get("install")))})
+            if self.path == "/api/remote/remove":
+                r.remove(str(req.get("host", "")))
+                with LINKS["lock"]:
+                    LINKS["cache"].pop(str(req.get("host", "")), None)
+                return self._json(200, {"ok": True})
+        except remote_hosts.RemoteError as e:
+            return self._json(400, {"error": str(e)})
+        except (ValueError, KeyError, OSError) as e:
+            return self._json(400, {"error": f"{type(e).__name__}: {e}"})
+        return self._json(404, {"error": "not found"})
+
     # ------------------------------------------------ neuron review
 
     def _html(self, page):
@@ -2600,6 +2846,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._route = None
+        if self.path.startswith(("/api/remote/next", "/api/remote/file/")):
+            return self._remote_public("GET")
         if self.path.split("?")[0] == "/pair":
             body = PAIR_PAGE.encode()
             self.send_response(200)
@@ -2629,7 +2877,7 @@ class Handler(BaseHTTPRequestHandler):
                                                "expires": x.get("expires"),
                                                "error": (LINKS["cache"].get(x["name"]) or (0, [], None))[2],
                                                "models": len((LINKS["cache"].get(x["name"]) or (0, []))[1])}
-                                              for x in load_links()]})
+                                              for x in load_links() if x.get("kind") != "agent"]})
         if self.path == "/api/links/models":
             return self._json(200, link_models())
         if self.path == "/":
@@ -2691,6 +2939,8 @@ class Handler(BaseHTTPRequestHandler):
             path = STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG)
             return self._json(200, {"path": path, "config": accelerators.load_config(path),
                                     "devices": POOL.devices(refresh=True)})
+        if self.path in ("/remote", "/remote/download") or self.path.startswith("/api/remote"):
+            return self._remote_get()
         if self.path in ("/connect", "/api/connect"):
             if not self._owner_only():
                 return
@@ -2855,6 +3105,8 @@ class Handler(BaseHTTPRequestHandler):
                 THROTTLE.fail(self.client_address[0])
                 self._json(401, {"error": "bad token"})
             return
+        if self.path in ("/api/remote/claim", "/api/remote/reply"):
+            return self._remote_public("POST")
         if self.path == "/api/pair/claim":
             ip = self.client_address[0]
             if THROTTLE.blocked(ip):
@@ -2886,6 +3138,8 @@ class Handler(BaseHTTPRequestHandler):
             # run code), no load flags or downloads, no MCP reloads, no pairing.
             return self._json(403, {"error": "paired devices can chat and use /v1; this needs the owner"})
         try:
+            if self.path.startswith("/api/remote/"):
+                return self._remote_post()
             if self.path in ("/api/pair/start", "/api/devices/revoke", "/api/devices/update", "/api/links/add",
                              "/api/links/remove"):
                 return self._pairing_post()
@@ -3402,7 +3656,8 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <h1>NeuronScope Studio</h1>
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
-  <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/remote" class="chip" style="margin-left:auto;text-decoration:none" title="this Studio controls other computers' models (LM Studio, Ollama, llama.cpp) through the NeuronScope Remote agent">Remote</a>
+  <a href="/link" class="chip" style="text-decoration:none" title="pair devices and link other machines' models">Link</a>
   <a href="/lab" class="chip" style="text-decoration:none" title="labs, live and 3D views, pipeline dashboard">Lab</a>
   <a href="/setup" class="chip" style="text-decoration:none" title="paths, building llama.cpp, hardware, health check">Setup</a>
   <a href="/settings" class="chip" style="text-decoration:none" title="workspaces (folders), the model per subject, tool approval rules">Settings</a>
@@ -4072,6 +4327,7 @@ def main(argv=None):
                  cett=a.cett if a.cett and os.path.exists(a.cett) else None)
     tls = bool(a.tls_cert and a.tls_key)
     STATE["tls"] = tls
+    STATE["bind_host"] = a.host
     try:
         for w in sec.check_bind(a.host, STATE["token"] or "", tls=tls,
                                 allow_plaintext=a.allow_plaintext):
@@ -4146,6 +4402,8 @@ def main(argv=None):
         pass
     finally:
         stop_server()
+        if REMOTE["obj"] is not None:
+            REMOTE["obj"].tunnels.stop_all()
         POOL.stop()
         stop_labs()
         if EMBED["proc"] is not None and EMBED["proc"].poll() is None:

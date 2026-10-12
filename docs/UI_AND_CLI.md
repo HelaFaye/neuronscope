@@ -48,6 +48,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Chat with documents (RAG) | Studio → **Docs** | `python scripts/rag.py` | — |
 | MCP tools inside chat | Studio → **Tools** | `~/.neuronscope/mcp.json`, `python scripts/mcp_client.py` | — |
 | Other devices and linked machines | Studio → **Link** | `/api/pair/*`, `/api/links/*` | — |
+| Computers running LM Studio, Ollama or llama.cpp without NeuronScope (remote hosts): pair, models, load/unload, send and install models | **Remote** | the agent: `neuronscope-remote` ([REMOTE.md](REMOTE.md)); `/api/remote/*` | `remote_hosts`, `remote_call` |
 | Cline, Claude Desktop, OpenAI apps | **Connect** | `python scripts/ns_connect.py` | — |
 
 ## Measuring and improving models

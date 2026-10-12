@@ -144,3 +144,11 @@ python scripts/ns_connect.py cline --write             # Cline's MCP settings
 python scripts/ns_mcp.py --list                        # the tools
 python scripts/ns_mcp.py --studio http://HOST:7870 --token-file studio.token   # stdio server, for any client
 ```
+
+## The other direction: controlling LLMs on other computers
+
+Everything above makes NeuronScope a tool for other apps. To have
+NeuronScope, or any MCP client, use the models on a computer that runs LM
+Studio, Ollama or llama.cpp but not NeuronScope, put the NeuronScope Remote
+agent there. That computer is then a *host*, and Studio or the MCP client is
+its *controller*. See [REMOTE.md](REMOTE.md).
