@@ -316,6 +316,12 @@ See [SECURITY.md](SECURITY.md).
 starts worker models on whatever accelerators the machine has (AMD first), and
 sends every result back for review. See [DIRECTOR.md](DIRECTOR.md).
 
+## Settings
+
+`/settings`: workspaces (where models, llama.cpp, pipeline data and Studio's
+state live, by name), the default model per subject for `auto`, and tool
+approval rules for MCP tools in chat. See [SETTINGS.md](SETTINGS.md).
+
 ## Review
 
 `/review` shows, for every neuron, how its activity relates to wrong answers

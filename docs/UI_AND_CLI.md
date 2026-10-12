@@ -21,6 +21,9 @@ own options.
 | Health check (packages, GPUs, build, model, pipeline) | **Setup → Health check** | `python scripts/doctor.py` | `doctor` |
 | Hardware for worker models (ROCm, Vulkan, CUDA, Metal, CPU) | **Setup → Hardware** | `~/.neuronscope/hardware.json`, `python scripts/accelerators.py` | `devices` |
 | Restart Studio | **Setup → Restart Studio** | stop and start it | — |
+| Where models, llama.cpp, pipeline data and Studio's state live; switch layouts by name | **Settings → Workspaces** | `python scripts/ns_workspace.py`, `--workspace` on Studio, the launcher and doctor.py | — |
+| The model `auto` uses for a subject | **Settings → Models per subject** | `subject_models` in `config.json` | — |
+| When chat tool calls are allowed, asked or denied (rules, kinds, argument regexes, limits) | **Settings → Tool approval**; *always…* on an approval card | `python scripts/tool_rules.py` | — |
 | What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), with fixes for this OS | **Setup → Requirements** | `python scripts/ns_requirements.py` | `requirements` |
 | Install a missing Python package | **Setup → Requirements → Install**, or Jobs → Setup | `python scripts/ns_requirements.py install <pkg>` | `start_job install_package` |
 | Environment snapshots and what changed | **Setup → Requirements → snapshots** | `ns_requirements.py snapshot`, `diff`, `freeze` | `start_job env_snapshot` |

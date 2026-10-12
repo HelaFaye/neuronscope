@@ -796,8 +796,14 @@ def _upstream_stream(upstream: dict, path: str, payload: dict):
 # ---------------------------------------------------------------- MCP tools
 
 APPROVALS: dict = {}            # call key -> {"event": Event, "allow": bool}
+PENDING_CALLS: dict = {}        # call key -> {server, tool, args}: what an "always" button turns into a rule
 APPROVALS_LOCK = threading.Lock()
 MAX_TOOL_ROUNDS = 8
+
+
+def tool_rules():
+    import tool_rules as tr
+    return tr.Rules(STATE.get("tool_rules_path"))
 
 
 def mcp_hub():
@@ -851,11 +857,29 @@ def chat_with_tools(wfile, payload: dict, msgs: list, hub, upstream=None) -> dic
                 args, err = None, f"invalid arguments: {e}"
             else:
                 err = None
-            need = err is None and not hub.auto_approved(c["name"])
+            decision = None
+            if err is None:
+                try:
+                    info = hub.tool_info(c["name"])
+                    decision = tool_rules().decide(info["server"], info["tool"], args, info["annotations"],
+                                                   auto_approve=info["auto_approve"])
+                except KeyError as e:
+                    err = str(e).strip("'\"")
+            need = err is None and decision["action"] == "ask"
             sse(wfile, {"tool_call": {"key": key, "name": c["name"], "arguments": args if args is not None
-                                      else c["arguments"], "needs_approval": need}})
-            if err is None and need and not wait_approval(key):
-                err = "the user declined this tool call"
+                                      else c["arguments"], "needs_approval": need,
+                                      "decision": decision and {k: decision[k] for k in ("action", "by", "reason")}}})
+            if err is None and decision["action"] == "deny":
+                err = f"not allowed: {decision['reason']} (Settings -> Tool approval)"
+            elif err is None and need:
+                with APPROVALS_LOCK:
+                    PENDING_CALLS[key] = {"server": info["server"], "tool": info["tool"], "args": args}
+                try:
+                    if not wait_approval(key):
+                        err = "the user declined this tool call"
+                finally:
+                    with APPROVALS_LOCK:
+                        PENDING_CALLS.pop(key, None)
             if err is None:
                 try:
                     ok, text = hub.call(c["name"], args)
@@ -1057,9 +1081,19 @@ def auto_pick(body, models):
         proba = {"vision": 1.0}
     st = load_settings()
     by_id = {m["id"]: m for m in pool}
+    # Your pick for a subject (Settings -> Models per subject) wins over the
+    # measured best, for the strongest subject in the prompt that has one.
+    chosen = STATE.get("subject_models") or {}
+    for subj, w in sorted(proba.items(), key=lambda kv: -kv[1]):
+        mid = chosen.get(subj)
+        if mid and w >= 0.3 and mid in by_id:
+            return by_id[mid], {"model": mid, "subject": subj, "candidates": [], "by": "setting",
+                                "reason": f"your default for {subj} (Settings), {w:.0%} {subj}",
+                                "proba": {k: round(v, 3) for k, v in list(proba.items())[:3]}}
     sums = {m["id"]: model_summary(m, st) for m in pool}
     pick = model_stats.rank(proba, sums, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
     pick["proba"] = {k: round(v, 3) for k, v in list(proba.items())[:3]}
+    pick["by"] = "measured"
     return by_id.get(pick["model"]), pick
 
 
@@ -1471,7 +1505,59 @@ SETUP_FIELDS = {
 }
 
 
-def load_config(path=None):
+def _ws_path():
+    from pathlib import Path as _P
+    return _P(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+
+
+def subject_defaults():
+    """Per subject: the model measured best for it, and the one you chose (which wins)."""
+    from subject_classifier import SUBJECTS
+    models = scan_models()
+    st = load_settings()
+    sums = {m["id"]: model_summary(m, st) for m in models}
+    chosen = STATE.get("subject_models") or {}
+    out = {}
+    for subj in SUBJECTS:
+        if subj == "unknown":
+            continue
+        pick = model_stats.rank({subj: 1.0}, sums, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
+        best = pick.get("model")
+        row = next((r for r in pick.get("candidates") or [] if r["model"] == best), None)
+        own = (sums.get(best) or {}).get("subjects", {}).get(subj, {}).get("n", 0) if best else 0
+        out[subj] = {"best": best, "reason": pick.get("reason"), "expected": row and row["expected"],
+                     "subject_n": own, "chosen": chosen.get(subj),
+                     "chosen_missing": bool(chosen.get(subj)) and not any(m["id"] == chosen[subj] for m in models),
+                     "uses": chosen.get(subj) or best}
+    return out
+
+
+def settings_state():
+    rules = tool_rules()
+    hub = STATE.get("mcp")
+    tools = []
+    if hub is not None:
+        try:
+            for t in hub.tool_list():
+                d = rules.decide(t["server"], t["tool"], {}, t["annotations"], auto_approve=t["auto_approve"],
+                                 record=False)
+                tools.append({**t, "decision": d})
+        except Exception:
+            tools = []
+    import tool_rules as tr
+    return {"subjects": subject_defaults(), "models": [m["id"] for m in scan_models()],
+            "min_graded": STATE["min_graded"], "tool_rules": rules.load(), "tool_rules_path": str(rules.path),
+            "tool_kinds": tr.KINDS, "tools": tools, "mcp_configured": bool(STATE.get("mcp_config"))}
+
+
+def workspaces_state():
+    import ns_workspace
+    d = ns_workspace.describe(_ws_path(), STATE.get("workspace_forced"))
+    d["running"] = STATE.get("workspace_name") or d["active"]
+    return d
+
+
+def load_studio_config(path=None):
     p = os.path.expanduser(path or STATE.get("config_path") or "~/.neuronscope/config.json")
     try:
         with open(p) as f:
@@ -1481,7 +1567,7 @@ def load_config(path=None):
         return {}
 
 
-def save_config(values):
+def save_studio_config(values):
     p = os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json")
     try:
         with open(p) as f:
@@ -1563,7 +1649,7 @@ def apply_setup(values):
 
 
 def setup_state():
-    cfg = load_config()
+    cfg = load_studio_config()
     eff = {"models_dir": STATE["models_dirs"], "server": STATE["server_bin"], "cett": STATE["cett"],
            "download_dir": STATE["download_dir"], "idle_ttl": STATE["idle_ttl"], "no_jit": not STATE["jit"],
            "min_graded": STATE["min_graded"], "hallucination_cost": STATE["halluc_cost"],
@@ -2393,6 +2479,74 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"id": vid, "url": f"/review/view/{vid}/", "frames": meta["frames"],
                                 "cells": meta["cells"]})
 
+    # ------------------------------------------------ settings: workspaces, subject defaults, tool rules
+
+    def _settings(self):
+        if not self._owner_only():
+            return
+        import ns_workspace
+        if self.command == "GET":
+            if self.path == "/settings":
+                import settings_page
+                return self._html(settings_page.PAGE)
+            if self.path == "/api/workspaces":
+                return self._json(200, workspaces_state())
+            return self._json(200, settings_state())
+        req = self._read()
+        path = _ws_path()
+        try:
+            if self.path == "/api/workspaces/save":
+                name = str(req.get("name") or "")
+                ns_workspace.save(name, req.get("values") or {}, path=path, replace=bool(req.get("replace")))
+                out = workspaces_state()
+                out["restart_needed"] = name == STATE.get("workspace_name")
+                return self._json(200, out)
+            if self.path == "/api/workspaces/use":
+                ns_workspace.use(str(req.get("name") or ""), path=path)
+                out = workspaces_state()
+                out["restart_needed"] = out["active"] != STATE.get("workspace_name")
+                return self._json(200, out)
+            if self.path == "/api/workspaces/delete":
+                name = str(req.get("name") or "")
+                if name == STATE.get("workspace_name"):
+                    return self._json(409, {"error": "Studio is running in this workspace; switch first"})
+                ns_workspace.delete(name, path=path)
+                return self._json(200, workspaces_state())
+            if self.path.startswith("/api/settings/"):
+                return self._settings_post(req)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
+    def _settings_post(self, req):
+        import tool_rules as tr
+        if self.path == "/api/settings/subjects":
+            vals = req.get("subject_models") or {}
+            from subject_classifier import SUBJECTS
+            ids = {m["id"] for m in scan_models()}
+            bad = [f"{k}: {v}" for k, v in vals.items() if k not in SUBJECTS or (v and v not in ids)]
+            if bad:
+                return self._json(400, {"error": "unknown subject or model: " + ", ".join(bad)})
+            clean = {k: v for k, v in vals.items() if v}
+            save_studio_config({"subject_models": clean})
+            STATE["subject_models"] = clean
+            return self._json(200, {"subjects": subject_defaults()})
+        if self.path == "/api/settings/tool-rules":
+            rules = tool_rules().replace(req.get("rules") or {})
+            return self._json(200, {"tool_rules": rules})
+        if self.path == "/api/settings/tool-rules/test":
+            try:
+                args = req.get("args") or {}
+                if isinstance(args, str):
+                    args = json.loads(args or "{}")
+                ann = req.get("annotations") or {}
+            except ValueError as e:
+                return self._json(400, {"error": f"arguments: {e}"})
+            d = tool_rules().decide(str(req.get("server") or ""), str(req.get("tool") or ""), args, ann,
+                                    record=False)
+            return self._json(200, d)
+        return self._json(404, {"error": "not found"})
+
     # ------------------------------------------------ requirements (scripts/ns_requirements.py)
 
     def _requirements(self):
@@ -2558,6 +2712,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._review_get()
         if self.path.startswith("/api/requirements"):
             return self._requirements()
+        if self.path in ("/settings", "/api/workspaces", "/api/settings"):
+            return self._settings()
         if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
             return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
@@ -2740,6 +2896,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/requirements/"):
                 return self._requirements()
 
+            if self.path.startswith("/api/workspaces/") or self.path.startswith("/api/settings/"):
+                return self._settings()
+
             if self.path in ("/api/lab/start", "/api/lab/stop"):
                 if not self._owner_only():
                     return
@@ -2766,7 +2925,16 @@ class Handler(BaseHTTPRequestHandler):
                     clean, errs = clean_setup(req.get("values") or {})
                     if errs:
                         return self._json(400, {"error": "; ".join(f"{k}: {v}" for k, v in errs.items()), "fields": errs})
-                    save_config(clean)
+                    import ns_workspace
+                    ws_keys = {"models_dir": "models_dirs", "server": "server", "cett": "cett",
+                               "download_dir": "download_dir"}
+                    to_ws = {ws_keys[k]: v for k, v in clean.items() if k in ws_keys}
+                    if to_ws:
+                        ns_workspace.save(STATE.get("workspace_name") or ns_workspace.active_name(_ws_path()),
+                                          to_ws, path=_ws_path(), check_exists=False)
+                    rest = {k: v for k, v in clean.items() if k not in ws_keys}
+                    if rest:
+                        save_studio_config(rest)
                     later = apply_setup(clean)
                     return self._json(200, {"saved": sorted(clean), "restart_needed": later, **setup_state()})
                 cfg = req.get("config")
@@ -2842,12 +3010,29 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/tools/approve":
                 req = self._read()
+                key, remember = str(req.get("key", "")), req.get("remember")
+                rule = None
+                if remember:
+                    # A standing rule changes what every later chat may do: the owner's call.
+                    if self._role != "owner":
+                        return self._json(403, {"error": "only the owner can make a standing rule"})
+                    import tool_rules as tr
+                    with APPROVALS_LOCK:
+                        call = PENDING_CALLS.get(key)
+                    if call is None:
+                        return self._json(404, {"error": "that call is no longer waiting"})
+                    try:
+                        rule = tool_rules().add(tr.rule_from_call(str(remember), call["server"], call["tool"],
+                                                                  call["args"]))
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                allow = bool(req.get("allow")) and remember != "deny"
                 with APPROVALS_LOCK:
-                    a = APPROVALS.get(str(req.get("key", "")))
+                    a = APPROVALS.get(key)
                     if a:
-                        a["allow"] = bool(req.get("allow"))
+                        a["allow"] = allow
                         a["event"].set()
-                return self._json(200 if a else 404, {"ok": bool(a)})
+                return self._json(200 if a else 404, {"ok": bool(a), "rule": rule})
 
             if self.path == "/api/mcp/reload":
                 hub = mcp_hub()
@@ -3198,6 +3383,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
   <a href="/lab" class="chip" style="text-decoration:none" title="labs, live and 3D views, pipeline dashboard">Lab</a>
   <a href="/setup" class="chip" style="text-decoration:none" title="paths, building llama.cpp, hardware, health check">Setup</a>
+  <a href="/settings" class="chip" style="text-decoration:none" title="workspaces (folders), the model per subject, tool approval rules">Settings</a>
   <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
   <a href="/review" class="chip" style="text-decoration:none" title="how each neuron behaves across tests, benchmarks and checked replies, by subject and over time">Review</a>
   <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
@@ -3484,9 +3670,15 @@ function toolCard(box,t){
   const args=typeof t.arguments==='string'?t.arguments:JSON.stringify(t.arguments,null,1);
   const state=t.result?(t.result.ok?'<span class="okc">done</span>':'<span class="bad">failed</span>'):(t.needs_approval&&!t.decided?'<span class="warn">waiting for you</span>':'<span>running…</span>');
   el.innerHTML=`<span class="tn">🔧 ${esc(t.name)}</span> ${state}<details ${t.needs_approval&&!t.decided?'open':''}><summary>arguments</summary><pre>${esc(args)}</pre></details>`+
-    (t.needs_approval&&!t.decided&&!t.result?`<button class="pri" data-a="1">Allow</button><button data-a="0">Deny</button>`:'')+
+    (t.needs_approval&&!t.decided&&!t.result?`<button class="pri" data-a="1">Allow once</button><button data-a="0">Deny</button>
+      <select data-r title="make it a standing rule (Settings → Tool approval)"><option value="">always…</option>
+      <option value="tool">always allow this tool</option><option value="args">always allow these exact arguments</option>
+      <option value="deny">always deny this tool</option></select>`:'')+
+    (!t.needs_approval&&t.decision&&t.decision.by!=='default'?`<div class="note">${esc(t.decision.action==='deny'?'blocked':'allowed')} by ${esc(t.decision.reason)} · <a href="/settings#tools">rules</a></div>`:'')+
     (t.result?`<details><summary>result</summary><pre>${esc(t.result.text)}</pre></details>`:'');
   el.querySelectorAll('button[data-a]').forEach(b=>b.onclick=async()=>{ t.decided=true; toolCard(box,t); await post('/api/tools/approve',{key:t.key,allow:b.dataset.a==='1'}); });
+  const rs=el.querySelector('select[data-r]'); if(rs) rs.onchange=async()=>{ const v=rs.value; if(!v) return; t.decided=true; toolCard(box,t);
+    const r=await post('/api/tools/approve',{key:t.key,allow:v!=='deny',remember:v}); if(!r.ok){ try{ alert((await r.json()).error) }catch{} } };
 }
 function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
 function renderChat(){
@@ -3782,17 +3974,42 @@ def main(argv=None):
     sec.add_server_security_args(p)
     p.add_argument("--config", default=os.environ.get("NS_CONFIG", "~/.neuronscope/config.json"),
                    help="settings file (\"studio\" section); the Setup page writes it, and flags override it")
+    p.add_argument("--workspace", help="which workspace's folders to use (Settings -> Workspaces; "
+                                       "default: the active one)")
     pre, _ = p.parse_known_args(argv)
     STATE["config_path"] = pre.config
-    cfg = load_config(pre.config)
+    os.environ["NS_CONFIG"] = os.path.expanduser(pre.config)
+    import ns_workspace
+    # A workspace chosen for this run (flag or variable) wins over the file's choice.
+    STATE["workspace_forced"] = pre.workspace or os.environ.get("NS_WORKSPACE")
+    if pre.workspace:
+        if pre.workspace not in ns_workspace.names():
+            print(f"error: no workspace {pre.workspace!r}; have {', '.join(ns_workspace.names())}", file=sys.stderr)
+            return 2
+        os.environ["NS_WORKSPACE"] = pre.workspace
+    ws = ns_workspace.active()
+    # Where things are comes from the workspace; the "studio" section holds behaviour.
+    # Precedence: flags, then the studio section, then the workspace.
+    WS_FLAGS = {"models_dir", "server", "cett", "download_dir", "chats_dir", "traces_dir", "review_dir",
+                "projects_dir", "jobs_dir", "stats_dir", "rag_dir"}
+    builtin = {d: p.get_default(d) for d in WS_FLAGS}
+    cfg = load_studio_config(pre.config)
     dests = {x.dest for x in p._actions}
-    p.set_defaults(**{k: (list(v) if isinstance(v, list) else v) for k, v in cfg.items() if k in dests})
+    p.set_defaults(**{k: (list(v) if isinstance(v, list) else v) for k, v in cfg.items()
+                      if k in dests and k not in WS_FLAGS})
     a = p.parse_args(argv)
+    for d in WS_FLAGS - {"models_dir", "server", "cett", "download_dir"}:
+        if getattr(a, d) == builtin[d]:
+            setattr(a, d, ws[d])
+    STATE["workspace_name"], STATE["workspace"] = ws["name"], ws
+    STATE["subject_models"] = dict(cfg.get("subject_models") or {})
+    STATE["tool_rules_path"] = cfg.get("tool_rules") or None
+    os.environ.update(ns_workspace.env_for(ws))
 
-    STATE["models_dirs"] = [os.path.expanduser(d) for d in a.models_dir] or [
-        os.path.expanduser("~/.lmstudio/models"),
-        os.path.expanduser("~/.cache/lm-studio/models"),
-    ]
+    STATE["models_dirs"] = [os.path.expanduser(d) for d in a.models_dir] or ws["models_dirs"]
+    a.server = a.server or (ws["server"] if os.path.isfile(ws["server"]) else None)
+    a.cett = a.cett or (ws["cett"] if os.path.isfile(ws["cett"]) else None)
+    a.download_dir = a.download_dir or ws["download_dir"]
     STATE["server_bin"] = a.server or os.environ.get("NS_LLAMA_SERVER")
     STATE["settings_path"] = os.path.expanduser(a.settings)
     STATE["chats_dir"] = os.path.expanduser(a.chats_dir)
@@ -3841,7 +4058,7 @@ def main(argv=None):
         STATE["jobs_off"] = ("jobs are off on a network bind: they can train models and run model-written code. "
                              "Restart Studio with --allow-remote-jobs to enable them.")
     else:
-        STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs)
+        STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs, cwd=ws["root"])
 
     scheme = "https" if tls else "http"
     print(f"NeuronScope Studio on {scheme}://{a.host}:{a.port}")
@@ -3852,9 +4069,13 @@ def main(argv=None):
     if STATE["cett"]:
         notes.append("activation scoring available")
     print(f"OpenAI-compatible API: {scheme}://{a.host}:{a.port}/v1  ({', '.join(notes)})")
+    print(f"workspace: {ws['name']}  (root {ws['root']})")
     print("model dirs:")
     for d in STATE["models_dirs"]:
         print(f"  {d}{'' if os.path.isdir(d) else '   (missing)'}")
+    if not any(os.path.isdir(d) for d in STATE["models_dirs"]):
+        print(f"  set your models folder: {scheme}://{a.host}:{a.port}/settings#workspaces, or\n"
+              f"  python scripts/ns_workspace.py set {ws['name']} models_dirs /path/to/models")
     try:
         found = [m["id"] for m in scan_models()]
     except Exception:
@@ -3863,7 +4084,7 @@ def main(argv=None):
         # These ids are what API clients, TestQA (--endpoint x=URL/v1@<id>) and Cline put in "model".
         print(f"models ({len(found)}): " + ", ".join(found[:8]) + (" …" if len(found) > 8 else ""))
     else:
-        print("no .gguf models found yet: download some from the Models tab, or pass --models-dir")
+        print("no .gguf models found yet: download some from the Models tab, or set the folder under Settings")
     if not STATE["server_bin"]:
         print("\nno --server given: models can be listed but not loaded")
     elif not os.path.exists(STATE["server_bin"]):

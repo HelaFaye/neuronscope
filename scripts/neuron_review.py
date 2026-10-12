@@ -56,7 +56,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-DEFAULT_ROOT = Path.home() / ".neuronscope" / "review"
+DEFAULT_ROOT = Path(os.environ.get("NS_REVIEW_DIR") or Path.home() / ".neuronscope" / "review")
 BINS = 512
 VERDICTS = ("correct", "wrong", "abstained", "unknown")
 KINDS = ("test", "benchmark", "observed")

@@ -342,13 +342,25 @@ def check_ports():
 # ---------------------------------------------------------------------- main
 
 def main():
+    import ns_workspace
     p = argparse.ArgumentParser()
-    p.add_argument("--gguf", default=os.environ.get("NS_GGUF"))
-    p.add_argument("--llama", default=os.environ.get("NS_LLAMA", "~/llama.cpp"))
-    p.add_argument("--root", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ".."))
+    p.add_argument("--workspace", help="whose folders to check (default: the active workspace, Settings -> Workspaces)")
+    p.add_argument("--gguf")
+    p.add_argument("--llama")
+    p.add_argument("--root")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
+    # Flags, then NS_* variables, then the workspace: no layout is assumed.
+    if a.workspace:
+        if a.workspace not in ns_workspace.names():
+            print(f"no workspace {a.workspace!r}; have {', '.join(ns_workspace.names())}", file=sys.stderr)
+            return 2
+        os.environ["NS_WORKSPACE"] = a.workspace
+    ws = ns_workspace.active()
+    a.gguf = a.gguf or os.environ.get("NS_GGUF") or ws["gguf"]
+    a.llama = a.llama or os.environ.get("NS_LLAMA") or ws["llama_dir"]
+    a.root = a.root or os.environ.get("NS_ROOT") or ws["root"]
+    add("core", "workspace", OK, f"{ws['name']} (root {ws['root']})")
 
     check_python()
     check_packages()

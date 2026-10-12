@@ -417,8 +417,11 @@ def build_argv(kind: str, values: dict) -> list[str]:
 
 
 class JobRunner:
-    def __init__(self, root: str | Path, max_running: int = 2):
+    def __init__(self, root: str | Path, max_running: int = 2, cwd: str | Path | None = None):
+        """cwd: where jobs run, so the pipeline's relative data/, models/ and runs/
+        land in the workspace's root (default: the repository)."""
         self.root = Path(root).expanduser()
+        self.cwd = Path(cwd).expanduser() if cwd else ROOT
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_running = max_running
         self.lock = threading.Lock()
@@ -446,7 +449,7 @@ class JobRunner:
             d.mkdir(parents=True)
             log = open(d / "log.txt", "wb")
             env = dict(os.environ, PYTHONUNBUFFERED="1")
-            proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT), env=env,
+            proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, cwd=str(self.cwd if self.cwd.is_dir() else ROOT), env=env,
                                     start_new_session=True)
             log.close()
             self.procs[jid] = proc
@@ -537,7 +540,7 @@ button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 .st.running{color:var(--acc)}.st.done{color:var(--ok)}.st.failed,.st.lost{color:var(--no)}
 pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;margin:.5rem 0 0}
 </style>
-<header><h1>Studio · Jobs</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
+<header><h1>Studio · Jobs</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
 <main>
  <section class="card"><h2>New job</h2>
   <select id="kind"></select><div id="khelp" class="note" style="margin-top:.3rem"></div>

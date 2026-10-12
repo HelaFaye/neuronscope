@@ -212,6 +212,35 @@ class MCPHub:
                 return server, t.name
         raise KeyError(f"MCP server {server!r} has no tool {tool!r}")
 
+    def tool_info(self, fn_name: str) -> dict:
+        """-> {server, tool, annotations, auto_approve} for a function name the model used."""
+        server, tool = self.resolve(fn_name)
+        ann = {}
+        for t in self.conns[server].tools:
+            if t.name == tool:
+                a = getattr(t, "annotations", None)
+                if a is not None:
+                    for k in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                        v = a.get(k) if isinstance(a, dict) else getattr(a, k, None)
+                        if v is not None:
+                            ann[k] = bool(v)
+        return {"server": server, "tool": tool, "annotations": ann,
+                "auto_approve": self.specs.get(server, {}).get("autoApprove", False)}
+
+    def tool_list(self) -> list[dict]:
+        """Every connected tool with its annotations: for the approval settings."""
+        out = []
+        for name, c in self.conns.items():
+            if c.error:
+                continue
+            for t in c.tools:
+                try:
+                    info = self.tool_info(f"{name}{SEP}{_safe(t.name)}")
+                except KeyError:
+                    continue
+                out.append({**info, "description": (t.description or "")[:200]})
+        return out
+
     def auto_approved(self, fn_name: str) -> bool:
         try:
             server, tool = self.resolve(fn_name)

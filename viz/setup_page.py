@@ -37,7 +37,7 @@ details.feat{border-bottom:1px solid var(--line);padding:.35rem 0}details.feat s
 .ri code{font-size:12px}.ri .fx{grid-column:2;color:var(--mut);font-size:12px}
 .diffsec{margin:.4rem 0}.diffsec b{font-size:12px;color:var(--mut);text-transform:uppercase}
 </style>
-<header><h1>Studio · Setup</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
+<header><h1>Studio · Setup</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <section class="card"><h2>Status</h2><div id="status" class="note">…</div><div id="next"></div></section>
 

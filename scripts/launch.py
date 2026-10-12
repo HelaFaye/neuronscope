@@ -48,7 +48,7 @@ def running(base: str) -> bool:
     return code in (200, 401)
 
 
-def start(port: int) -> subprocess.Popen:
+def start(port: int, workspace: str | None = None) -> subprocess.Popen:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log = open(LOG, "ab")
     kw = {}
@@ -56,7 +56,8 @@ def start(port: int) -> subprocess.Popen:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)
     else:
         kw["start_new_session"] = True             # keeps running when the launcher's terminal closes
-    proc = subprocess.Popen([sys.executable, "-u", str(ROOT / "viz" / "studio.py"), "--port", str(port)],
+    proc = subprocess.Popen([sys.executable, "-u", str(ROOT / "viz" / "studio.py"), "--port", str(port),
+                             *(["--workspace", workspace] if workspace else [])],
                             stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT), **kw)
     PIDFILE.write_text(str(proc.pid))
     return proc
@@ -67,6 +68,7 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=7870)
     p.add_argument("--no-browser", action="store_true")
     p.add_argument("--stop", action="store_true", help="stop the Studio this launcher started")
+    p.add_argument("--workspace", help="start Studio in this workspace (Settings -> Workspaces)")
     a = p.parse_args(argv)
     base = f"http://127.0.0.1:{a.port}"
 
@@ -81,7 +83,7 @@ def main(argv=None) -> int:
         return 0
 
     if not running(base):
-        proc = start(a.port)
+        proc = start(a.port, a.workspace)
         print(f"starting NeuronScope Studio on {base} (log: {LOG})")
         end = time.time() + 60
         while time.time() < end and not running(base):

@@ -49,7 +49,9 @@ def studio_srv(tmp_path):
         "rag": None, "rag_dir": str(tmp_path / "rag"), "rag_embed": None, "rag_embed_gguf": None,
         "devices": studio.ns_pairing.DeviceRegistry(tmp_path / "devices.json"),
         "links_path": str(tmp_path / "links.json"), "fingerprint": None,
-        "review_dir": str(tmp_path / "review"), "review": None})
+        "review_dir": str(tmp_path / "review"), "review": None,
+        "tool_rules_path": str(tmp_path / "tool-rules.json"), "subject_models": {},
+        "config_path": str(tmp_path / "config.json"), "workspace_name": "default"})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), studio.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -365,6 +367,98 @@ def test_mcp_tool_calls_with_approval(studio_srv, tmp_path, monkeypatch, auto, a
     finally:
         if studio.STATE.get("mcp"):
             studio.STATE["mcp"].close()
+
+
+
+def test_mcp_tool_rules_deny_and_always(studio_srv, tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    import tool_rules as tr
+    monkeypatch.setitem(studio.STATE, "mcp_config", _mcp_cfg(tmp_path, []))
+    monkeypatch.setitem(studio.STATE, "mcp", None)
+    rules = tr.Rules(studio.STATE["tool_rules_path"])
+    try:
+        call(studio_srv, "/api/mcp")
+        # A deny rule blocks the call without asking, and says which rule.
+        rules.add({"id": "noadd", "action": "deny", "server": "calc", "tool": "add",
+                   "args": [{"path": "b", "regex": "^40$"}], "note": "no forty"})
+        ev = sse_chat(studio_srv, {"model": CODER, "tools": True, "messages": [{"role": "user", "content": "2+40?"}]})
+        (tc,) = [e["tool_call"] for e in ev if "tool_call" in e]
+        (res,) = [e["tool_result"] for e in ev if "tool_result" in e]
+        assert not tc["needs_approval"] and tc["decision"]["action"] == "deny"
+        assert not res["ok"] and "rule noadd" in res["text"]
+        rules.remove("noadd")
+
+        # "always allow this tool" on the approval card: allowed now, and a rule from then on.
+        def approve_always():
+            for _ in range(200):
+                with studio.APPROVALS_LOCK:
+                    keys = list(studio.APPROVALS)
+                if keys:
+                    code, r = call(studio_srv, "/api/tools/approve", {"key": keys[0], "allow": True, "remember": "tool"})
+                    assert code == 200 and r["rule"]["tool"] == "add"
+                    return
+                time.sleep(0.05)
+        t = threading.Thread(target=approve_always)
+        t.start()
+        ev = sse_chat(studio_srv, {"model": CODER, "tools": True, "messages": [{"role": "user", "content": "2+40?"}]})
+        t.join()
+        assert [e["tool_result"]["ok"] for e in ev if "tool_result" in e] == [True]
+        ev = sse_chat(studio_srv, {"model": CODER, "tools": True, "messages": [{"role": "user", "content": "2+40?"}]})
+        (tc,) = [e["tool_call"] for e in ev if "tool_call" in e]
+        assert not tc["needs_approval"] and tc["decision"]["by"] == "rule"
+        code, st = call(studio_srv, "/api/settings")
+        assert code == 200 and {t["tool"] for t in st["tools"]} == {"add", "echo", "boom"}
+        assert st["tool_rules"]["rules"][0]["hits"] >= 1
+        code, d = call(studio_srv, "/api/settings/tool-rules/test", {"server": "calc", "tool": "boom", "args": "{}"})
+        assert code == 200 and d["action"] == "ask"
+        assert call(studio_srv, "/api/settings/tool-rules", {"rules": {"default": "maybe"}})[0] == 400
+    finally:
+        if studio.STATE.get("mcp"):
+            studio.STATE["mcp"].close()
+
+
+def test_subject_default_beats_measured_best(studio_srv):
+    code, st = call(studio_srv, "/api/settings")
+    assert code == 200 and "code" in st["subjects"] and st["subjects"]["code"]["chosen"] is None
+    assert call(studio_srv, "/api/settings/subjects", {"subject_models": {"code": "nope/nope"}})[0] == 400
+    code, r = call(studio_srv, "/api/settings/subjects", {"subject_models": {"code": VLM}})
+    assert code == 200 and r["subjects"]["code"]["uses"] == VLM
+    cfg = json.loads(Path(studio.STATE["config_path"]).read_text())
+    assert cfg["studio"]["subject_models"] == {"code": VLM}
+    # Not enough graded results for a measured pick: the setting still routes code prompts.
+    target, pick = studio.auto_pick({"messages": [{"role": "user", "content":
+                                     "Write a Python function that parses a CSV file and returns rows"}]},
+                                    studio.scan_models())
+    assert target["id"] == VLM and pick["by"] == "setting" and "your default for code" in pick["reason"]
+    target, pick = studio.auto_pick({"messages": [{"role": "user", "content": "Who was the first emperor of Rome?"}]},
+                                    studio.scan_models())
+    assert pick.get("by") == "measured"
+
+
+def test_workspaces_api_and_setup_paths(studio_srv, tmp_path):
+    code, ws = call(studio_srv, "/api/workspaces")
+    assert code == 200 and ws["active"] == "default" and ws["config"] == studio.STATE["config_path"]
+    models = tmp_path / "ext-models"
+    models.mkdir()
+    code, r = call(studio_srv, "/api/workspaces/save", {"name": "ext", "values": {"models_dirs": [str(models)],
+                                                                                  "env": {"VK_DRIVER_FILES": "/x.json"}}})
+    assert code == 200 and any(w["name"] == "ext" for w in r["workspaces"])
+    assert call(studio_srv, "/api/workspaces/save", {"name": "ext", "values": {"root": str(tmp_path / "nope")}})[0] == 400
+    assert call(studio_srv, "/api/workspaces/save", {"name": "ext", "values": {"env": {"PATH": "/evil"}}})[0] == 400
+    assert call(studio_srv, "/api/workspaces/save", {"name": "../x", "values": {}})[0] == 400
+    code, r = call(studio_srv, "/api/workspaces/use", {"name": "ext"})
+    assert code == 200 and r["active"] == "ext" and r["restart_needed"]
+    assert call(studio_srv, "/api/workspaces/delete", {"name": "default"})[0] == 409     # Studio runs in it
+    call(studio_srv, "/api/workspaces/use", {"name": "default"})
+    assert call(studio_srv, "/api/workspaces/delete", {"name": "ext"})[0] == 200
+    # Setup's models folder lands in the running workspace, not the studio section.
+    code, r = call(studio_srv, "/api/setup", {"values": {"models_dir": [str(models)], "idle_ttl": 5}})
+    assert code == 200, r
+    cfg = json.loads(Path(studio.STATE["config_path"]).read_text())
+    assert cfg["workspaces"]["default"]["models_dirs"] == [str(models)]
+    assert "models_dir" not in cfg["studio"] and cfg["studio"]["idle_ttl"] == 5
+    code, page = call(studio_srv, "/settings")
+    assert code == 200 and "Studio · Settings" in page
 
 
 @pytest.fixture()

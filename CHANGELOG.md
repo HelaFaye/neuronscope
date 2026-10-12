@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Added (settings)
+- Workspaces (`scripts/ns_workspace.py`, Settings → Workspaces): named sets
+  of folders and binaries (pipeline data root, models folders, downloads,
+  llama.cpp checkout or explicit binaries, the pipeline's model, Studio's
+  state folder) and environment for jobs and model servers. Studio, its jobs
+  (which now run in the workspace root), doctor.py and the launcher read the
+  active one; `--workspace` picks another. Setup's folder fields write to
+  the running workspace.
+- Models per subject (Settings): the measured best model per subject, and a
+  pick that overrides it for `auto` whenever the subject is at least 30% of
+  the prompt, before any model has enough graded results.
+- Tool approval rules (`scripts/tool_rules.py`, Settings → Tool approval):
+  ordered allow/ask/deny rules on server and tool globs, kind of operation
+  (from MCP annotations) and argument regexes with paths and negation, with
+  hourly limits, expiry and hit counts; then mcp.json `autoApprove`, quick
+  settings per kind, and a default. Approval cards in chat offer
+  *always allow this tool*, *these exact arguments* and *always deny*
+  (owner only). A tester shows what a call would get and why.
+- Transfer receiver: IPv6 binds (`--family`, bracketed hosts,
+  `IPV6_V6ONLY`), from the local working copy.
+
+### Fixed
+- Saving a load preset (`/api/config`) wrote into `config.json`'s Studio
+  section instead of the model settings: two functions shared a name.
+- README and Getting Started command blocks are safe to paste whole (no
+  `<placeholders>`, Studio in its own block). doctor.py names the Vulkan ICD
+  that fails to load and its package, and which one to pin. install.sh
+  repairs a reused venv before installing torch, so pip reports no conflicts.
+
 ### Added (per-project requirements)
 - Each project has its own requirement list (tools, libraries, Python
   packages, hardware, NeuronScope features, notes), inferred from its
