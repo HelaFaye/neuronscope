@@ -30,6 +30,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:.4rem .3rem;border-botto
 th{font-size:11px;color:var(--mut);text-transform:uppercase;font-weight:500}
 .next{border-left:3px solid var(--acc);padding:.5rem .7rem;background:var(--bg);border-radius:0 6px 6px 0;margin-top:.5rem}
 .dstage{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin:.7rem 0 .2rem}
+.card{scroll-margin-top:1rem}.card:target{border-color:var(--acc)}
 .check{display:flex;gap:.5rem;padding:.15rem 0;font-size:13px}.check .fix{color:var(--mut);font-size:12px}
 .st.missing{color:var(--no)}.st.n\/a{color:var(--mut)}
 details.feat{border-bottom:1px solid var(--line);padding:.35rem 0}details.feat summary{cursor:pointer;font-size:13.5px}
@@ -39,36 +40,36 @@ details.feat{border-bottom:1px solid var(--line);padding:.35rem 0}details.feat s
 </style>
 <header><h1>Studio · Setup</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<section class="card"><h2>Status</h2><div id="status" class="note">…</div><div id="next"></div></section>
+<section class="card" id="status-card"><h2>Status</h2><div id="status" class="note">…</div><div id="next"></div></section>
 
-<section class="card"><h2>Paths and behaviour</h2>
+<section class="card" id="paths"><h2>Paths and behaviour</h2><div class="note">Folders are saved to the running workspace; keep several layouts under <a href="/settings#workspaces">Settings → Workspaces</a>.</div>
 <div class="note">Saved to <code id="cfgpath"></code>. Most changes apply at once; the rest after a restart.</div>
 <form id="form"></form>
 <div class="row" style="margin-top:.8rem"><button class="pri" id="save">Save</button><button id="restart">Restart Studio</button><span id="saved"></span></div>
 </section>
 
-<section class="card"><h2>Build llama.cpp</h2>
+<section class="card" id="build"><h2>Build llama.cpp</h2>
 <div class="note">Studio runs models with llama.cpp's <code>llama-server</code>; the H-Neuron tools also need NeuronScope's <code>cett-dump</code>. This clones llama.cpp, adds cett-dump and builds both (about 5 minutes on a laptop CPU). Vulkan runs on AMD (APUs included), Intel and NVIDIA.</div>
 <div class="row" style="margin-top:.5rem"><select id="backend" style="width:auto"><option>vulkan</option><option>cpu</option><option>hip</option><option>cuda</option><option>metal</option></select>
 <label style="margin:0"><input type="checkbox" id="portable">portable (runs on other CPUs)</label>
 <button class="pri" id="build">Build</button><span id="buildst" class="note"></span></div>
 <pre id="buildlog" style="display:none"></pre></section>
 
-<section class="card"><h2>Hardware for worker models</h2>
+<section class="card" id="hardware"><h2>Hardware for worker models</h2>
 <div class="note">Where the director's worker models may run. AMD is used first when several devices have room. Saved to <code id="hwpath"></code>.</div>
 <table id="devs"></table>
 <label>llama-server per backend <span class="note">a build for that backend; empty uses the llama-server above</span></label>
 <div class="grid" id="servers"></div>
 <div class="row" style="margin-top:.8rem"><button class="pri" id="savehw">Save hardware</button><span id="hwsaved"></span></div></section>
 
-<section class="card"><h2>Health check</h2><div class="note">Python packages, GPUs, the llama.cpp build, the model, pipeline progress. Each problem says what it blocks and how to fix it.</div>
+<section class="card" id="health"><h2>Health check</h2><div class="note">Python packages, GPUs, the llama.cpp build, the model, pipeline progress. Each problem says what it blocks and how to fix it.</div>
 <button id="doctor" style="margin-top:.5rem">Run checks</button><div id="checks"></div></section>
 
-<section class="card"><h2>Requirements</h2>
+<section class="card" id="requirements"><h2>Requirements</h2>
 <div class="note">What each feature needs (Python packages, programs, llama.cpp builds, drivers, device access, memory) and what this machine has. Python packages install from here into Studio’s Python, at the versions <code>requirements*.txt</code> ask for; system packages show the command for your OS. Same as <code>python scripts/ns_requirements.py</code>.</div>
 <div class="row" style="margin-top:.5rem"><button id="reqcheck">Check requirements</button><span class="note" id="reqsys"></span></div>
 <div id="reqs"></div>
-<h2 style="margin-top:1.2rem">Environment snapshots</h2>
+<h2 style="margin-top:1.2rem" id="snapshots">Environment snapshots</h2>
 <div class="note">Record packages, programs, llama.cpp builds and devices, then compare after an update or a driver change. <a href="api/requirements/freeze">Download exact package versions</a> (a requirements file that reproduces this setup).</div>
 <div class="row" style="margin-top:.5rem"><button id="snap">Take a snapshot</button>
 <select id="snapA" style="width:auto"></select><span class="note">→</span><select id="snapB" style="width:auto"></select><button id="snapdiff">Compare</button></div>
@@ -164,7 +165,7 @@ $('#doctor').onclick=async()=>{ $('#doctor').disabled=true; $('#checks').innerHT
   try{ const r=await api('api/doctor'); let st=null, h='';
     for(const c of r.checks){ if(c.stage!==st){ st=c.stage; h+=`<div class="dstage">${esc(st)}</div>`; }
       h+=`<div class="check"><span class="st ${esc(c.status)}">${esc(c.status==='skip'?'--':c.status)}</span><div><b>${esc(c.name)}</b> ${esc(c.detail)}${
-        (c.status==='warn'||c.status==='fail')&&(c.fix||c.blocks)?`<div class="fix">${c.blocks?'blocks: '+esc(c.blocks)+'. ':''}${c.fix?'fix: '+esc(c.fix):''}</div>`:''}</div></div>`; }
+        (c.status==='warn'||c.status==='fail')&&(c.fix||c.blocks)?`<div class="fix">${c.blocks?'blocks: '+esc(c.blocks)+'. ':''}${c.fix?'fix: '+linkify(esc(c.fix)):''}</div>`:''}</div></div>`; }
     $('#checks').innerHTML=h; }catch(e){ $('#checks').innerHTML=`<div class="err">${esc(e.message)}</div>` }
   $('#doctor').disabled=false; };
 
@@ -178,7 +179,7 @@ function reqItem(i){
   const have=i.have?`<code>${esc(i.have)}</code>`:'<span class="note">not found</span>';
   const be=i.backends&&i.backends.length?` <span class="note">GPU backends: ${esc(i.backends.join(', '))}</span>`:'';
   const why=i.why?` <span class="note">· ${esc(i.why)}</span>`:'';
-  const fix=i.fix?`<div class="fx">fix: <code>${esc(i.fix)}</code>${i.installable?` <button data-pkg="${esc(i.name)}">Install</button>`:''}</div>`:'';
+  const fix=i.fix?`<div class="fx">fix: <code>${linkify(esc(i.fix))}</code>${i.installable?` <button data-pkg="${esc(i.name)}">Install</button>`:''}</div>`:'';
   return `<div class="ri"><span class="st ${i.status}">${i.status==='missing'?'missing':i.status}</span><div>${esc(i.name)}${opt}: ${have}${need}${be}${why}</div>${fix}</div>`;
 }
 async function loadReqs(){
@@ -217,5 +218,13 @@ $('#snapdiff').onclick=async()=>{ try{ const d=await api('api/requirements/diff'
     `<div style="margin-top:.5rem">${sys?`<div class="diffsec"><b>System</b>${sys}</div>`:''}${diffSec('llama.cpp',d.llama)}${diffSec('Devices',d.devices)}${diffSec('Programs',d.tools)}${diffSec('Python packages',d.packages)}</div>`;
   }catch(e){ $('#diff').innerHTML=`<div class="err">${esc(e.message)}</div>`; } };
 loadReqs(); loadSnaps();
+
+if(location.hash){ const t=document.querySelector(location.hash); if(t) setTimeout(()=>t.scrollIntoView(),300); }
 </script>
 """
+
+
+import os as _os, sys as _sys  # noqa: E401,E402
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)

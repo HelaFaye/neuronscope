@@ -617,7 +617,7 @@ def wait_healthy(port, proc, timeout=600):
 
 def start_server(model, settings, port):
     if not STATE["server_bin"]:
-        return False, "no --server binary configured"
+        return False, "no llama-server set: Setup -> Build llama.cpp, or point Settings -> Workspaces at one"
     stop_server()
     if port_busy(port):
         # Something else (often an orphaned llama-server) holds the port and would
@@ -912,7 +912,7 @@ def rag_embedder():
         p = EMBED["proc"]
         if p is None or p.poll() is not None:
             if not STATE["server_bin"]:
-                raise RuntimeError("--rag-embed-gguf needs --server")
+                raise RuntimeError("document embeddings need llama-server: Setup -> Build llama.cpp")
             if port_busy(port):
                 raise RuntimeError(f"port {port} (embedding sidecar) is already in use")
             cmd = [STATE["server_bin"], "-m", gguf, "--embedding", "--pooling", "mean", "-ngl",
@@ -1111,8 +1111,9 @@ def resolve_request_model(body):
             excluded = "; ".join(f"{k}: {v}" for k, v in list(pick.get("excluded", {}).items())[:6])
             return None, {"mode": "auto", "error": (
                 "auto: no model has enough performance stats to choose from "
-                f"(need {STATE['min_graded']} graded results). Run scripts/testqa.py "
-                f"--publish-stats against your models, or name a model explicitly. {excluded}")}
+                f"(need {STATE['min_graded']} graded results). Grade your models with Jobs -> Evaluate "
+                "(TestQA), pick a default per subject under Settings -> Models per subject, or name a model "
+                f"explicitly. {excluded}")}
         return target, {"mode": "auto", "model": target["id"], "reason": pick["reason"],
                         "candidates": pick["candidates"][:5]}
     if not ref or (current and find_model(ref, [current])):
@@ -1215,9 +1216,10 @@ def trace_reply(model, messages, text, threshold=0.5, source="chat-check"):
     The reply's mean activation also goes into the neuron review store."""
     clf = load_settings().get(_key(model["path"]), {}).get("classifier")
     if not clf:
-        raise ValueError(f"{model['id']} has no classifier set (model settings: classifier)")
+        raise ValueError(f"{model['id']} has no classifier set (Studio -> Models, the model's settings: classifier)")
     if not STATE["cett"]:
-        raise ValueError("activation checks need llama-cett-dump (studio --cett)")
+        raise ValueError("activation checks need llama-cett-dump: Setup -> Build llama.cpp, "
+                         "or point Settings -> Workspaces at an existing build")
     msgs = [m for m in messages if m.get("role") != "system"] or messages
     r = _scorer(model, clf).trace(msgs, text)
     frames = r["frames"]
@@ -1366,8 +1368,8 @@ class WorkerPool:
                     port += 1
                 binary = devs[0].get("server") or STATE["server_bin"]
                 if not binary:
-                    raise RuntimeError(f"no llama-server for {devs[0]['backend']}: set servers.{devs[0]['backend']} "
-                                       "in the hardware config, or pass --server")
+                    raise RuntimeError(f"no llama-server for {devs[0]['backend']}: set one under Setup -> Hardware "
+                                       "(servers per backend), or Setup -> Build llama.cpp for it")
                 cmd, env = server_cmd(model, settings, port)
                 cmd[0] = binary
                 env = {**(env or os.environ), **accelerators.launch_env(devs)}
@@ -2331,6 +2333,14 @@ class Handler(BaseHTTPRequestHandler):
         runner = STATE.get("jobs")
         if self.path == "/api/jobs/specs":
             return self._json(200, ns_jobs.public_specs())
+        if self.path == "/api/jobs/defaults":
+            # What the forms can fill in from the running workspace.
+            ws = STATE.get("workspace") or {}
+            ex = lambda p: p if p and os.path.exists(p) else None   # noqa: E731
+            return self._json(200, {"gguf": ex(ws.get("gguf")), "cett": ex(STATE.get("cett") or ws.get("cett")),
+                                    "server": ex(STATE.get("server_bin") or ws.get("server")),
+                                    "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
+                                    "workspace": STATE.get("workspace_name"), "root": ws.get("root")})
         if runner is None:
             return self._jobs_off()
         if self.path == "/api/jobs":
@@ -3003,7 +3013,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, trace_reply(model, req.get("messages") or [], text,
                                                        float(req.get("threshold", 0.5))))
                 except ValueError as e:
-                    return self._json(400, {"error": str(e)})
+                    links = []
+                    if "classifier" in str(e):
+                        links = [{"href": f"/#model={urllib.parse.quote(model['id'])}&field=classifier",
+                                  "label": "set this model's classifier"},
+                                 {"href": "/jobs#kind=classify", "label": "make one (H-Neuron pipeline, stage 5)"}]
+                    elif "cett" in str(e):
+                        links = [{"href": "/setup#build", "label": "build llama.cpp with cett-dump"},
+                                 {"href": "/settings#workspaces", "label": "use an existing build"}]
+                    return self._json(400, {"error": str(e), "links": links})
 
             if self.path.startswith("/api/rag/"):
                 return self._rag_post()
@@ -3503,7 +3521,7 @@ let chat={id:null,title:'New chat',messages:[]};
 const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra","classifier","gpus","split_mode","tensor_split","main_gpu"];
 const TEXT_FIELDS=["served_name","lora","extra","draft_model","classifier","gpus","split_mode","tensor_split"];
 const pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
-const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, run scripts/testqa.py against it with --publish-stats (see docs/TESTQA.md).';
+const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, grade it with TestQA (Jobs → Evaluate, or the link under its settings).';
 function statBadge(m){ const s=m.stats; if(!s) return '';
   if(!s.eligible) return `<span class="warnico" title="${esc(s.why_not+NOSTATS_HELP)}">⚠</span>`;
   return ''; }
@@ -3517,8 +3535,12 @@ function statTitle(s){ const g=s.graded; let t=`Rolling stats over the last ${g.
   return t; }
 function statLine(m){ const s=m.stats; if(!s||!s.graded.n) return '';
   const g=s.graded; return `<div class="stat" title="${esc(statTitle(s))}">✓ ${pct(g.accuracy)} · halluc ${pct(g.hallucination_rate)} · abst ${pct(g.abstention_rate)} · n ${g.n}</div>`; }
+// A TestQA job for this model, filled in (Jobs page).
+function gradeLink(m){ if(!m) return ''; const ep=`m=${location.origin}/v1@${m.id}`;
+  const out='runs/testqa-'+m.id.replace(/[^A-Za-z0-9_.-]+/g,'_')+'.json';
+  return `<a href="/jobs#kind=testqa&endpoint=${encodeURIComponent(ep)}&publish_stats=${encodeURIComponent(location.origin)}&out=${encodeURIComponent(out)}">Grade it with TestQA →</a>`; }
 function statsTable(s){ if(!s) return '';
-  if(!s.graded.n && !(s.activation&&s.activation.n) && !(s.live&&s.live.n)) return `<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not+NOSTATS_HELP)}</div>`;
+  if(!s.graded.n && !(s.activation&&s.activation.n) && !(s.live&&s.live.n)) return `<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not+NOSTATS_HELP)} ${gradeLink(sel)}</div>`;
   let h='<table class="st"><tr><th>subject</th><th>n</th><th>right</th><th>halluc</th><th>abstain</th></tr>';
   const rows=[['all',s.graded],...Object.entries(s.subjects||{})];
   for(const [k,v] of rows) if(v.n) h+=`<tr><td>${esc(k)}</td><td>${v.n}</td><td>${pct(v.accuracy)}</td><td>${pct(v.hallucination_rate)}</td><td>${pct(v.abstention_rate)}</td></tr>`;
@@ -3539,8 +3561,19 @@ $('#api').onclick=async()=>{try{await navigator.clipboard.writeText(location.ori
   setTimeout(()=>$('#api').textContent=location.origin+'/v1',1200)}catch{}};
 
 // tabs
-$$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x===b));
-  ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
+function showTab(name){ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x.dataset.tab===name));
+  ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===name?'block':'none'); }
+$$('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+// Links from other pages: /#tools, /#models, /#hub, /#docs, /#chats, or
+// /#model=<id>&field=classifier to open a model's settings at that field.
+const TAB_ALIAS={models:'local',local:'local',chats:'chats',hub:'hub',docs:'docs',tools:'tools'};
+function applyHash(){ const h=location.hash.slice(1); if(!h) return;
+  if(TAB_ALIAS[h]) return showTab(TAB_ALIAS[h]);
+  const q=new URLSearchParams(h), id=q.get('model');
+  if(id){ showTab('local'); const i=models.findIndex(m=>m.id===id); if(i<0) return;
+    pick(i); const f=q.get('field'); const el=f&&document.getElementById(f);
+    if(el){ el.scrollIntoView({block:'center'}); el.focus(); el.style.outline='2px solid var(--acc)'; setTimeout(()=>el.style.outline='',2500); } } }
+addEventListener('hashchange',applyHash);
 
 // ---------- models
 let linked=[];
@@ -3597,7 +3630,7 @@ $('#load').onclick=async()=>{
   $('#load').disabled=true; $('#loadmsg').textContent='starting llama-server…';
   const r=await (await post('/api/load',{path:sel.path,settings:s})).json();
   $('#load').disabled=false;
-  $('#loadmsg').innerHTML = r.ok?'<span class="okc">loaded</span>':'<span class="bad">'+esc(r.message||r.error||'failed')+'</span>';
+  $('#loadmsg').innerHTML = r.ok?'<span class="okc">loaded</span>':'<span class="bad">'+linkify(esc(r.message||r.error||'failed'))+'</span>';
   status();
 };
 $('#unload').onclick=async()=>{ await post('/api/unload'); status(); };
@@ -3688,7 +3721,7 @@ function renderChat(){
 }
 // ---------- per-reply check: token risk from the activation classifier
 function showRisk(el,c){
-  if(c.error){ el.innerHTML=`<div class="sum bad">check failed: ${esc(c.error)}</div>`; return; }
+  if(c.error){ el.innerHTML=`<div class="sum bad">check failed: ${linkify(esc(c.error))}${c.links&&c.links.length?' · '+linkList(c.links):''}</div>`; return; }
   const n=c.flagged.length, T=c.prob.length;
   const verdict=n?`<b class="bad">${n} of ${T} tokens flagged</b>`:`<b class="okc">no tokens flagged</b>`;
   el.innerHTML=`<div class="sum">risk: ${verdict} · peak ${(c.max*100).toFixed(0)}% · mean ${(c.mean*100).toFixed(0)}% `+
@@ -3713,7 +3746,7 @@ async function checkReply(d){
   el.innerHTML='<div class="sum">checking… (one extra pass over the reply)</div>';
   let c;
   try{ const r=await post('/api/trace',{model:m.model||$('#modelPick').value||undefined,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)});
-    c=await r.json(); if(!r.ok) c={error:c.error||r.statusText}; }catch(e){ c={error:String(e)}; }
+    c=await r.json(); if(!r.ok) c={error:c.error||r.statusText,links:c.links}; }catch(e){ c={error:String(e)}; }
   showRisk(el,c);
   if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url,review:c.review}; await persist(); }
 }
@@ -3747,7 +3780,7 @@ async function stream(){
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
         rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined})});
-    if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} out.body.textContent='error: '+e; throw 0; }
+    if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} e=typeof e==='string'?e:(e.message||JSON.stringify(e)); out.body.innerHTML='error: '+linkify(esc(e)); throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
       if(rt) servedBy=rt.model;
       if(rt){ routeNote = rt.mode==='auto' ? `auto → ${rt.model}: ${rt.reason}` : `model: ${rt.model}${rt.mode==='manual'?' (chosen manually)':''}`;
@@ -3761,7 +3794,7 @@ async function stream(){
         if(!line.startsWith('data:')) continue;
         const d=line.slice(5).trim(); if(d==='[DONE]') continue;
         let j; try{ j=JSON.parse(d) }catch{ continue }
-        if(j.error){ out.body.textContent='error: '+(j.error.message||j.error); continue; }
+        if(j.error){ out.body.innerHTML='error: '+linkify(esc(j.error.message||j.error)); continue; }
         if(j.sources){ sources=j.sources; showSources(out.src,sources); continue; }
         if(j.tool_call){ tools.push(j.tool_call); toolCard(out.tools,j.tool_call); $('#log').scrollTop=1e9; continue; }
         if(j.tool_result){ const t=tools.find(x=>x.key===j.tool_result.key); if(t){ t.result=j.tool_result; t.decided=true; toolCard(out.tools,t); } continue; }
@@ -3876,7 +3909,7 @@ async function mcp(reload){
 }
 $('#mcpreload').onclick=()=>mcp(true);
 
-refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
+refresh(); (function hashWhenReady(n){ if(models.length||n>40) applyHash(); else setTimeout(()=>hashWhenReady(n+1),150); })(0); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
 // First run: point at Setup while llama-server or models are missing (owner only; devices get 403).
 fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server&&s.ready.models)) return;
   const miss=[!s.ready.server&&'llama-server',!s.ready.models&&'models'].filter(Boolean).join(' and ');
@@ -3885,6 +3918,9 @@ fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server
   d.innerHTML=`Almost there: Studio needs ${miss}. <a href="/setup" style="color:var(--acc);font-weight:600">Open Setup →</a>`;
   document.querySelector('header').after(d); }).catch(()=>{});
 </script>"""
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)
+
 
 
 LOGIN = """<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

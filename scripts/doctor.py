@@ -341,6 +341,18 @@ def check_ports():
 
 # ---------------------------------------------------------------------- main
 
+def studio_section(r):
+    """Where in Studio a problem is fixed (the same places the web pages link to)."""
+    text = f"{r['stage']} {r['name']} {r['fix']}".lower()
+    for keys, where in ((("llama-server", "cett", "llama.cpp", "build_llama"), "/setup#build"),
+                        (("vulkan", "icd", "rocm", "cuda", "gpu"), "/setup#hardware"),
+                        (("pip install", "package", "python"), "/setup#requirements"),
+                        (("workspace", "models folder"), "/settings#workspaces")):
+        if any(k in text for k in keys):
+            return where
+    return None
+
+
 def main():
     import ns_workspace
     p = argparse.ArgumentParser()
@@ -399,6 +411,9 @@ def main():
     print("\nNEXT")
     if fails:
         print(f"  Fix first: {fails[0]['name']} -- {fails[0]['fix']}")
+        where = studio_section(fails[0])
+        if where:
+            print(f"  In Studio: http://127.0.0.1:7870{where}")
         return 1
     server = next((r["detail"] for r in results if r["name"] == "llama-server" and r["status"] == OK), None)
     print("  Use and compare models (Studio: chat, /v1 API, TestQA, Projects):")

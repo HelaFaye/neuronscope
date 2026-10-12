@@ -58,7 +58,7 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 <section class="card"><h2>Strongest neurons</h2><table id="top"></table></section>
 <section class="card"><h2>Adding data</h2><div class="note">
 <b>Observed:</b> every <i>check</i> in Studio's chat is recorded here, and so are replies scored in the background (model settings: classifier) and checked project work. Mark a checked reply <i>right</i> or <i>wrong</i> under it and it counts toward the association too.<br>
-<b>Tests and benchmarks:</b> on the <a href="/jobs">Jobs page</a> under <b>Review</b>: <i>Review: ingest a TestQA run</i> takes a TestQA results file; <i>Review: ingest graded replies</i> takes JSONL with <code>prompt</code>, <code>response</code>, <code>verdict</code> (right/wrong/abstained) and optionally <code>subject</code> from any other benchmark. Each replays the replies through the model once to record its activations.<br>
+<b>Tests and benchmarks:</b> <a href="/jobs#kind=review_testqa">ingest a TestQA run</a> takes a TestQA results file (no run yet? <a href="/jobs#kind=testqa">run TestQA</a>); <a href="/jobs#kind=review_items">ingest graded replies</a> takes JSONL with <code>prompt</code>, <code>response</code>, <code>verdict</code> (right/wrong/abstained) and optionally <code>subject</code> from any other benchmark. Each replays the replies through the model once to record its activations.<br>
 Without the UI: <code>python scripts/neuron_review.py --help</code>. Store: <code id="store"></code></div></section>
 </div>
 </main>
@@ -149,7 +149,7 @@ function topTable(rows,stat){
 (async()=>{
   try{ INFO=await api('/api/review'); }catch(e){ $('#head').innerHTML=`<div class="err">${esc(e.message)}</div>`; return; }
   $('#store').textContent=INFO.store;
-  if(!INFO.models.length){ $('#head').innerHTML='<div class="empty">No observations yet. Check a reply in the chat (with a classifier set for the model), or ingest a TestQA run from the Jobs page; see <i>Adding data</i> below.</div>'; return; }
+  if(!INFO.models.length){ $('#head').innerHTML='<div class="empty">No observations yet. <a href="/#chats">Check a reply in the chat</a> (the model needs a classifier: <a href="/#models">its settings</a>), or <a href="/jobs#kind=review_testqa">ingest a TestQA run</a>; see <i>Adding data</i> below.</div>'; return; }
   $('#model').innerHTML=INFO.models.map(m=>`<option value="${esc(m.model)}">${esc(m.model)} (${m.observations})</option>`).join('');
   $('#model').onchange=()=>{ facets(); refresh(); };
   for(const id of ['#stat','#by','#every','#since','#until']) $(id).onchange=refresh;
@@ -158,3 +158,9 @@ function topTable(rows,stat){
 })();
 </script>
 """
+
+
+import os as _os, sys as _sys  # noqa: E401,E402
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)

@@ -23,6 +23,16 @@
 - Transfer receiver: IPv6 binds (`--family`, bracketed hosts,
   `IPV6_V6ONLY`), from the local working copy.
 
+### Added (links between sections)
+- Messages and fixes that name another section ("Setup → Build llama.cpp",
+  "Settings → Workspaces", "Jobs → Evaluate"…) are links on every page; the
+  reply check, routing and load errors carry links to where they are fixed.
+  Jobs open filled in from the address (`/jobs#kind=…&field=…`) and fill
+  llama.cpp binaries and the pipeline's GGUF from the workspace; Studio's
+  tabs and a model's settings field open from `/#…`. Models without stats
+  link to a TestQA job for them; the Lab's desktop viewers and the Review
+  page link to their jobs; project errors show on the page with links.
+
 ### Fixed
 - Saving a load preset (`/api/config`) wrote into `config.json`'s Studio
   section instead of the model settings: two functions shared a name.

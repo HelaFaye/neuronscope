@@ -561,17 +561,34 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let specs={}, cur=null;
 async function api(p,o){const r=await fetch(p,o);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
-function renderForm(){const k=$('#kind').value, s=specs[k]; $('#khelp').textContent=s.help;
+// Prefill: values from the link (#kind=testqa&endpoint=...), else what the
+// running workspace knows (its GGUF, llama.cpp binaries, Studio's URL).
+function suggest(f){ const h=(f.help||'').toLowerCase();
+  if(f.name==='gguf'&&!h.includes('quant')) return DEF.gguf;
+  if(f.name==='binary'||f.name==='cett') return DEF.cett;
+  if(f.name==='server'&&h.includes('llama-server')) return DEF.server;
+  if(f.name==='llama') return DEF.llama;
+  return null; }
+function renderForm(prefill){const k=$('#kind').value, s=specs[k]; prefill=prefill||{};
+ $('#khelp').innerHTML=esc(s.help)+(DEF.root?` <span class="note">· runs in ${esc(DEF.root)} (workspace ${esc(DEF.workspace)}, <a href="/settings#workspaces">change</a>)</span>`:'');
  $('#form').innerHTML=s.fields.map(f=>{const id='f_'+f.name, lab=esc(f.name.replace(/_/g,' '))+(f.required?' *':'');
-  const d=Array.isArray(f.default)?f.default.join(' '):(f.default??'');
-  if(f.kind==='bool')return `<label><input type="checkbox" id="${id}">${lab}${f.help?` <span class="note">${esc(f.help)}</span>`:''}</label>`;
+  const sg=suggest(f);
+  const d=f.name in prefill?prefill[f.name]:Array.isArray(f.default)?f.default.join(' '):(f.default??sg??'');
+  if(f.kind==='bool')return `<label><input type="checkbox" id="${id}" ${prefill[f.name]==='1'||prefill[f.name]==='true'?'checked':''}>${lab}${f.help?` <span class="note">${esc(f.help)}</span>`:''}</label>`;
   const inp=f.choices?`<select id="${id}">${f.choices.map(c=>`<option ${c===d?'selected':''}>${esc(c)}</option>`).join('')}</select>`
    :`<input id="${id}" value="${esc(d)}" placeholder="${esc(f.help||'')}">`;
   return `<label for="${id}">${lab}${f.multi?' <span class="note">(space-separated)</span>':''}</label>${inp}`}).join('');}
-async function load(){specs=await api('/api/jobs/specs');const g={};for(const[k,s]of Object.entries(specs))(g[s.group]??=[]).push([k,s]);
+let DEF={};
+async function load(){specs=await api('/api/jobs/specs'); DEF=await api('/api/jobs/defaults').catch(()=>({}));const g={};for(const[k,s]of Object.entries(specs))(g[s.group]??=[]).push([k,s]);
  $('#kind').innerHTML=Object.entries(g).map(([n,xs])=>`<optgroup label="${esc(n)}">${xs.map(([k,s])=>`<option value="${k}">${esc(s.title)}</option>`).join('')}</optgroup>`).join('');
- const want=location.hash.slice(1); if(specs[want])$('#kind').value=want; renderForm(); refresh();}
-$('#kind').onchange=()=>{renderForm();location.hash=$('#kind').value};
+ openFromHash(); refresh();}
+function openFromHash(){ const h=decodeURIComponent(location.hash.slice(1)); if(!h) return renderForm();
+  let kind=h, pre={};
+  if(h.includes('=')){ const q=new URLSearchParams(location.hash.slice(1)); kind=q.get('kind')||''; q.forEach((v,k)=>{ if(k!=='kind') pre[k]=v; }); }
+  if(specs[kind]){ $('#kind').value=kind; renderForm(pre); if(Object.keys(pre).length) $('#ferr').innerHTML='<span class="note">filled in from the link: check the values, then Run</span>'; }
+  else renderForm(); }
+addEventListener('hashchange',()=>{ if(specs) openFromHash(); });
+$('#kind').onchange=()=>{renderForm();history.replaceState(null,'','#'+$('#kind').value)};
 $('#run').onclick=async()=>{const k=$('#kind').value, v={}; $('#ferr').textContent='';
  for(const f of specs[k].fields){const el=$('#f_'+f.name); v[f.name]=f.kind==='bool'?el.checked:el.value.trim()}
  try{const j=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k,values:v})});cur=j.id;refresh()}
@@ -586,3 +603,7 @@ async function refresh(){const js=await api('/api/jobs');
 setInterval(()=>refresh().catch(()=>{}),2000);
 load().catch(e=>{$('#ferr').textContent=e.message});
 </script>"""
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)
+

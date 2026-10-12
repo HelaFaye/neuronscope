@@ -569,7 +569,8 @@ def approve(plan: dict, assign_fn=None, by: str = "human") -> dict:
                 why.append(r)
     if missing:
         raise PlanError(f"no model for {', '.join(missing)}" + (f" ({'; '.join(why)})" if why else "")
-                        + ": pin one, set a default model, or add models")
+                        + ": pin one on the task, set a default model in the plan's policy, pick one under "
+                          "Settings -> Models per subject, or add models (Studio -> Models)")
     plan["status"] = "approved"
     plan["version"] += 1
     plan["approved_version"] = plan["version"]

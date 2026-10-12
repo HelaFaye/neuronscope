@@ -102,7 +102,10 @@ $('#create').onclick=async()=>{ $('#nerr').textContent='';
   try{const j=await api('/api/projects',{title:$('#ntitle').value,goal:$('#ngoal').value,text:$('#ntext').value,repo:$('#nrepo').value.trim()||undefined});
     cur=j.id; $('#ntext').value=''; await loadList(); load();}catch(e){$('#nerr').textContent=e.message}};
 
-async function act(action,body){ try{ await api(`/api/projects/${cur}/${action}`,body||{}); }catch(e){ alert(e.message); } await load(); }
+// Errors show on the page (with links to where to fix them), not in an alert.
+function problem(m){ let b=$('#problem'); if(!b){ b=document.createElement('div'); b.id='problem'; b.className='card attn warn'; $('#view').prepend(b); }
+  b.innerHTML=m?`${linkify(esc(m))} <button style="float:right" onclick="this.parentNode.remove()">×</button>`:''; if(!m) b.remove(); else b.scrollIntoView({block:'nearest'}); }
+async function act(action,body){ try{ await api(`/api/projects/${cur}/${action}`,body||{}); }catch(e){ await load(); return problem(e.message); } await load(); }
 
 function modelOpts(sel,blank){return (blank?`<option value="">${blank}</option>`:'')+meta.models.map(m=>`<option ${m.id===sel?'selected':''} value="${esc(m.id)}">${esc(m.id)} (${(m.size/2**30).toFixed(1)} GiB)</option>`).join('')}
 
@@ -204,7 +207,7 @@ function reqCard(p){
     return `<tr><td><span class="st ${esc(c.status||'')}">${esc(c.status||'unchecked')}</span></td><td class="note">${esc(i.kind)}</td>
       <td><b>${esc(label)}</b>${i.optional?' <span class="note">(optional)</span>':''} <span class="src" title="${esc(i.why||'')}">${esc(i.source)}</span>
         ${i.why?`<div class="note">${esc(i.why)}</div>`:''}</td>
-      <td class="note">${esc(i.need||'')}</td><td>${c.have!=null?`<code>${esc(c.have)}</code>`:''}${c.fix?`<div class="note">fix: <code>${esc(c.fix)}</code></div>`:''}</td>
+      <td class="note">${esc(i.need||'')}</td><td>${c.have!=null?`<code>${esc(c.have)}</code>`:''}${c.fix?`<div class="note">fix: <code>${linkify(esc(c.fix))}</code></div>`:''}</td>
       <td><button data-rq-del="${n}" title="remove">×</button></td></tr>`; }).join('');
   const summary=last?`${last.status==='ok'?'<span class="st ok">ok</span> everything required is here':last.status==='missing'?`<span class="st missing">missing</span> ${esc(last.missing.join(', '))}`:'<span class="st warn">warn</span> required items are here; some optional ones are not'} · checked ${ago(last.checked)}${last.python_from?` · Python packages checked in ${esc(last.python_from)}`:''}`:'not checked yet';
   const kindOpts=meta.req_kinds.map(k=>`<option>${k}</option>`).join('');
@@ -229,7 +232,7 @@ async function saveReqs(items,reason){ try{ await api(`/api/projects/${cur}/requ
 async function startProject(){
   const r=await fetch(`/api/projects/${cur}/start`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); const j=await r.json().catch(()=>({}));
   if(r.status===409&&j.missing){ if(confirm(`This machine is missing what the project needs:\n\n  ${j.missing.join('\n  ')}\n\nStart anyway? Workers will be told these are not available.`)) await act('start',{force:true}); else await load(); return; }
-  if(!r.ok) alert(j.error||r.status); await load();
+  await load(); if(!r.ok) problem(j.error||String(r.status));
 }
 
 function wire(){
@@ -273,3 +276,9 @@ loadList().catch(e=>$('#plist').textContent=e.message); loadWorkers().catch(()=>
 setInterval(()=>{ if(cur&&plan&&(plan.status==='running'||(plan.note&&plan.note.busy))) load(); else loadWorkers().catch(()=>{}); },3000);
 </script>
 """
+
+
+import os as _os, sys as _sys  # noqa: E401,E402
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)

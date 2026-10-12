@@ -93,3 +93,22 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 
 The worker side of a remote transfer or tuning run is started on the other
 machine, by design: it opens a port there.
+
+## Links between sections
+
+When something on one page needs a step on another, the page links to that
+section and option rather than naming it. Error messages and fixes that say
+"Setup → Build llama.cpp", "Settings → Workspaces" or "Jobs → Evaluate"
+turn into links wherever they are shown, and a link can open a job already
+filled in. Addresses you can use yourself:
+
+| address | opens |
+|---|---|
+| `/setup#build`, `#hardware`, `#health`, `#requirements`, `#snapshots`, `#paths` | that part of Setup |
+| `/settings#workspaces`, `#subjects`, `#tools` | that part of Settings |
+| `/jobs#kind=testqa&endpoint=m=http://127.0.0.1:7870/v1@MODEL&out=runs/t.json` | a job form, filled in (any field by name) |
+| `/#models`, `/#tools`, `/#docs`, `/#hub`, `/#chats` | a Studio tab |
+| `/#model=MODEL&field=classifier` | a model's settings, at that field |
+
+`doctor.py` prints the matching Studio address after the first problem it
+finds.

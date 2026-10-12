@@ -176,3 +176,9 @@ async function loadTools(){ const s=await api('/api/settings'); ST.tools=s.tools
 })();
 </script>
 """
+
+
+import os as _os, sys as _sys  # noqa: E401,E402
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)

@@ -27,7 +27,7 @@ select,input{font:12.5px ui-monospace,monospace;padding:.3rem .4rem;border:1px s
 <main>
 <h3>Live views and labs</h3><div class="grid" id="svcs"></div>
 <h3>Desktop viewers</h3>
-<div class="note">These open a window on this computer (pygfx or fastplotlib), so they run as jobs: pick one on the Jobs page under <b>Views</b>.</div>
+<div class="note">These open a window on this computer (pygfx or fastplotlib), so they run as jobs: <a href="/jobs#kind=view_timeline">timeline</a> · <a href="/jobs#kind=view_explore">2D/3D explorer</a> · <a href="/jobs#kind=view_weights">weights</a> · <a href="/jobs#kind=compare">compare two traces</a>.</div>
 <div class="grid" style="margin-top:.6rem" id="views"></div>
 </main>
 <script>
@@ -62,3 +62,9 @@ load().catch(e=>$('#svcs').innerHTML=`<div class="err">${esc(e.message)}</div>`)
 setInterval(()=>load().catch(()=>{}),5000);
 </script>
 """
+
+
+import os as _os, sys as _sys  # noqa: E401,E402
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)
