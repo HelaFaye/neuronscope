@@ -116,13 +116,14 @@ python viz/studio.py --models-dir ~/models --server "$NS_LLAMA_SERVER"
 
 Open http://127.0.0.1:7870. Any OpenAI client can use http://127.0.0.1:7870/v1.
 Studio prints the ids of the models it found; that id is what goes in an API
-request's `"model"` and in `<model-id>` below. See [STUDIO.md](STUDIO.md).
+request's `"model"` and in `MODEL_ID` below. See [STUDIO.md](STUDIO.md).
 
 **Benchmark one or more endpoints:**
 
 ```bash
-python scripts/testqa.py --endpoint mine=http://127.0.0.1:7870/v1@<model-id> --per-subject 5   # a quick first pass
-python scripts/testqa.py --endpoint mine=http://127.0.0.1:7870/v1@<model-id> --allow-exec --sandbox docker
+MODEL_ID=acme/model-q4_k_m        # one of the ids Studio printed
+python scripts/testqa.py --endpoint "mine=http://127.0.0.1:7870/v1@$MODEL_ID" --per-subject 5   # a quick first pass
+python scripts/testqa.py --endpoint "mine=http://127.0.0.1:7870/v1@$MODEL_ID" --allow-exec --sandbox docker
 ```
 
 `--allow-exec` grades code questions by running the model's code; with

@@ -62,17 +62,35 @@ scripts/build_llama_tools.sh --backend vulkan  # llama.cpp + the cett-dump extra
 Full setup: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). Hardware notes,
 including AMD APUs: [docs/HARDWARE.md](docs/HARDWARE.md).
 
+Each block below is safe to paste as a whole. Set your folders once (or set
+them on Studio's **Settings** page and skip the flags):
+
 ```bash
-# Serve and chat with local GGUFs; OpenAI clients use http://127.0.0.1:7870/v1
-python viz/studio.py --models-dir ~/models --server ~/llama.cpp/build/bin/llama-server
-#   it prints the model ids it found; use one as <model-id> below
+MODELS=~/models                               # the folder that holds your .gguf files
+LLAMA=~/llama.cpp/build/bin                   # where build_llama_tools.sh put llama-server
+```
 
-# Benchmark endpoints on reasoning, coding, facts and canaries.
-# --allow-exec runs the model's code to grade it: add --sandbox docker for models you do not trust.
-python scripts/testqa.py --endpoint base=http://127.0.0.1:7870/v1@<model-id> --allow-exec --sandbox docker
+Serve and chat with local GGUFs. This keeps running; OpenAI clients use
+`http://127.0.0.1:7870/v1`. It prints the model ids it found.
 
-# Find H-Neurons in a CLIP model
-python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --images <imagefolder> --out runs/clip
+```bash
+python viz/studio.py --models-dir "$MODELS" --server "$LLAMA/llama-server"
+```
+
+In a second terminal, benchmark a model on reasoning, coding, facts and
+canaries. `--allow-exec` runs the model's code to grade it; `--sandbox docker`
+(or `podman`) keeps it in a container. Replace the id with one Studio printed:
+
+```bash
+MODEL_ID=acme/model-q4_k_m
+python scripts/testqa.py --endpoint "base=http://127.0.0.1:7870/v1@$MODEL_ID" --allow-exec --sandbox docker
+```
+
+Find H-Neurons in a CLIP model, from a folder of images:
+
+```bash
+IMAGES=~/Pictures/samples
+python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --images "$IMAGES" --out runs/clip
 ```
 
 ## Read before you trust a result

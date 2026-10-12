@@ -242,11 +242,20 @@ if [[ "$MODE" == "system" ]]; then
 fi
 
 if [[ -z "${SKIP_TORCH_INSTALL:-}" ]]; then
-info "creating venv at $VENV"
+if [[ -d "$VENV" ]]; then
+  info "reusing the venv at $VENV"
+else
+  info "creating venv at $VENV"
+fi
 python3 -m venv "$VENV"
 # shellcheck disable=SC1090
 source "$VENV/bin/activate"
 pip install --quiet --upgrade pip wheel
+# The packages torch does not bring first: in a reused venv this repairs any
+# half-installed state, so pip's resolver has nothing to complain about while
+# torch and the rest go in.
+info "installing the core packages"
+pip install --quiet -r requirements-core.txt
 
 TORCH_SPEC="torch"
 if [[ "$MODE" == "cuda" ]]; then

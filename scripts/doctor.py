@@ -122,6 +122,31 @@ def check_cuda(gpus=None, torch=None):
         add("cuda", "note", WARN if "newer than" in n else OK, n)
 
 
+def check_vulkan_icds(icds=None):
+    """A driver failed to load: try each installed ICD alone and say which."""
+    import accelerators
+    icds = accelerators.vulkan_icds() if icds is None else icds
+    bad = [i for i in icds if not i["ok"]]
+    good = [i for i in icds if i["gpu"]] or [i for i in icds if i["ok"]]
+    if not bad:
+        add("compute", "vulkan ICD conflict", WARN, "a driver failed to initialise and was skipped",
+            "run VK_LOADER_DEBUG=driver vulkaninfo --summary to see which", "llama.cpp may pick the wrong driver")
+        return
+    names = ", ".join(os.path.basename(i["path"]) + (f" (package {i['owner']})" if i.get("owner") else "")
+                      for i in bad)
+    pin = good[0]["path"] if good else None
+    fix = []
+    if pin:
+        fix.append(f"use the working one: export VK_DRIVER_FILES={pin}  (or set it as the environment of the "
+                   f"Vulkan devices in Studio: Setup -> Hardware)")
+    owners = sorted({i["owner"] for i in bad if i.get("owner")})
+    if owners:
+        fix.append("or remove the broken driver's package: " + ", ".join(owners))
+    add("compute", "vulkan ICD conflict", WARN, f"fails to load: {names}",
+        "; ".join(fix) or "remove the failing manifest(s) from /usr/share/vulkan/icd.d",
+        "llama.cpp and wgpu may pick the broken driver")
+
+
 _DEVS = {}
 
 
@@ -192,13 +217,8 @@ def check_compute():
             else:
                 add("compute", "vulkan device", FAIL, "no device enumerated",
                     "check your ICD and driver", "llama.cpp Vulkan")
-            if "Skipping this driver" in out or "-3 from call" in out:
-                icd = "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
-                add("compute", "vulkan ICD conflict", WARN,
-                    "a driver failed to initialise and was skipped",
-                    f"export VK_DRIVER_FILES={icd}" if os.path.exists(icd)
-                    else "remove the failing ICD",
-                    "llama.cpp and wgpu may pick the broken driver")
+            if "Skipping this driver" in out or "-3 from call" in out or "Failed to CreateInstance" in out:
+                check_vulkan_icds()
         except Exception as e:
             add("compute", "vulkan", WARN, str(e)[:60])
 
@@ -371,8 +391,8 @@ def main():
     server = next((r["detail"] for r in results if r["name"] == "llama-server" and r["status"] == OK), None)
     print("  Use and compare models (Studio: chat, /v1 API, TestQA, Projects):")
     if server:
-        print(f"    python viz/studio.py --models-dir <folder with .gguf files> --server {server}")
-        print("    then open http://127.0.0.1:7870")
+        print("    ./neuronscope            (Studio in your browser; set your models folder under Settings)")
+        print(f"    or: python viz/studio.py --models-dir ~/models --server {server}")
     else:
         print("    first build llama-server:  scripts/build_llama_tools.sh --backend vulkan  (or cpu, cuda, hip, metal)")
     print("\n  Find H-Neurons in a model (docs/PIPELINE.md):")
