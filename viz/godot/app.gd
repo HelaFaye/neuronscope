@@ -507,7 +507,11 @@ func _load_models() -> void:
 		for m in models:
 			var c := _card(ui.modellist, m.id)
 			var s = m.get("stats")
-			var line := "%.1f GiB · %s %s" % [float(m.size) / 1073741824.0, str(m.get("quant", "")), str(m.get("arch", ""))]
+			var bits := ["%.1f GiB" % (float(m.size) / 1073741824.0)]
+			for k in ["quant", "arch"]:
+				if m.get(k):
+					bits.append(str(m[k]))
+			var line := " · ".join(bits)
 			if s and s.get("graded", {}).get("n", 0) > 0:
 				var g = s.graded
 				line += " · right %d%% · hallucinated %d%% · n %d" % [int(g.accuracy * 100), int(g.hallucination_rate * 100), int(g.n)]
@@ -1078,7 +1082,8 @@ func _capture_all(dir: String) -> void:
 		tabs.current_tab = i
 		if t == "3D" and v3d != "":
 			viz.open(v3d, studio.token)
-			await get_tree().create_timer(6.0).timeout
+			var w := OS.get_environment("NS_SHOT_WAIT")
+			await get_tree().create_timer(float(w) if w.is_valid_float() else 6.0).timeout
 		elif t == "Chat" and OS.get_environment("NS_SHOT_CHAT") != "":
 			ui.chatin.text = OS.get_environment("NS_SHOT_CHAT")
 			_send()

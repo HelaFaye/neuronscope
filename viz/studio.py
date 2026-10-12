@@ -3339,11 +3339,11 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><meta charset="utf-8">
   --warn:#e7b65c;--acc:#6ea8e0;--accfg:#0d1117;--soft:#1d2733;--code:#20242b;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.5 ui-sans-serif,system-ui,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column}
-header{padding:.55rem 1rem;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:.8rem;background:var(--panel);flex-wrap:wrap}
+header{padding:.55rem 1rem;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:.5rem;background:var(--panel);flex-wrap:wrap}
 h1{margin:0;font-size:15px;font-weight:600}
 .status{font-size:13px;color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--line);margin-right:.35rem}.dot.on{background:var(--ok)}
-.chip{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:999px;padding:.1rem .6rem;color:var(--mut);cursor:pointer;background:var(--bg)}
+.chip{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:999px;padding:.1rem .5rem;color:var(--mut);cursor:pointer;background:var(--bg)}
 main{flex:1;display:grid;grid-template-columns:330px 1fr;min-height:0}
 @media(max-width:800px){main{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{max-height:30vh;border-right:none;border-bottom:1px solid var(--line)}
   .dials{gap:.45rem .7rem;padding:.4rem .8rem}.dials input[type=range]{width:90px}#export{display:none}

@@ -249,7 +249,11 @@ def main(argv=None) -> int:
             continue
         _add_tool(sub, name, desc, schema)
         tools[_cmd(name)] = (name, fn)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    want_json = "--json" in argv                       # accepted before or after the command
+    argv = [x for x in argv if x != "--json"]
     a = p.parse_args(argv)
+    a.json = a.json or want_json
     if not a.cmd:
         p.print_help()
         return 0
