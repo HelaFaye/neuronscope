@@ -21,6 +21,7 @@ official `mcp` client.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import ssl
@@ -77,6 +78,8 @@ class Studio:
             raise ToolError(f"Studio said {e.code}: {msg}")
         except urllib.error.URLError as e:
             raise ToolError(f"cannot reach Studio at {self.base}: {e.reason}. Is it running?")
+        except (OSError, http.client.HTTPException) as e:
+            raise ToolError(f"Studio at {self.base} closed the connection ({type(e).__name__}); see its log")
         try:
             return json.loads(raw)
         except ValueError:

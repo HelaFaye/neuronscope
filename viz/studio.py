@@ -2070,7 +2070,9 @@ class Handler(BaseHTTPRequestHandler):
                 if target is None:
                     if route.get("error"):
                         return self._json(409, {"error": {"message": route["error"], "type": "invalid_request_error"}})
-                    return self._json(404, {"error": {"message": f"model not found: {body.get('model')}",
+                    return self._json(404, {"error": {"message": f"model not found: {body.get('model')}" if body.get("model")
+                                                      else "no model is loaded: name one (or auto), or load one under "
+                                                           "Studio -> Models",
                                                       "type": "invalid_request_error"}})
                 ok, msg = ensure_loaded(target)
             if not ok:
@@ -2828,6 +2830,8 @@ class Handler(BaseHTTPRequestHandler):
                 "idle_ttl": STATE["idle_ttl"], "jit": STATE["jit"],
                 "auto_ready": any(model_summary(m)["eligible"] for m in scan_models()),
                 "idle_for": int(time.time() - ACTIVITY["last"]),
+                # What this caller may do: "owner" (everything) or "device" (models, chat, checks).
+                "role": self._role, "workspace": STATE.get("workspace_name"),
             })
         self._json(404, {"error": "not found"})
 

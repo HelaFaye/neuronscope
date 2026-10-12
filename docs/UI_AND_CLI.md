@@ -11,6 +11,10 @@ from typed forms: no free-form command line, values cannot smuggle in flags,
 each run keeps its log, and the form's fields are tested against the script's
 own options.
 
+The terminal client (`scripts/ns.py`, `./neuronscope cli`) and the Godot
+client (`./neuronscope godot`) reach a running Studio, here or on another
+machine; [CLIENTS.md](CLIENTS.md) compares the three.
+
 ## Setting up
 
 | feature | in the UI | command line | MCP tool |

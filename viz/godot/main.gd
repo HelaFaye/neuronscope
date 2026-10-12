@@ -12,6 +12,9 @@ extends Node3D
 ## MultiMesh keeps the whole field in one draw call, and glow runs at half
 ## resolution, because the GPU is usually also running the model.
 ##
+## The full client (app.gd) embeds this scene and calls open() with a trace or
+## a neuron-review view from Studio; run on its own, it reads NS_API.
+##
 ## Layout: x = neuron column (ordered by classifier weight when the trace has a
 ## classifier, so the H-neurons form a band at the left), y = layer. Flagged
 ## H-neurons are drawn as rings in a second MultiMesh on top of the field.
@@ -36,6 +39,11 @@ var state := PackedByteArray()
 var prob := PackedFloat32Array()
 var flagged_set := {}
 var threshold := 0.5
+
+var standalone := true       # false when app.gd embeds this scene
+var layer_lo := 0            # layer filter: cells outside [layer_lo, layer_hi] are hidden
+var layer_hi := 1 << 20
+var n_layers := 0
 
 var frame := 0
 var playing := true
@@ -93,14 +101,48 @@ class RiskStrip extends Control:
 
 
 func _ready() -> void:
+	_build_ui()
+	if not standalone:
+		hud.text = "pick a trace or a review view"
+		return
 	api = OS.get_environment("NS_API")
 	if api == "":
 		api = DEFAULT_API
-	api = api.trim_suffix("/")
-	token = OS.get_environment("NS_TOKEN")
-	hud.text = "connecting to %s…" % api
-	_build_ui()
+	open(api, OS.get_environment("NS_TOKEN"))
+
+
+## Load a payload: base is a URL serving api/meta, api/theme and api/trace
+## (viz/bloom.py, Studio's /viz/<id>/ or /review/view/<id>/).
+func open(base: String, tok: String = "") -> void:
+	api = base.trim_suffix("/")
+	token = tok
+	n_cells = 0
+	flagged_set = {}
+	prob = PackedFloat32Array()
+	frame = 0
+	if flags:
+		flags.queue_free()
+		flags = null
+	cells.multimesh = null
+	strip.visible = false
+	context.visible = false
+	info.text = ""
+	hud.text = "loading %s…" % api
 	_fetch("/api/meta", _on_meta)
+
+
+func set_layer_range(lo: int, hi: int) -> void:
+	layer_lo = lo
+	layer_hi = hi
+	_paint()
+
+
+## Save what is on screen to user://shots/ (F12). -> the file's absolute path.
+func screenshot() -> String:
+	DirAccess.make_dir_recursive_absolute("user://shots")
+	var path := "user://shots/%s-%d.png" % [Time.get_datetime_string_from_system().replace(":", "-"), frame]
+	get_viewport().get_texture().get_image().save_png(path)
+	return ProjectSettings.globalize_path(path)
 
 
 func _build_ui() -> void:
@@ -207,6 +249,7 @@ func _on_trace(body: PackedByteArray) -> void:
 	hud.text = ""
 	strip.visible = true
 	context.visible = true
+	n_layers = L
 	_build(L)
 
 
@@ -295,6 +338,9 @@ func _paint() -> void:
 			gain = 0.6 + 0.8 * v
 		mm.set_instance_color(i, Color(col.r * gain, col.g * gain, col.b * gain, 1.0 if st > 0 else 0.35))
 		var s: float = (SIZE_ACTIVE if st >= 1 else SIZE_IDLE) * (0.6 + 0.9 * v)
+		if layer_of[i] < layer_lo or layer_of[i] > layer_hi:
+			s = 0.0
+			st = 0
 		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY.scaled(Vector3(s, s, s)),
 			Vector3(neuron_of[i] * xs, layer_of[i] * 8.0, 0.0)))
 		# Full colour, never pushed past 1, so the hue survives the glow instead of washing to white.
@@ -316,18 +362,24 @@ func _update_text() -> void:
 	var act := _hex(Color(theme.active))
 	var mode := str(meta.get("mode", "unscored"))
 	var mode_text := "tokens flagged at risk ≥ %d%% (the classifier's own threshold)" % int(round(threshold * 100))
-	if mode == "relative":
+	var legend: Dictionary = meta.get("legend", {"active": "active", "halluc": "H-neuron on a flagged token"})
+	var unit := "time buckets" if mode == "review" else "tokens"
+	if mode == "review":
+		mode_text = "%s · cells: %s\nstrip: %s" % [str(meta.get("question", "")), str(meta.get("cells_note", "")),
+			str(meta.get("strip", ""))]
+	elif mode == "relative":
 		mode_text = "[color=#ff9b8a]relative mode: some tokens are always flagged[/color]"
 	elif mode == "unscored":
 		mode_text = "[color=#ff9b8a]no classifier scores: nothing can be flagged[/color]"
-	var cells_note := str(meta.get("cells_note", ""))
+	var cells_note := "" if mode == "review" else str(meta.get("cells_note", ""))
 	var order := "x: neurons by classifier weight, H-neurons at left · y: layer" if meta.get("order") == "weight" else "x: neuron index · y: layer"
 	var risk := ""
 	if prob.size() == n_frames:
-		risk = "   risk [b]%d%%[/b]" % int(round(prob[frame] * 100))
-	info.text = ("[b]%s[/b]   [color=#8a8a92]%d/%d[/color]%s%s\n" % [str(meta.get("model", "trace")), frame + 1,
-		n_frames, risk, ("   [color=%s][b]FLAGGED[/b][/color]" % hal) if flagged else ""]) + \
-		("[color=%s]●[/color] active   [color=%s]◉[/color] H-neuron on a flagged token\n" % [act, hal]) + \
+		risk = "   %s [b]%d%%[/b]" % ["error rate" if mode == "review" else "risk", int(round(prob[frame] * 100))]
+	info.text = ("[b]%s[/b]   [color=#8a8a92]%d/%d %s[/color]%s%s\n" % [str(meta.get("model", "trace")), frame + 1,
+		n_frames, unit, risk, ("   [color=%s][b]FLAGGED[/b][/color]" % hal) if flagged else ""]) + \
+		("[color=%s]●[/color] %s   %s\n" % [act, str(legend.get("active", "")),
+			("[color=%s]◉[/color] %s" % [hal, str(legend.get("halluc"))]) if str(legend.get("halluc", "")) != "" else ""]) + \
 		("[color=#8a8a92]%s%s\n%s[/color]" % [mode_text, ("\n" + cells_note) if cells_note.begins_with("none") else "", order])
 	# The reply around the current token, shaded by risk; the current token boxed.
 	var labels: Array = meta.get("labels", [])
@@ -382,5 +434,8 @@ func _unhandled_input(e: InputEvent) -> void:
 					if flagged_set.has(j):
 						seek(j)
 						break
+			KEY_F12:
+				hud.text = "saved " + screenshot()
 			KEY_ESCAPE:
-				get_tree().quit()
+				if standalone:
+					get_tree().quit()

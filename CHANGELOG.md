@@ -23,6 +23,22 @@
 - Transfer receiver: IPv6 binds (`--family`, bracketed hosts,
   `IPV6_V6ONLY`), from the local working copy.
 
+### Added (clients)
+- Godot client as a full UI (`viz/godot`, `./neuronscope godot`): Connect
+  (address, token, a trusted certificate, or pairing; connections
+  remembered), Chat with reply checks and right/wrong labels, Models, Jobs
+  (forms from Studio's job specs, filled from the workspace), Projects
+  (approve, start, review results, answer questions, requirements), Review,
+  native 3D (traces and review periods, layer filter, screenshots),
+  Settings, Setup and Lab. It runs on another computer by default, so
+  drawing never takes the model's GPU. A paired device gets the tabs it may
+  use. `NS_SHOTS` screenshots every tab.
+- Terminal client (`scripts/ns.py`, `./neuronscope cli`): every MCP tool as
+  a command, interactive chat with `/check`, `/right`, `/wrong`, `follow`
+  for job logs, and workspaces, models per subject, tool approval and
+  restart for a remote Studio; `--cafile` for a self-signed Studio.
+- `/api/status` says the caller's role (owner or device) and the workspace.
+
 ### Added (links between sections)
 - Messages and fixes that name another section ("Setup → Build llama.cpp",
   "Settings → Workspaces", "Jobs → Evaluate"…) are links on every page; the
