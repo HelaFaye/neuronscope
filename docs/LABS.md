@@ -241,3 +241,47 @@ The chart displays the observed score by scale, while the JSON panel exposes the
 6. Keep the controller state JSON as the experiment manifest.
 
 This avoids moving multi-GB candidates after every scale test.
+
+### Scoring candidates in LM Studio on another machine
+
+When the model will run in LM Studio on another computer (say a desktop
+over Tailscale), score each candidate there, where it will be used. The
+tuner writes candidates locally, the transfer watcher carries each one
+over as it appears, and `scripts/eval_lmstudio.py` is the evaluator:
+
+1. Start the watcher on the folder the candidates go to: `ns_transfer.py
+   watch`, or the transfer MCP's `start_watch`. Point its destination at a
+   folder **inside LM Studio's models folder**, two levels deep
+   (`<models>/<publisher>/<name>/`), or LM Studio will not list the files.
+2. In LM Studio on the destination: Developer → Server on, **Just-in-time
+   model loading** on, and preferably **auto unload unused JIT models**, so
+   one candidate is in memory at a time.
+3. Score the unedited model once with the same evaluator, for
+   `--baseline-score`.
+4. Tune (Jobs → Tuning → *Adaptive scale tuning*, or):
+
+```bash
+python scripts/adaptive_tuner.py tune --state runs/tune-mymodel.json --worker local \
+    --source models/mymodel-Q6_K.gguf --profile models/h_neurons.json \
+    --output-dir models/adaptive_candidates \
+    --evaluator "python scripts/eval_lmstudio.py --lmstudio http://desktop:1234 --model {model} --metric not_hallucinated" \
+    --baseline-score 0.71
+```
+
+For each candidate the evaluator:
+- waits until LM Studio lists it (up to `--wait`, default an hour, for
+  large transfers);
+- asks it the same seeded TestQA sample (`--per-subject`, `--seed`, or your
+  own `--tasks`) at temperature 0;
+- prints `{score, correct, total, …}`, which the tuner reads. Each run's full
+  results are kept under `runs/lmstudio-eval/`.
+
+The metrics:
+- `accuracy`: right / graded;
+- `not_hallucinated`: wrong answers count against it, abstentions do not;
+- `utility`: right minus `--cost` × wrong, rescaled to 0–1.
+
+Keep `--auto-delete` off until a few scores look right: nothing is deleted
+otherwise. The same evaluator scores a single file:
+`python scripts/eval_lmstudio.py --lmstudio http://desktop:1234 --model models/adaptive_candidates/x.gguf`
+(Jobs → Tuning → *Score a candidate in LM Studio*).

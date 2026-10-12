@@ -319,6 +319,36 @@ SPECS.update({
                    F("kind", choices=["benchmark", "test", "observed"], default="benchmark"),
                    F("gguf", req=True), F("binary", req=True, help="llama-cett-dump"), F("classifier"),
                    F("ngl", kind="int", default=99), F("limit", kind="int", default=0)]},
+    # ---- tuning the scale, scored where the model will run
+    "eval_lmstudio": {
+        "title": "Score a candidate in LM Studio", "group": "Tuning", "argv": [S / "eval_lmstudio.py"],
+        "help": "Wait for a candidate GGUF to appear in LM Studio (local or on another machine), ask it a fixed "
+                "TestQA sample, print its score. The adaptive tuner uses this as its evaluator.",
+        "fields": [F("model", req=True, help="the candidate GGUF (its file name is matched in LM Studio)"),
+                   F("lmstudio", default="http://127.0.0.1:1234", help="LM Studio's server"),
+                   F("model_id", help="LM Studio's id, if the file name does not match"),
+                   F("metric", choices=["accuracy", "not_hallucinated", "utility"], default="accuracy"),
+                   F("per_subject", kind="int", default=10), F("seed", kind="int", default=0),
+                   F("tasks", multi=True, help="your own test set instead of the bank"),
+                   F("wait", kind="float", default=3600, help="seconds to wait for the transfer")]},
+    "tune_adaptive": {
+        "title": "Adaptive scale tuning", "group": "Tuning", "argv": [S / "adaptive_tuner.py", "tune"],
+        "help": "Sample suppression scales broadly, score each candidate, narrow around the best, repeat. "
+                "worker 'local' writes candidates here (put output_dir under the transfer watcher) and scores them "
+                "with the evaluator; a URL uses a remote tuning worker. Deletes nothing unless auto_delete.",
+        "fields": [F("state", req=True, help="state file, resumable, e.g. runs/tune-model.json"),
+                   F("worker", req=True, default="local", help="local, or a tuning worker URL"),
+                   F("source", help="local: the GGUF to scale"), F("profile", help="local: h_neurons.json"),
+                   F("output_dir", help="local: where candidates go"),
+                   F("evaluator", help="local: e.g. python scripts/eval_lmstudio.py --lmstudio "
+                                       "http://host:1234 --model {model}"),
+                   F("min", kind="float", default=0.1), F("max", kind="float", default=0.9),
+                   F("initial_step", kind="float", default=0.1), F("resolution", kind="float", default=0.01),
+                   F("batch_size", kind="int", default=2), F("margin_of_error", kind="float", default=0.03),
+                   F("baseline_score", kind="float", help="the unedited model's score, from the same evaluator"),
+                   F("max_batches", kind="int", default=20),
+                   F("auto_delete", kind="bool", help="delete candidates clearly worse than the best (off: "
+                                                      "keep everything until you trust the scores)")]},
     # ---- merging and editing
     "merge_selective": {
         "title": "Selective merge", "group": "Merge", "argv": [S / "merge_selective.py"],

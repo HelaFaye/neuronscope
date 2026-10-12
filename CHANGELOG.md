@@ -23,6 +23,17 @@
 - Transfer receiver: IPv6 binds (`--family`, bracketed hosts,
   `IPV6_V6ONLY`), from the local working copy.
 
+### Added (tuning in LM Studio)
+- `scripts/eval_lmstudio.py`: the adaptive tuner's evaluator for a model
+  that will run in LM Studio, here or on another machine. It waits for the
+  transferred candidate to appear, asks it a fixed seeded TestQA sample (or
+  your own tasks) at temperature 0, and prints the score: accuracy,
+  not-hallucinated, or a cost-weighted utility. `adaptive_tuner.py tune
+  --worker local` writes candidates locally for the transfer watcher and
+  scores them with any evaluator. Job kinds *Adaptive scale tuning* and
+  *Score a candidate in LM Studio* (Jobs → Tuning). Nothing is deleted
+  unless `--auto-delete`.
+
 ### Added (clients)
 - Godot client as a full UI (`viz/godot`, `./neuronscope godot`): Connect
   (address, token, a trusted certificate, or pairing; connections

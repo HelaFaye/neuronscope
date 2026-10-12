@@ -343,10 +343,23 @@ class AdaptiveTuner:
 def main(argv=None):
     p=argparse.ArgumentParser(); sub=p.add_subparsers(dest='cmd',required=True)
     s=sub.add_parser('tune'); s.add_argument('--state',required=True); s.add_argument('--worker',required=True); s.add_argument('--min',type=float,default=.1); s.add_argument('--max',type=float,default=.9); s.add_argument('--initial-step',type=float,default=.1); s.add_argument('--resolution',type=float,default=.01); s.add_argument('--batch-size',type=int,default=2); s.add_argument('--margin-of-error',type=float,default=.03); s.add_argument('--baseline-score',type=float); s.add_argument('--max-batches',type=int,default=20); s.add_argument('--auto-delete',action='store_true',help='delete candidates that underperform the best by more than the margin'); s.add_argument('--token',default='',help='discouraged: prefer --token-file or $NS_TRANSFER_TOKEN'); s.add_argument('--token-file',default=''); s.add_argument('--cafile',default='')
+    # --worker local: write candidates on this machine (where the transfer watcher can pick them up) and
+    # score each with --evaluator, e.g. scripts/eval_lmstudio.py for LM Studio on another machine.
+    s.add_argument('--source',help='local worker: the GGUF to scale'); s.add_argument('--profile',help='local worker: h_neurons.json')
+    s.add_argument('--output-dir',help='local worker: where candidates go (the transfer watcher\'s folder)')
+    s.add_argument('--suppressor',default=str(Path(__file__).resolve().parent/'suppress_gguf.py'))
+    s.add_argument('--evaluator',default='',help='local worker: command printing a JSON score; {model} {scale} {profile}')
     a=p.parse_args(argv)
     if a.cmd=='tune':
         import ns_security
-        client=WorkerClient(a.worker, token=ns_security.resolve_token(a.token,a.token_file), cafile=a.cafile)
+        if a.worker=='local':
+            missing=[f for f in ('source','profile','output_dir') if not getattr(a,f)]
+            if missing: p.error('--worker local needs '+', '.join('--'+m.replace('_','-') for m in missing))
+            if not a.evaluator: p.error('--worker local needs --evaluator (e.g. scripts/eval_lmstudio.py)')
+            os.makedirs(a.output_dir,exist_ok=True)
+            client=LocalWorkerClient(a.source,a.profile,a.suppressor,a.output_dir,evaluator_cmd=a.evaluator)
+        else:
+            client=WorkerClient(a.worker, token=ns_security.resolve_token(a.token,a.token_file), cafile=a.cafile)
         print(json.dumps(AdaptiveTuner(a.state).run(client=client,minimum=a.min,maximum=a.max,initial_step=a.initial_step,autotune_resolution=a.resolution,batch_size=a.batch_size,margin_of_error=a.margin_of_error,baseline_score=a.baseline_score,max_batches=a.max_batches,auto_delete=a.auto_delete),indent=2)); return 0
     return 0
 if __name__=='__main__': raise SystemExit(main())
