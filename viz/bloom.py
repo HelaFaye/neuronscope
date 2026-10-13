@@ -115,7 +115,9 @@ def column_order(fields, mask, L, N):
 
 
 def build_payload(session, h_neurons, active_pct, max_cells, demo=False, flag_prob=0.5, smooth=1,
-                  relative_z=None, order="weight"):
+                  relative_z=None, order="weight", subjects=None):
+    """subjects: neuron_review.subject_map() for this model, to colour active
+    cells by the subject they go with."""
     frames, fields = demo_trace() if demo else load_trace(session)
     T, L, N = frames.shape
     mask = resolve_mask(h_neurons, fields, (L, N))
@@ -152,6 +154,23 @@ def build_payload(session, h_neurons, active_pct, max_cells, demo=False, flag_pr
     blob += inten.tobytes()
     blob += state.tobytes()
 
+    cell_subject, subj_names = None, []
+    if subjects and subjects.get("subjects") and subjects.get("layers") == L:
+        B = int(subjects["bins"])
+        if B >= N:
+            bins = nx
+        else:
+            edges = np.linspace(0, N, B + 1).astype(int)
+            bins = np.clip(np.searchsorted(edges, nx, side="right") - 1, 0, B - 1)
+        subj_names = list(subjects["subjects"])
+        lookup = {}
+        for k, name in enumerate(subj_names):
+            for l, b, _d in subjects["cells"].get(name, []):
+                lookup[(l, b)] = k
+        cell_subject = [lookup.get((int(l), int(b)), -1) for l, b in zip(ly, bins)]
+        if not any(c >= 0 for c in cell_subject):
+            cell_subject, subj_names = None, []
+
     pieces = fields.get("pieces") or []
     stride = int(fields.get("stride", 1))
     labels = ["".join(pieces[i * stride:(i + 1) * stride]) for i in range(T)] \
@@ -169,6 +188,7 @@ def build_payload(session, h_neurons, active_pct, max_cells, demo=False, flag_pr
         "model": fields.get("meta", {}).get("model"),
         "verdict": fields.get("verdict"),
         "question": (fields.get("question") or "")[:160],
+        "subjects": subj_names, "cell_subject": cell_subject,
     }
 
 
@@ -209,6 +229,9 @@ font:13px ui-sans-serif,system-ui,sans-serif;overflow:hidden}
 #c{position:absolute;inset:0}
 #hud{position:absolute;left:14px;top:12px;z-index:2;line-height:1.6;text-shadow:0 1px 3px #000;max-width:min(560px,90vw)}
 #hud b{font-weight:500;color:#fff}
+#cambar{position:absolute;right:12px;top:12px;z-index:3;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:60vw}
+#cambar button{font:12px system-ui;padding:3px 8px;border:1px solid #3a3a48;border-radius:6px;background:rgba(16,16,24,.8);color:#d6d6e0;cursor:pointer}
+#cambar button.on{border-color:#9d7be8;color:#fff}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 4px 0 10px;vertical-align:middle}
 .ring{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 4px 0 10px;vertical-align:middle;box-sizing:border-box;border:2px solid}
 .note{color:#8a8a92;font-size:12px}.bad{color:#ff9b8a}
@@ -226,6 +249,10 @@ button:hover{background:#16161e}
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
+<div id="cambar" title="camera: drag to orbit, right-drag to pan, wheel to zoom">
+<button data-v="front" title="1">Front</button><button data-v="side" title="2">Side</button><button data-v="top" title="3">Top</button>
+<button data-v="reset" title="R">Reset</button><button id="orbit" title="O: slow automatic orbit">Orbit</button>
+<button id="follow" title="F: glide to the flagged neurons on flagged tokens">Follow flags</button></div>
 <div id="panel"><div id="row"><button id="play">Pause</button><canvas id="spark"></canvas><div id="tok"></div></div>
 <div id="text"></div></div>
 <script type="importmap">
@@ -267,6 +294,12 @@ const SIZE_IDLE = 1.1, SIZE_ACTIVE = 2.4, SIZE_FLAG = 7.0, FPS = 8;
 
 const hex = s => new THREE.Color(s);
 const cIdle = hex('#2a2a3a'), cAct = hex(theme.active), cHal = hex(theme.halluc);
+// Subject colours (from the neuron review's subject map): active cells that go with a subject
+// take that subject's colour; flagged cells keep the hallucination colour.
+const SUBJ = meta.subjects||[], cellSubj = meta.cell_subject;
+const subjPal = (theme.subjects||['#E7B65C','#5FCF8F','#B48EAD','#5DCAA5','#F28FAD','#9AD0F5','#C3E88D','#FFCB6B']);
+const cSubj = SUBJ.map((_,k)=>hex(subjPal[k%subjPal.length]));
+let subjOn = !!(cellSubj && SUBJ.length);
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x05050a, 0.0016);
@@ -330,7 +363,7 @@ function paint(pts, t, dim, dz){
   const base = t*N;
   for(let i=0;i<N;i++){
     const v = inten[base+i], st = state[base+i];
-    tmp.copy(st===0?cIdle:cAct);                 // flagged cells are drawn by the overlay
+    tmp.copy(st===0?cIdle:(subjOn && cellSubj[i]>=0 ? cSubj[cellSubj[i]] : cAct));   // flagged: the overlay
     const gn = (st===0?0.35:0.6+0.8*v)*dim;
     c.array[i*3]=tmp.r*gn; c.array[i*3+1]=tmp.g*gn; c.array[i*3+2]=tmp.b*gn;
     s.array[i] = (st===0?SIZE_IDLE:SIZE_ACTIVE)*(0.6+0.9*v);
@@ -403,7 +436,10 @@ function update(){
   hud.innerHTML = `<b>${esc(meta.model||'trace')}</b> <span class="note">${meta.frames} ${meta.mode==='review'?'time buckets':'tokens'} · ${meta.layers} layers</span><br>`+
     `<span class="dot" style="background:${theme.active};margin-left:0"></span>${esc(lg.active)}`+
     (lg.halluc?`<span class="ring" style="border-color:${theme.halluc}"></span>${esc(lg.halluc)}`:'')+'<br>'+
-    `<span class="note">${modeNote}</span>${cellsNote}<br><span class="note">${orderNote}</span>`;
+    `<span class="note">${modeNote}</span>${cellsNote}<br><span class="note">${orderNote}</span>`+
+    (SUBJ.length?`<br><label class="note" style="cursor:pointer"><input type="checkbox" id="subjT"${subjOn?' checked':''}> colour by subject</label> `+
+      SUBJ.map((n,k)=>`<span class="dot" style="background:${subjPal[k%subjPal.length]}"></span>${esc(n)}`).join(' '):'');
+  const sT=document.getElementById('subjT'); if(sT) sT.onchange=()=>{ subjOn=sT.checked; update(); };
   tok.innerHTML = `${t+1}/${T} <span style="color:${flagged?theme.halluc:'#c9c9d2'}">${esc(meta.labels[t]||'·')}</span>`+
     (prob?` <span class="note">${meta.mode==='review'?'error rate':'risk'} ${(prob[t]*100).toFixed(0)}%</span>`:'')+(flagged?` <b style="color:${theme.halluc}">flagged</b>`:'');
   if(lastCur) lastCur.classList.remove('cur');
@@ -414,8 +450,37 @@ function update(){
 }
 update();
 
+// ---- camera: presets (manual) and orbit / follow-flags (automatic), with smooth moves
+const HOME = {pos: cam.position.clone(), tgt: controls.target.clone()};
+let glide = null, follow = false;
+function goTo(pos, tgt){ glide = {pos: pos.clone(), tgt: tgt.clone()}; }
+function preset(v){ const c = new THREE.Vector3(W/2, H/2, 0);
+  if(v==='front') goTo(new THREE.Vector3(W/2, H/2, 1.15*D), c);
+  else if(v==='side') goTo(new THREE.Vector3(W/2 + 1.15*D, H/2, 0), c);
+  else if(v==='top') goTo(new THREE.Vector3(W/2, H/2 + 1.25*D, 1), c);
+  else goTo(HOME.pos, HOME.tgt); }
+document.querySelectorAll('#cambar [data-v]').forEach(b=>b.onclick=()=>preset(b.dataset.v));
+const orbitB = document.getElementById('orbit'), followB = document.getElementById('follow');
+orbitB.onclick=()=>{ controls.autoRotate=!controls.autoRotate; controls.autoRotateSpeed=0.6; orbitB.classList.toggle('on', controls.autoRotate); };
+followB.onclick=()=>{ follow=!follow; followB.classList.toggle('on', follow); if(!follow) preset('reset'); };
+let followed = -1;
+function followFlags(){
+  if(!follow || followed===t) return; followed = t;
+  const base = t*N; let x=0, y=0, k=0;
+  for(let i=0;i<N;i++) if(state[base+i]===2){ x+=nx[i]*XS; y+=ly[i]*8; k++; }
+  if(k){ const c = new THREE.Vector3(x/k, y/k, 0); goTo(c.clone().add(new THREE.Vector3(0.15*D, 0.1*D, 0.45*D)), c); }
+  else if(!flaggedSet.has(t)) goTo(HOME.pos, HOME.tgt);
+}
+addEventListener('keydown', e=>{ if(e.target.tagName==='INPUT') return;
+  const k=e.key.toLowerCase(); if(k==='1') preset('front'); else if(k==='2') preset('side'); else if(k==='3') preset('top');
+  else if(k==='r') preset('reset'); else if(k==='o') orbitB.click(); else if(k==='f') followB.click(); });
+controls.addEventListener('start', ()=>{ glide=null; });          // a hand on the camera wins over any glide
+
 renderer.setAnimationLoop(()=>{
   if(playing){ acc++; if(acc % Math.round(60/FPS) === 0){ t=(t+1)%T; update(); } }
+  followFlags();
+  if(glide){ cam.position.lerp(glide.pos, 0.08); controls.target.lerp(glide.tgt, 0.08);
+    if(cam.position.distanceTo(glide.pos) < 0.5 && controls.target.distanceTo(glide.tgt) < 0.5) glide=null; }
   controls.update(); composer.render();
 });
 addEventListener('resize', ()=>{

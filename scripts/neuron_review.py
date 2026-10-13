@@ -325,6 +325,45 @@ def summary(store: ReviewStore, model: str, stat: str = "association", how: str 
             "error_rate": error_rate(rows)}
 
 
+def subject_map(store: ReviewStore, model: str, top: int = 400, min_obs: int = 3) -> dict:
+    """Which neurons go with which subject: per subject, the cells (layer, bin) whose
+    activation is higher on that subject's observations than on the others' by more
+    than the review's significance floor (Cohen's d, Bonferroni over the grid).
+    Each cell belongs to the subject it separates most. -> {subjects, cells:
+    {subject: [[layer, bin, d], ...]}, bins, layers, counts}."""
+    rows = store.query(model)
+    if not rows:
+        return {"subjects": [], "cells": {}, "counts": {}}
+    X = store.vecs(model, rows)                                    # [n, L, B]
+    n, L, B = X.shape
+    best_d = np.zeros((L, B), np.float32)
+    best_s = np.full((L, B), -1, np.int32)
+    counts, names = {}, []
+    for s in sorted({x for r in rows for x in r["subjects"] if x != "unknown"}):
+        idx = np.array([s in r["subjects"] for r in rows])
+        if idx.sum() < min_obs or (~idx).sum() < min_obs:
+            continue
+        a, b = X[idx], X[~idx]
+        pooled = np.sqrt(((a.var(0, ddof=1) * (len(a) - 1)) + (b.var(0, ddof=1) * (len(b) - 1))) / (len(a) + len(b) - 2))
+        d = (a.mean(0) - b.mean(0)) / np.maximum(pooled, 1e-6)
+        d[pooled < 1e-5] = 0.0
+        floor = max(D_SHOW, _z(d.size, len(a) + len(b) - 2) * float(np.sqrt(1 / len(a) + 1 / len(b))))
+        d = np.where(d >= floor, d, 0.0)
+        if top and (d > 0).sum() > top:
+            cut = np.sort(d.ravel())[-top]
+            d = np.where(d >= cut, d, 0.0)
+        k = len(names)
+        names.append(s)
+        counts[s] = int(idx.sum())
+        better = d > best_d
+        best_d[better], best_s[better] = d[better], k
+    cells = {s: [] for s in names}
+    for l, bn in zip(*np.nonzero(best_s >= 0)):
+        cells[names[best_s[l, bn]]].append([int(l), int(bn), round(float(best_d[l, bn]), 3)])
+    return {"subjects": [s for s in names if cells[s]], "cells": {s: c for s, c in cells.items() if c},
+            "bins": B, "layers": L, "counts": counts}
+
+
 def deficit_layers(store: ReviewStore, model: str, subjects=None, top: int = 8, **filters) -> dict:
     """The layers where wrong answers differ most from right ones, for focusing a
     fine-tune there (finetune.py --layers plan).

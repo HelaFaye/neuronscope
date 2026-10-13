@@ -1366,6 +1366,24 @@ def trace_reply(model, messages, text, threshold=0.5, source="chat-check"):
             "url": f"viz/{tid}/", "review": review}
 
 
+def trace_subjects(path):
+    """The neuron review's subject map for the model a trace belongs to, if the review has enough
+    observations across subjects (cached per model and observation count)."""
+    try:
+        model = json.load(open(os.path.join(path, "manifest.json"))).get("model")
+        if not model:
+            return None
+        import neuron_review as nrv
+        st = review_store()
+        n = len(st.query(model))
+        cache = STATE.setdefault("subject_maps", {})
+        if cache.get(model, (None,))[0] != n:
+            cache[model] = (n, nrv.subject_map(st, model) if n >= 6 else None)
+        return cache[model][1]
+    except Exception:
+        return None
+
+
 def trace_payload(tid):
     """bloom payload for a saved trace, built once and cached (a few per process)."""
     with TRACES["lock"]:
@@ -1376,7 +1394,7 @@ def trace_payload(tid):
     if not TRACE_ID.fullmatch(tid) or not os.path.isdir(path):
         return None
     import bloom
-    blob, meta = bloom.build_payload(path, None, 97.0, 40000)
+    blob, meta = bloom.build_payload(path, None, 97.0, 40000, subjects=trace_subjects(path))
     out = {"blob": blob, "meta": meta, "theme": bloom.THEMES.get(STATE.get("viz_theme") or "dark")
            or next(iter(bloom.THEMES.values()))}
     with TRACES["lock"]:

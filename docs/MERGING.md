@@ -188,4 +188,3 @@ recipe: routed experts stay in RAM, always-active tensors (attention, shared
 experts, embeddings) go to the GPU. Generation is bandwidth-bound on *active*
 parameters, so a Q4 30B-A3B reads roughly 2-3 GB per token against ~8 GB for a
 dense Q6 9B -- potentially faster despite being three times the size.
-

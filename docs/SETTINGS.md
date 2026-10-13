@@ -141,4 +141,3 @@ Studio → Models → a model shows a radar, in the theme's chart colours, of:
 
 **Compare with (2P)** overlays another model. The bars under it are the
 average over the axes, in tenths.
-

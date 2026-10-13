@@ -12,7 +12,17 @@
       0.15,
       1.0
     ],
-    "note": "default. Dark field, blue activations, red-orange for flagged H-neurons; the pair stays distinct for every common colour-vision type"
+    "note": "default. Dark field, blue activations, red-orange for flagged H-neurons; the pair stays distinct for every common colour-vision type",
+    "subjects": [
+      "#E7B65C",
+      "#5FCF8F",
+      "#B48EAD",
+      "#9AD0F5",
+      "#F28FAD",
+      "#C3E88D",
+      "#FFCB6B",
+      "#7FDBCA"
+    ]
   },
   "clinical": {
     "cmap": "gray",
@@ -27,7 +37,17 @@
       0.25,
       1.0
     ],
-    "note": "high contrast, print-safe, no colour used decoratively"
+    "note": "high contrast, print-safe, no colour used decoratively",
+    "subjects": [
+      "#8A5A00",
+      "#1D6B3A",
+      "#5B3C88",
+      "#0F6B6B",
+      "#7A2E5C",
+      "#3C5A14",
+      "#6B4A1F",
+      "#2F4F8F"
+    ]
   },
   "ember": {
     "cmap": "magma",
@@ -42,7 +62,17 @@
       0.15,
       1.0
     ],
-    "note": "dark field, warm ramp; flagged H-neurons in cyan, which stays distinct from amber for every common colour-vision type"
+    "note": "dark field, warm ramp; flagged H-neurons in cyan, which stays distinct from amber for every common colour-vision type",
+    "subjects": [
+      "#C5E1A5",
+      "#CE93D8",
+      "#FFD54F",
+      "#80CBC4",
+      "#F48FB1",
+      "#BCAAA4",
+      "#AED581",
+      "#90CAF9"
+    ]
   },
   "cool": {
     "cmap": "viridis",
@@ -57,7 +87,17 @@
       0.2,
       0.95
     ],
-    "note": "cool ramp; flagged H-neurons in orange against teal (colour-blind safe)"
+    "note": "cool ramp; flagged H-neurons in orange against teal (colour-blind safe)",
+    "subjects": [
+      "#E7B65C",
+      "#B48EAD",
+      "#F28FAD",
+      "#9AD0F5",
+      "#FFCB6B",
+      "#C3E88D",
+      "#D4A5FF",
+      "#FFE082"
+    ]
   },
   "mono": {
     "cmap": "gray",
@@ -72,7 +112,17 @@
       0.3,
       1.0
     ],
-    "note": "only the hallucinating population carries colour"
+    "note": "only the hallucinating population carries colour",
+    "subjects": [
+      "#FFFF00",
+      "#00E5FF",
+      "#FF9CFF",
+      "#00FF7F",
+      "#FFB74D",
+      "#B3E5FC",
+      "#E6EE9C",
+      "#F8BBD0"
+    ]
   },
   "_ui": {
     "neuronscope-dark": {
@@ -111,7 +161,17 @@
       0.18,
       1.0
     ],
-    "note": "neon on midnight blue; flagged H-neurons in magenta against aqua"
+    "note": "neon on midnight blue; flagged H-neurons in magenta against aqua",
+    "subjects": [
+      "#FFD23F",
+      "#7D8CFF",
+      "#7DFF6A",
+      "#FF8A3D",
+      "#B388FF",
+      "#00E5FF",
+      "#FFF59D",
+      "#FF80AB"
+    ]
   },
   "forest": {
     "cmap": "YlGn",
@@ -126,7 +186,17 @@
       0.15,
       1.0
     ],
-    "note": "greens on near-black; flagged in brick red"
+    "note": "greens on near-black; flagged in brick red",
+    "subjects": [
+      "#E0B44C",
+      "#5BB8D6",
+      "#C38FD6",
+      "#D6D06B",
+      "#F2A65A",
+      "#9AD0F5",
+      "#E6C3A1",
+      "#B5E48C"
+    ]
   },
   "solar": {
     "cmap": "cividis",
@@ -141,7 +211,17 @@
       0.25,
       1.0
     ],
-    "note": "light, warm paper; blue activations, magenta flags"
+    "note": "light, warm paper; blue activations, magenta flags",
+    "subjects": [
+      "#859900",
+      "#6C71C4",
+      "#B58900",
+      "#2AA198",
+      "#CB4B16",
+      "#268BD2",
+      "#93A1A1",
+      "#D33682"
+    ]
   },
   "_studio": {
     "midnight": {

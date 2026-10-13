@@ -368,3 +368,14 @@ because `EventSource` cannot set headers. TLS via `--tls-cert`, though on an
 untrusted network a WireGuard or Tailscale tunnel beats a self-signed cert that
 users learn to click through.
 
+## Camera (browser 3D view)
+
+| control | what it does | key |
+|---|---|---|
+| drag / right-drag / wheel | orbit, pan, zoom (manual) | |
+| **Front**, **Side**, **Top** | glide to a fixed view | 1, 2, 3 |
+| **Reset** | back to the starting view | R |
+| **Orbit** | a slow automatic turn around the model | O |
+| **Follow flags** | on every token with flagged hallucination neurons, glide to them; back to the overview after | F |
+
+Any drag stops a glide in progress, so the camera never fights the hand.

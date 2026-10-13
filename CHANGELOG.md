@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added (visualizer)
+- Subject colours in the 3D views. From the neuron review,
+  `neuron_review.subject_map()` finds which neurons go with which subject
+  (Cohen's d against the other subjects, above the review's significance
+  floor). A checked reply's 3D view colours active neurons by subject, in
+  the theme's subject palette, with a legend toggle. Flagged hallucination
+  neurons keep their colour.
+- Camera controls in the browser 3D view.
+  - Manual: Front, Side and Top presets and Reset (keys 1, 2, 3, R).
+  - Automatic: Orbit, and Follow flags, which glides to the flagged neurons
+    of each flagged token (keys O, F).
+  - Moves are smooth and give way to a drag.
+
 ### Added (sharing results, opt-in)
 - Score cards (`scripts/score_cards.py`, Settings → **Sharing results**),
   off unless turned on and given a scoreboard address.

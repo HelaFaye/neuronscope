@@ -107,3 +107,24 @@ runs and chat checks land together. API: `GET /api/review`,
   neurons.
 - Observations from different model files are never mixed: a quantization
   or an edit is a different model id.
+
+## Subject colours in the 3D views
+
+Once the review has observations across subjects (TestQA runs and checked
+chat replies are labelled by subject), it can say which neurons go with
+which subject. A neuron goes with a subject when its activation on that
+subject's observations is higher than on the others':
+- by more than the same Bonferroni-corrected floor the association uses;
+- for the subject it separates most.
+
+A 3D view of a checked reply then colours each active neuron by its
+subject, in the theme's subject palette. Neurons flagged for hallucination
+keep their ring and colour on top. **Colour by subject** in the legend
+turns it off.
+
+Two conditions apply:
+- The map needs at least six observations of the model, and at least three
+  per subject.
+- It only applies when the trace has the review's layer count.
+
+`neuron_review.subject_map()` returns it for other uses.
