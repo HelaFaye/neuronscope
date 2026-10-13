@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added (appearance)
+- Named themes (Settings → **Appearance**; the header ◐ button steps
+  through them).
+  - The themes: Midnight, Daylight, Arcade, Ember, Forest, Solar, High
+    contrast and Clinical.
+  - Each colours the pages, the charts and the 3D activation and
+    hallucination views. The 3D views follow the viewer's choice; **Make
+    default** sets it for others and for the Godot 3D view.
+  - All in viz/themes.json, with three new viewer themes (arcade, forest,
+    solar).
+- Model radar (Models → a model): per-subject accuracy and honesty
+  (1 − hallucination rate), DDR-style, with a second model to compare (2P),
+  in the theme's colours.
+
 ### Added (concept editing)
 - `scripts/concept_edit.py` (Jobs → Retrain → *Concept edit*): finds the
   direction or PCA cone that separates two prompt sets in the residual

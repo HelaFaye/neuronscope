@@ -1676,6 +1676,16 @@ def workspaces_state():
     return d
 
 
+def studio_themes() -> dict:
+    """Named Studio themes (viz/themes.json, "_studio"): UI colours, chart colours, and the
+    3D viewer theme each one uses."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "themes.json")) as f:
+            return json.load(f).get("_studio") or {}
+    except (OSError, ValueError):
+        return {}
+
+
 def load_studio_config(path=None):
     p = os.path.expanduser(path or STATE.get("config_path") or "~/.neuronscope/config.json")
     try:
@@ -2522,6 +2532,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ remote hosts (this Studio is the controller)
 
+    def _viz_theme(self, default):
+        """The 3D views follow the viewer's own theme (cookie ns_viz, set by the theme picker)."""
+        import bloom
+        try:
+            c = http.cookies.SimpleCookie(self.headers.get("Cookie") or "")
+            name = c["ns_viz"].value if "ns_viz" in c else ""
+        except Exception:
+            name = ""
+        return bloom.THEMES.get(name) or default
+
     def _host_token(self):
         auth = self.headers.get("Authorization", "")
         tok = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
@@ -2754,7 +2774,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(pl["blob"])
             return
-        return self._json(200, pl["meta" if kind == "api/meta" else "theme"])
+        return self._json(200, pl["meta"] if kind == "api/meta" else self._viz_theme(pl["theme"]))
 
     def _review_post(self):
         if not self._owner_only():
@@ -2857,6 +2877,14 @@ class Handler(BaseHTTPRequestHandler):
             save_studio_config({"subject_models": clean})
             STATE["subject_models"] = clean
             return self._json(200, {"subjects": subject_defaults()})
+        if self.path == "/api/settings/theme":
+            name = str(req.get("theme", ""))
+            th = studio_themes()
+            if name not in th:
+                return self._json(400, {"error": f"no theme {name!r}"})
+            save_studio_config({"theme": name})
+            STATE["studio_theme"], STATE["viz_theme"] = name, th[name].get("viz") or "dark"
+            return self._json(200, {"default": name})
         if self.path == "/api/settings/tool-rules":
             rules = tool_rules().replace(req.get("rules") or {})
             return self._json(200, {"tool_rules": rules})
@@ -2965,7 +2993,7 @@ class Handler(BaseHTTPRequestHandler):
             kind = m.group(2)
             body, ctype = ((bloom.PAGE.encode(), "text/html; charset=utf-8") if kind == "" else
                            (pl["blob"], "application/octet-stream") if kind == "api/trace" else
-                           (json.dumps(pl["meta" if kind == "api/meta" else "theme"]).encode(),
+                           (json.dumps(pl["meta"] if kind == "api/meta" else self._viz_theme(pl["theme"])).encode(),
                             "application/json"))
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -3007,6 +3035,9 @@ class Handler(BaseHTTPRequestHandler):
             path = STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG)
             return self._json(200, {"path": path, "config": accelerators.load_config(path),
                                     "devices": POOL.devices(refresh=True)})
+        if self.path == "/api/themes":
+            return self._json(200, {"themes": studio_themes(), "default": STATE.get("studio_theme") or "midnight",
+                                    "viz": sorted(__import__("bloom").THEMES)})
         if self.path.startswith("/api/engine/options"):
             import engine_options as eo
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -3585,7 +3616,7 @@ code,.code{font:12.5px ui-monospace,monospace;background:var(--code);padding:.15
 table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:.3rem .25rem;border-bottom:1px solid var(--line)}
 .row{display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap}.row>div{flex:1;min-width:180px}
 label{display:block;font-size:12px;color:var(--mut);margin:.3rem 0 .1rem}
-</style><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>"""
+</style><script>try{const d=document.documentElement,t=localStorage.getItem('ns-theme')||'dark';d.dataset.theme=localStorage.getItem('ns-theme-base')||(t==='light'?'light':'dark');const v=JSON.parse(localStorage.getItem('ns-theme-vars')||'{}');for(const k in v)d.style.setProperty('--'+k,v[k])}catch{document.documentElement.dataset.theme='dark'}</script>"""
 
 PAIR_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pair device</title>""" + _PAIR_STYLE + r"""
@@ -3663,7 +3694,7 @@ load();
 
 PAGE = r"""<!DOCTYPE html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NeuronScope Studio</title><link rel="icon" href="data:,"><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
+<title>NeuronScope Studio</title><link rel="icon" href="data:,"><script>try{const d=document.documentElement,t=localStorage.getItem('ns-theme')||'dark';d.dataset.theme=localStorage.getItem('ns-theme-base')||(t==='light'?'light':'dark');const v=JSON.parse(localStorage.getItem('ns-theme-vars')||'{}');for(const k in v)d.style.setProperty('--'+k,v[k])}catch{document.documentElement.dataset.theme='dark'}</script>
 <style>
 :root{--bg:#f7f7f5;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b64;--line:#e3e2dd;--ok:#2f7d4f;--no:#b23c2e;--warn:#a8701c;
   --acc:#2c5f8a;--accfg:#fff;--soft:#f0f5fa;--code:#f3f2ee;color-scheme:light}
@@ -3828,6 +3859,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
     <label id="visionrow" style="display:none"><input type="checkbox" id="vision" checked> load vision projector <span id="mmname"></span></label>
     <label>H-Neuron classifier (optional, enables activation stats)</label><input id="classifier" placeholder="models/classifier.npz for this model">
     <button id="load" class="pri" style="margin-top:.7rem;width:100%">Load</button>
+    <div id="radarBox" style="display:none"><div class="row2" style="align-items:end"><div><label>Compare with (2P)</label><select id="vsPick"></select></div><div class="note" id="radarNote"></div></div><div id="radar"></div></div>
     <div id="statsbox"></div>
     <div id="loadmsg" class="note"></div>
   </div>
@@ -3928,13 +3960,47 @@ function statsTable(s){ if(!s) return '';
   if(s.live&&s.live.n) h+=`<div class="note">Live: ${s.live.n} replies, ${pct(s.live.abstention_rate)} declined</div>`;
   if(!s.eligible) h+=`<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not)}</div>`;
   return h; }
+// ---------- radar (DDR-style): per-subject accuracy and honesty, 1P = this model, 2P = a comparison
+function radarAxes(stats){ const out={}; if(!stats) return out;
+  for(const [k,v] of Object.entries(stats.subjects||{})) if(v.n>=3) out[k]=v.accuracy;
+  if(stats.graded&&stats.graded.n>=3) out['honesty']=1-(stats.graded.hallucination_rate||0);
+  return out; }
+function renderRadar(){ if(!sel) return; const a=radarAxes(sel.stats);
+  const others=models.filter(m=>m!==sel&&Object.keys(radarAxes(m.stats)).length>=3);
+  const keep=$('#vsPick').value;
+  $('#vsPick').innerHTML='<option value="">nobody</option>'+others.map(m=>`<option value="${esc(m.path)}">${esc(m.id)}</option>`).join('');
+  if(keep&&others.some(m=>m.path===keep)) $('#vsPick').value=keep;
+  const vs=others.find(m=>m.path===$('#vsPick').value);
+  const b=vs?radarAxes(vs.stats):{};
+  const axes=[...new Set([...Object.keys(a),...Object.keys(b)])];
+  $('#radarBox').style.display=Object.keys(a).length?'':'none';
+  if(axes.length<3){ $('#radar').innerHTML=''; $('#radarNote').textContent='The radar needs results in at least 3 subjects (3+ graded items each).'; return; }
+  $('#radarNote').textContent='accuracy per subject; honesty = 1 − hallucination rate';
+  $('#radar').innerHTML=radarSVG(axes,[{name:sel.id,v:a},...(vs?[{name:vs.id,v:b}]:[])]); }
+function radarSVG(axes,series){ const C=nsChart(), W=380, H=280, cx=190, cy=142, R=92, n=axes.length;
+  const pt=(i,r)=>{ const t=-Math.PI/2+2*Math.PI*i/n; return [cx+r*Math.cos(t), cy+r*Math.sin(t)]; };
+  const poly=r=>axes.map((_,i)=>pt(i,r).map(x=>x.toFixed(1)).join(',')).join(' ');
+  let g=''; for(const f of [1,.75,.5,.25]) g+=`<polygon points="${poly(R*f)}" fill="${f===1?'var(--soft,rgba(127,127,127,.08))':'none'}" stroke="var(--line)" stroke-width="${f===1?2:1}"/>`;
+  axes.forEach((_,i)=>{ const [x,y]=pt(i,R); g+=`<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--line)"/>`; });
+  series.forEach((s,k)=>{ const c=C[k%C.length]; const pts=axes.map((ax,i)=>pt(i,R*Math.max(0,Math.min(1,s.v[ax]??0))).map(x=>x.toFixed(1)).join(',')).join(' ');
+    g+=`<polygon points="${pts}" fill="${c}" fill-opacity="${k?0.22:0.32}" stroke="${c}" stroke-width="2.5" stroke-linejoin="round"/>`; });
+  axes.forEach((ax,i)=>{ const [x,y]=pt(i,R+22); const anchor=Math.abs(x-cx)<8?'middle':(x>cx?'start':'end');
+    const vals=series.map((s,k)=>s.v[ax]==null?'–':Math.round(s.v[ax]*100)).join(' / ');
+    g+=`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${anchor}" font-size="11" font-weight="700" fill="var(--fg)" style="text-transform:uppercase;letter-spacing:.06em">${esc(ax)}</text>`+
+       `<text x="${x.toFixed(1)}" y="${(y+12).toFixed(1)}" text-anchor="${anchor}" font-size="10" fill="var(--mut)">${vals}</text>`; });
+  const legend=series.map((s,k)=>{ const c=C[k%C.length]; const vals=Object.values(s.v); const avg=vals.length?vals.reduce((x,y)=>x+y,0)/vals.length:0;
+    const seg=Array.from({length:10},(_,i)=>`<span style="display:inline-block;width:9px;height:12px;margin-right:2px;border-radius:2px;background:${i<Math.round(avg*10)?c:'var(--line)'}"></span>`).join('');
+    return `<div style="display:flex;align-items:center;gap:.4rem;margin-top:.25rem"><span style="font:700 11px ui-monospace,monospace;color:${c};border:2px solid ${c};border-radius:5px;padding:0 .3rem">${k+1}P</span><span class="note" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.name)}</span>${seg}</div>`; }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:380px;display:block;margin:.3rem auto 0">${g}</svg>${legend}`; }
+$('#vsPick').onchange=renderRadar;
+window.addEventListener('ns-theme',renderRadar);
 function human(b){const u=["B","KB","MB","GB","TB"];let i=0;while(b>=1024&&i<4){b/=1024;i++}return b.toFixed(1)+' '+u[i]}
 const post=(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b??{})});
 
 // theme
 // Dark by default (set in <head>); the toggle remembers the choice.
-$('#theme').onclick=()=>{const cur=document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
-  const nx=cur==='dark'?'light':'dark'; document.documentElement.dataset.theme=nx; try{localStorage.setItem('ns-theme',nx)}catch{}};
+$('#theme').onclick=async()=>{ const nx=await nsCycleTheme(); $('#theme').title='theme: '+nx+' (click for the next; all of them under Settings → Appearance)'; };
+$('#theme').title='theme: '+nsThemeName()+' (click for the next; all of them under Settings → Appearance)';
 $('#api').textContent=location.origin+'/v1';
 $('#api').onclick=async()=>{try{await navigator.clipboard.writeText(location.origin+'/v1'); $('#api').textContent='copied';
   setTimeout(()=>$('#api').textContent=location.origin+'/v1',1200)}catch{}};
@@ -3998,7 +4064,7 @@ function pick(i){
   $('#moebox').style.display = sel.n_experts?'block':'none';
   if(sel.n_experts) $('#moehint').textContent = `0 = model default (of ${sel.n_experts})`;
   $('#visionrow').style.display = sel.mmproj?'block':'none';
-  $('#statsbox').innerHTML = statsTable(sel.stats);
+  $('#statsbox').innerHTML = statsTable(sel.stats); renderRadar();
   $('#vision').checked = s.vision!==false; $('#mmname').textContent = sel.mmproj?'('+sel.mmproj.split('/').pop()+')':'';
   const eng = s.engine || (sel.format==='hf'?'vllm':'llama'); $('#engine').value=eng;
   const fa = s.flash_attn===true?'on':s.flash_attn===false?'off':s.flash_attn;
@@ -4425,6 +4491,8 @@ def main(argv=None):
             setattr(a, d, ws[d])
     STATE["workspace_name"], STATE["workspace"] = ws["name"], ws
     STATE["subject_models"] = dict(cfg.get("subject_models") or {})
+    STATE["studio_theme"] = cfg.get("theme") if cfg.get("theme") in studio_themes() else "midnight"
+    STATE["viz_theme"] = (studio_themes().get(STATE["studio_theme"]) or {}).get("viz") or "dark"
     STATE["tool_rules_path"] = cfg.get("tool_rules") or None
     os.environ.update(ns_workspace.env_for(ws))
 

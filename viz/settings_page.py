@@ -4,7 +4,7 @@ rules for MCP tools in chat. Same as scripts/ns_workspace.py and
 scripts/tool_rules.py on the command line."""
 
 PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Studio Settings</title><script>try{document.documentElement.dataset.theme=localStorage.getItem('ns-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
+<title>Studio Settings</title><script>try{const d=document.documentElement,t=localStorage.getItem('ns-theme')||'dark';d.dataset.theme=localStorage.getItem('ns-theme-base')||(t==='light'?'light':'dark');const v=JSON.parse(localStorage.getItem('ns-theme-vars')||'{}');for(const k in v)d.style.setProperty('--'+k,v[k])}catch{document.documentElement.dataset.theme='dark'}</script>
 <style>
 :root{--bg:#fafaf9;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b66;--line:#e4e4df;--acc:#2d5bd7;--accfg:#fff;--ok:#1f8a4c;--no:#c0392b;--warn:#a8701c;--code:#f3f3f0}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#151514;--panel:#1d1d1b;--fg:#ececea;--mut:#9a9a94;--line:#33332f;--acc:#6f93ff;--accfg:#0b0b0a;--ok:#4cc27e;--no:#ff7a6b;--warn:#e7b65c;--code:#262624}}
@@ -36,10 +36,17 @@ th{font-size:11px;color:var(--mut);text-transform:uppercase;font-weight:500}
 .rule{border:1px solid var(--line);border-radius:6px;padding:.5rem .6rem;margin:.4rem 0;background:var(--bg)}
 .rule .row label{margin:0}.cond{display:grid;grid-template-columns:9rem 1fr 6rem 2rem;gap:.3rem;margin-top:.3rem}
 code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3rem;border-radius:4px}
+.themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:.6rem;margin-top:.6rem}
+.th{border:1px solid var(--line);border-radius:8px;padding:.5rem;cursor:pointer}.th.on{outline:2px solid var(--acc)}
+.th .sw{display:flex;height:34px;border-radius:5px;overflow:hidden;margin:.35rem 0}.th .sw span{flex:1}
 </style>
 <header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<nav class="toc"><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
+<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
+
+<section class="card" id="appearance"><h2>Appearance</h2>
+<div class="note">A theme colours Studio's pages, its charts (the model radar) and the 3D views of activations and hallucination risk. Your choice is kept in this browser; <b>Make default</b> sets it for browsers that have not chosen one, and for the Godot client's 3D view.</div>
+<div id="themeGrid" class="themes"></div><div id="themeMsg" class="note"></div></section>
 
 <section class="card" id="workspaces"><h2>Workspaces</h2>
 <div class="note">Where things are, by name: the models, the llama.cpp build, the folder that holds the pipeline's data (<code>data/</code>, <code>models/</code>, <code>runs/</code>…; jobs run there), Studio's own state, and environment for the GPU stack. Keep one per disk layout or machine, and switch instead of passing paths. Command line: <code>python scripts/ns_workspace.py</code>.</div>
@@ -174,6 +181,18 @@ async function loadTools(){ const s=await api('/api/settings'); ST.tools=s.tools
   try{ ST=await api('/api/settings'); RULES=ST.tool_rules; subjTable(); cats(); drawRules(); loadTools(); }catch(e){ $('#subjtbl').innerHTML=`<tr><td class="err">${esc(e.message)}</td></tr>`; }
   if(location.hash){ const t=document.querySelector(location.hash); if(t) t.scrollIntoView(); }
 })();
+
+async function themes(){ const j=await (await fetch('/api/themes')).json(); const cur=nsThemeName();
+  $('#themeGrid').innerHTML=Object.entries(j.themes).map(([k,t])=>{ const u=t.ui||{}, c=t.chart||[];
+    return `<div class="th${k===cur?' on':''}" data-th="${k}"><b>${esc(t.label||k)}</b>${k===j.default?' <span class="note">(default)</span>':''}
+      <div class="sw">${[u.bg,u.panel,u.acc,u.ok,u.no].filter(Boolean).map(x=>`<span style="background:${x}"></span>`).join('')||'<span class="note" style="padding:.4rem">built-in '+esc(t.base)+'</span>'}</div>
+      <div class="sw" style="height:12px">${c.map(x=>`<span style="background:${x}"></span>`).join('')}</div>
+      <div class="note">3D view: ${esc(t.viz||'dark')}</div>
+      <div class="row" style="margin-top:.3rem"><button data-def="${k}">Make default</button></div></div>`; }).join('');
+  document.querySelectorAll('[data-th]').forEach(el=>el.onclick=e=>{ if(e.target.dataset.def) return; nsApplyTheme(el.dataset.th, j.themes[el.dataset.th]); themes(); });
+  document.querySelectorAll('[data-def]').forEach(b=>b.onclick=async()=>{ const r=await fetch('/api/settings/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:b.dataset.def})});
+    $('#themeMsg').textContent=r.ok?'Default theme saved.':(await r.json()).error; themes(); }); }
+themes();
 </script>
 """
 

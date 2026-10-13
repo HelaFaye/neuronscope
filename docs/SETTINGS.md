@@ -108,3 +108,37 @@ python scripts/tool_rules.py test filesystem read_file '{"path": "/home/me/notes
 ```
 
 Stored in `~/.neuronscope/tool-rules.json` (or `$NS_TOOL_RULES`).
+
+## Appearance
+
+Settings → **Appearance** lists the themes. Each one sets:
+- Studio's page colours;
+- the chart colours (the model radar: 1P, 2P…);
+- the 3D viewer's colours: background, active neurons, flagged
+  hallucination neurons.
+
+Clicking a theme applies it in this browser and remembers it there. The 3D
+views opened from this browser follow it. **Make default** saves it in
+`config.json` (`studio.theme`). Browsers that have not chosen a theme use it,
+and so does the Godot client's 3D view. The header's ◐ button steps through
+the themes.
+
+Themes live in `viz/themes.json`:
+- under `_studio`: a label, a `base` (dark or light), `ui` colours,
+  `chart` colours, and the `viz` theme for the 3D views;
+- at the top level: the viewer themes themselves (colour map, active and
+  flagged colours, point sizes).
+
+A new theme is an entry there. The flagged-neuron colour of every viewer
+theme is chosen to stay distinct from the active colour for common kinds
+of colour blindness; keep that when adding one.
+
+## The model radar
+
+Studio → Models → a model shows a radar, in the theme's chart colours, of:
+- its accuracy per subject, for subjects with at least 3 graded items;
+- *honesty*, which is 1 − its hallucination rate.
+
+**Compare with (2P)** overlays another model. The bars under it are the
+average over the axes, in tenths.
+
