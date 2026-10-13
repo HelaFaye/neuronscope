@@ -32,6 +32,38 @@ Pass secrets with `--token-file` or `$NS_TRANSFER_TOKEN` (Studio also reads
 `$NS_STUDIO_TOKEN`). `--token` still works but warns, because argv is visible
 to every local user. Clients trust a self-signed cert with `--cafile`.
 
+### IPv6 transfer receiver
+
+The resumable transfer receiver selects IPv6 automatically when `--host` is an
+IPv6 literal, or explicitly with `--family ipv6` when binding a DNS name that
+resolves to IPv6. Bind hosts may be unbracketed (`::`) or bracketed (`[::]`);
+URLs still require brackets around IPv6 literals, for example
+`https://[2001:db8::10]:8810`.
+
+For an IPv6-only listener on all local IPv6 interfaces, use `--host :: --family
+ipv6`. The server sets `IPV6_V6ONLY=1`, so an IPv6 wildcard bind does not
+silently expose the same port over IPv4. Non-loopback binds still require a
+strong token and TLS unless the operator explicitly selects the VPN-only
+`--allow-plaintext` mode. A self-signed certificate must contain the exact
+IPv6 address or DNS name clients use, and clients should pass it with
+`--cafile`; never use `--insecure` for real transfers.
+
+Example (IPv6-only, TLS):
+
+```bash
+python scripts/ns_security.py token --out ~/.config/neuronscope/transfer.token
+python scripts/ns_security.py selfsigned --host 2001:db8::10 \
+  --cert transfer-cert.pem --key transfer-key.pem
+python scripts/ns_transfer.py serve --host :: --family ipv6 --port 8810 \
+  --root /srv/neuronscope-incoming \
+  --token-file ~/.config/neuronscope/transfer.token \
+  --tls-cert transfer-cert.pem --tls-key transfer-key.pem
+```
+
+Replace the documentation-only `2001:db8::10` address with an assigned address
+on the receiver. Prefer a VPN address (for example a Tailscale address) over
+exposing a receiver directly to the public Internet.
+
 ## What each path guarantees
 
 | Component | Confidentiality | Authentication | Integrity |

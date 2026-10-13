@@ -1,0 +1,109 @@
+# Neuron review: how each neuron behaves across everything a model does
+
+The 3D trace view shows one reply, token by token. The **Review** page
+(`/review` in Studio) shows the opposite slice: every reply a model has
+written that NeuronScope has looked at (tests, benchmarks, chat), and for
+each MLP neuron, how its activity relates to whether the model was right.
+Filter by where the data came from and what it was about, and play it over
+time.
+
+## Where the data comes from
+
+Each **observation** is one reply's activation profile: CETT for every
+neuron, averaged over the reply's tokens and binned to 512 columns per layer
+(the same binning as the 3D traces). It is stored with:
+
+| field | meaning |
+|---|---|
+| source | the run it came from: `testqa`, `livebench`, `swe-bench`…, `chat-check`, `project`, `live` |
+| kind | **test** (TestQA), **benchmark** (anything else graded), **observed** (replies from use) |
+| subjects | the subject classifier's labels for the prompt (code, math, science, …) or the benchmark's own |
+| verdict | right / wrong / abstained when graded or when you mark a chat reply; otherwise not graded |
+| risk | the hallucination classifier's probability, when the model has one |
+| time | when the reply was written |
+
+Three ways observations arrive:
+
+- **Chat checks.** Every **check** under a chat reply records one. Under the
+  check result, *was it right? right / wrong* records your verdict, so chat
+  replies count in the right-vs-wrong statistics too. Checked project work
+  is recorded as `project`.
+- **Live scoring.** If a model has a classifier and Studio scores replies in
+  the background (`score_every`), each scored reply is recorded as `live`.
+- **Tests and benchmarks.** Jobs → **Review**: *ingest a TestQA run* takes a
+  `testqa.py --out` file; *ingest graded replies* takes JSONL with `prompt`,
+  `response`, `verdict` (right/wrong/abstained, or pass/fail) and optionally
+  `subject`, from any other benchmark. Each reply is run through the model
+  once more (a prefill, no generation) to record its activations, so pass the
+  same GGUF that wrote the replies. Vision items are skipped (their image is
+  part of the prompt).
+
+Observations live in `~/.neuronscope/review/<model>/` (`index.jsonl` plus one
+small `.npy` per reply, about 30 KB for a 28-layer model). Nothing leaves the
+machine.
+
+## The statistics
+
+Pick one; the heatmap shows it for every layer (rows) and neuron bin
+(columns), and the table lists the strongest in each direction.
+
+- **Hallucination association.** Cohen's *d* between wrong and right
+  answers: how many standard deviations more the neuron fires when the model
+  is wrong. Red-orange: fires more on hallucinations. Blue: fires more on
+  right answers. Needs graded replies (at least two of each).
+- **Risk correlation.** For replies nobody graded: the correlation between
+  the neuron and the classifier's risk. Useful for chat-heavy models, but it
+  can only find what the classifier already looks at.
+- **Firing rate.** How often the neuron is among the top 3% of activity in
+  the selected replies. No verdicts needed: which neurons a subject or a
+  benchmark recruits.
+
+**The noise floor.** With thousands of neurons, some differ between right and
+wrong answers by chance alone. A cell is coloured only when its effect clears
+a floor set by the number of replies and the number of neurons (a
+Bonferroni-corrected critical value, widened for small samples), so that a
+review with no real effect lights up nothing in about 19 of 20 cases. The
+legend shows the floor. Small selections have high floors: with 10 right and 10
+wrong answers a neuron needs |d| above about 2.7; with 100 of each, about 0.7
+(for a 28-layer model).
+Grey means "can't tell from this much data", not "no effect".
+
+## Filters and time
+
+- **Sources**, grouped as tests, benchmarks and observed: compare what a
+  benchmark shows with what happens in use.
+- **Skills and subjects**: e.g. only math, to see whether math errors have
+  their own neurons.
+- **Verdicts**: e.g. only ungraded replies, with the risk statistic.
+- **From / to** dates, and **over time by** day, week, month or every N replies.
+
+The error-rate chart shows each period's share of wrong answers among graded
+replies (bars: how many replies). **Open 3D over time** plays the periods as
+frames in the 3D view: each frame colours the neurons by that period's
+statistic, and the strip at the bottom is the error rate. Use it after a
+retrain, an edit or a quantization change to see whether the same neurons are
+still the ones that go with wrong answers.
+
+## Without the UI
+
+    python scripts/neuron_review.py ingest-testqa --results runs/testqa.json \
+        --gguf ~/models/acme/Model-GGUF/model-Q4_K_M.gguf --binary ~/llama.cpp/build/bin/llama-cett-dump
+    python scripts/neuron_review.py ingest-items --items livebench-graded.jsonl --source livebench --gguf … --binary …
+    python scripts/neuron_review.py models
+    python scripts/neuron_review.py summary --model acme/model-q4_k_m --subject math --by month
+
+The model id is Studio's (`<folder>/<file stem>`, lower case), so ingested
+runs and chat checks land together. API: `GET /api/review`,
+`POST /api/review/summary`, `/api/review/view`, `/api/review/label`. MCP:
+`review_sources`, `review_summary`, `review_label`.
+
+## Reading it carefully
+
+- An association is not a cause. A neuron that fires on wrong answers may
+  track a topic that is simply harder. Filter to one subject before drawing
+  conclusions, and confirm with the suppression tools ([PIPELINE.md](PIPELINE.md)).
+- Columns are bins of neurons (max-pooled), as in the traces: a bright bin
+  says one of its neurons stands out. The H-Neuron classifier works on single
+  neurons.
+- Observations from different model files are never mixed: a quantization
+  or an edit is a different model id.

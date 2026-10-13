@@ -2,6 +2,236 @@
 
 ## Unreleased
 
+### Improved (retraining on deficits)
+- Knowledge probing (`deficits.py --student`). Each failed fact is
+  sampled several times:
+  - weakly known facts (some sample right) are trained with the gold
+    answer;
+  - unknown facts are trained to decline (`--unknown abstain`, the
+    default; or `skip` / `teach`);
+  - unknown facts the model already declines are left alone.
+
+  Teaching a model facts it does not know raises its hallucination rate
+  (Gekhman et al., 2024).
+- Fixed: synthetic variations' DPO pairs used the original item's failing
+  reply as the rejected answer to a different question. The rejected side
+  is now the student's own failing reply to the variation; without a
+  student, variations get SFT only.
+- Holdout guard: synthetic variations that restate a holdout question
+  (a shared 8-word run, or 60% trigram overlap) are dropped.
+- Focus layers (`deficits.py --review-model`, `finetune.py --layers plan`
+  or `--layers 10-17`): train only the layers where the neuron review found
+  wrong answers differ most from right ones on the failing subjects.
+  - LoRA: adapters on those layers only.
+  - Full: only those layers' weights.
+- `scripts/retrain_gate.py` (Jobs → Retrain → *Keep or reject a retrain*):
+  before/after on the holdout and the trained split.
+  - Per subject: fixed vs broken items with an exact McNemar test, and
+    hallucination and abstention rates.
+  - A keep / reject / inconclusive verdict, the holdout size needed to
+    tell, and a memorisation warning.
+
+### Added (remote hosts)
+- NeuronScope Remote (`remote/`): an agent for computers that run LLMs but
+  not NeuronScope. It is distributed on its own: a pip package, a zip from
+  Studio, and launchers for Windows and macOS/Linux. It uses only the
+  standard library.
+  - Its MCP server is the host's one control surface. Tools: host info,
+    LLM servers, models, chat, load/unload (LM Studio's `lms`, Ollama),
+    receive and install model files into LM Studio or Ollama, and delete
+    (off by default).
+  - It also offers an OpenAI-compatible pass-through for chat.
+  - A browser console, on the host only, shows who is the host and who are
+    the controllers, the pairing code, permissions and activity, and
+    revokes controllers.
+- Link methods:
+  - same network, with a pinned self-signed certificate and LAN discovery;
+  - any VPN address;
+  - SSH tunnels, which Studio runs itself;
+  - public tunnels;
+  - call-home for hosts behind NAT: the host long-polls Studio, needs no
+    open port, and has its own token.
+- Pairing: a 10-minute, single-use code. The code never travels; HMAC
+  proofs are bound to the TLS certificate the controller sees, and the
+  host proves itself back.
+- Studio → **Remote** (`/remote`):
+  - a wizard (install, link method, pair) with *This computer:
+    CONTROLLER*;
+  - per-host info, models, load/unload, a test chat, and *Send model*
+    (resumable, checksummed, optional install).
+  - Hosts' models join Studio's model list as `<host>:<model>`.
+  - MCP tools `remote_hosts` and `remote_call` (also terminal commands).
+- Other MCP clients as controllers: `neuronscope-remote add-host` pairs
+  from the command line, and `bridge` carries MCP over stdio to the host
+  with the certificate pinned (Claude Desktop, Cline, Cursor).
+
+### Added (settings)
+- Workspaces (`scripts/ns_workspace.py`, Settings → Workspaces): named sets
+  of folders and binaries (pipeline data root, models folders, downloads,
+  llama.cpp checkout or explicit binaries, the pipeline's model, Studio's
+  state folder) and environment for jobs and model servers. Studio, its jobs
+  (which now run in the workspace root), doctor.py and the launcher read the
+  active one; `--workspace` picks another. Setup's folder fields write to
+  the running workspace.
+- Models per subject (Settings): the measured best model per subject, and a
+  pick that overrides it for `auto` whenever the subject is at least 30% of
+  the prompt, before any model has enough graded results.
+- Tool approval rules (`scripts/tool_rules.py`, Settings → Tool approval):
+  ordered allow/ask/deny rules on server and tool globs, kind of operation
+  (from MCP annotations) and argument regexes with paths and negation, with
+  hourly limits, expiry and hit counts; then mcp.json `autoApprove`, quick
+  settings per kind, and a default. Approval cards in chat offer
+  *always allow this tool*, *these exact arguments* and *always deny*
+  (owner only). A tester shows what a call would get and why.
+- Transfer receiver: IPv6 binds (`--family`, bracketed hosts,
+  `IPV6_V6ONLY`), from the local working copy.
+
+### Added (tuning in LM Studio)
+- `scripts/eval_lmstudio.py`: the adaptive tuner's evaluator for a model
+  that will run in LM Studio, here or on another machine. It waits for the
+  transferred candidate to appear, asks it a fixed seeded TestQA sample (or
+  your own tasks) at temperature 0, and prints the score: accuracy,
+  not-hallucinated, or a cost-weighted utility. `adaptive_tuner.py tune
+  --worker local` writes candidates locally for the transfer watcher and
+  scores them with any evaluator. Job kinds *Adaptive scale tuning* and
+  *Score a candidate in LM Studio* (Jobs → Tuning). Nothing is deleted
+  unless `--auto-delete`.
+
+### Added (clients)
+- Godot client as a full UI (`viz/godot`, `./neuronscope godot`): Connect
+  (address, token, a trusted certificate, or pairing; connections
+  remembered), Chat with reply checks and right/wrong labels, Models, Jobs
+  (forms from Studio's job specs, filled from the workspace), Projects
+  (approve, start, review results, answer questions, requirements), Review,
+  native 3D (traces and review periods, layer filter, screenshots),
+  Settings, Setup and Lab. It runs on another computer by default, so
+  drawing never takes the model's GPU. A paired device gets the tabs it may
+  use. `NS_SHOTS` screenshots every tab.
+- Terminal client (`scripts/ns.py`, `./neuronscope cli`): every MCP tool as
+  a command, interactive chat with `/check`, `/right`, `/wrong`, `follow`
+  for job logs, and workspaces, models per subject, tool approval and
+  restart for a remote Studio; `--cafile` for a self-signed Studio.
+- `/api/status` says the caller's role (owner or device) and the workspace.
+
+### Added (links between sections)
+- Messages and fixes that name another section ("Setup → Build llama.cpp",
+  "Settings → Workspaces", "Jobs → Evaluate"…) are links on every page; the
+  reply check, routing and load errors carry links to where they are fixed.
+  Jobs open filled in from the address (`/jobs#kind=…&field=…`) and fill
+  llama.cpp binaries and the pipeline's GGUF from the workspace; Studio's
+  tabs and a model's settings field open from `/#…`. Models without stats
+  link to a TestQA job for them; the Lab's desktop viewers and the Review
+  page link to their jobs; project errors show on the page with links.
+
+### Fixed
+- Saving a load preset (`/api/config`) wrote into `config.json`'s Studio
+  section instead of the model settings: two functions shared a name.
+- README and Getting Started command blocks are safe to paste whole (no
+  `<placeholders>`, Studio in its own block). doctor.py names the Vulkan ICD
+  that fails to load and its package, and which one to pin. install.sh
+  repairs a reused venv before installing torch, so pip reports no conflicts.
+
+### Added (per-project requirements)
+- Each project has its own requirement list (tools, libraries, Python
+  packages, hardware, NeuronScope features, notes), inferred from its
+  checkout's build files when created or re-scanned (CMake, Meson, xmake,
+  premake, autotools, Cargo, Go, Node, Python, Docker, Gradle, Maven, Zig,
+  Godot, Nix, vcpkg, Conan, just, .NET), editable on the project page, and
+  checked on this machine with the fix for its OS (pkg-config for libraries,
+  the project's virtualenv for packages). Start answers 409 with what is
+  missing unless forced; workers are told what the machine has and lacks.
+  `ns_requirements.py project <dir>`; MCP `project_requirements`,
+  `set_project_requirements`, `scan_project_requirements`, and `force` on
+  `start_project`.
+
+### Added (neuron review)
+- Review page (`/review`) and `scripts/neuron_review.py`: every reply
+  NeuronScope looks at is stored as an activation profile with its source
+  (TestQA, other benchmarks, chat checks, project work, live scoring), kind,
+  subjects, verdict, risk and time. Per neuron: Cohen's d between wrong and
+  right answers, correlation with the classifier's risk, or firing rate,
+  coloured only above a noise floor corrected for the number of neurons and
+  replies. Filters by source, subject, verdict and dates; error rate per
+  day, week or month; heatmap; strongest neurons in each direction; and the
+  periods played as frames in the 3D view.
+- Chat checks and background scoring record observations automatically;
+  *right / wrong* under a check labels the reply. Jobs → Review ingests
+  TestQA results and any graded JSONL (re-running each reply through the
+  model for its activations). `HScorer.profile()` (no classifier needed).
+- MCP tools `review_sources`, `review_summary`, `review_label`; job kinds
+  `review_testqa`, `review_items`.
+
+### Added (requirements)
+- `scripts/ns_requirements.py` and Setup → Requirements: what each feature
+  needs (Python packages at the versions `requirements*.txt` set, programs,
+  llama.cpp builds and their GPU backends, ROCm/Vulkan/CUDA device access and
+  groups, memory), what this machine has, and the fix for its package
+  manager; vendors the machine lacks are n/a. Install buttons for missing
+  Python packages (catalog only, a job); environment snapshots, diffs and a
+  frozen requirements file. MCP tool `requirements`; job kinds
+  `install_package`, `env_snapshot`.
+
+### Added (everything from the browser)
+- After `./install.sh`, no terminal is needed: an app-menu entry (Linux),
+  `./neuronscope` and `NeuronScope.bat` start Studio (`scripts/launch.py`)
+  and open it, on Setup until llama-server and models are found. Studio's
+  main page points at Setup while they are missing.
+- Setup page (`/setup`): models folders, llama-server, cett-dump, unloading,
+  routing thresholds and worker limits, saved to `~/.neuronscope/config.json`
+  (read at startup, flags still win) and applied at once where possible;
+  build llama.cpp with a live log; hardware (devices on/off, a llama-server
+  per backend or device, pinned ROCm, environment); the health check;
+  restart Studio. Network exposure stays in the file and flags only.
+- Lab page (`/lab`): start, open and stop the live view, 3D replay (with a
+  trace picker), the pipeline dashboard, the quantization, scale-sweep and
+  adaptive-tuning labs and the transfer page, from Studio.
+- Jobs: 46 kinds (was 10): the H-Neuron pipeline stage by stage, building
+  llama.cpp, vision, analysis (cross-validation, per-task neurons, score
+  spikes, code hallucination, memory budget), selective merge, MoE expert
+  sweep, and the desktop viewers. Jobs support positional arguments and a
+  non-Python interpreter; a test checks every field against its script.
+- `docs/UI_AND_CLI.md`: every feature's place in the UI, its command and its
+  MCP tool. One navigation bar across Studio's pages.
+- Fixed: the timeline's theme list offered `_ui`, which is not a theme.
+
+### Added (connect)
+- NeuronScope as an MCP server (`scripts/ns_mcp.py`, dependency-free): 26
+  tools over Studio's API (models, chat, reply checks, routing, stats,
+  devices, doctor, jobs, projects, traces), with read-only and destructive
+  hints. Served by Studio at `/mcp` (streamable HTTP; refuses other web
+  origins and non-JSON) and as a stdio process. Tested with the official
+  `mcp` client over both transports. Every call carries the caller's token.
+- Studio's Connect page (`/connect`): settings for Cline (OpenAI-compatible
+  provider with a picker of this Studio's models, and the MCP entry), Claude
+  Desktop and other OpenAI clients, with copy buttons, and a button that
+  creates a revocable app token (a paired device). `scripts/ns_connect.py`
+  prints the same and writes Cline's or Claude Desktop's config, keeping a
+  backup and other servers. `POST /api/route` and `GET /api/doctor`.
+- Fixed: a job log request for an unknown job id returned an empty log
+  instead of 404.
+
+### Fixed (from a newcomer dry run of the docs)
+- TestQA crashed while printing per-subject results when a subject had no
+  right answers.
+- `install.sh --no-torch` (new) skips PyTorch for Studio, TestQA, Projects,
+  transfer and the llama.cpp path; `requirements-core.txt` holds everything
+  that does not need it (`accelerate` used to pull a multi-GB PyTorch in
+  silently). A failed PyTorch install now gives advice for this machine
+  (CPU, CUDA or ROCm) instead of always pointing at ROCm, and the installer
+  ends by pointing at `doctor.py`.
+- `doctor.py`: hardware advice from the detected devices (it assumed a Vega
+  laptop), a devices section, build hints that use `build_llama_tools.sh` and
+  `NS_LLAMA`, stage names instead of bare numbers, and a next step for Studio
+  as well as for the pipeline.
+- Studio prints the model ids it found at startup (what `"model"` and
+  TestQA's `<model-id>` need).
+- `cett-dump --help` lists its own flags; `ns_transfer_mcp.py --help` prints
+  help instead of waiting on stdin; `--sandbox` without Docker says what to do.
+- Docs: a glossary for enthusiasts (`docs/GLOSSARY.md`), how to get a first
+  model, a way to verify the first extraction, a plain-language overview of
+  the pipeline, the dataset link, the `--allow-exec` / `--sandbox` trade-off in
+  the quick starts, and a broken README link.
+
 ### Security
 - Studio refuses to start a backend on a port something else already holds
   (an orphaned server would otherwise answer the health check).

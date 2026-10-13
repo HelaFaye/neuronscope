@@ -25,6 +25,15 @@ rarely the encoder's (and its features are what H-Neuron edits of the
 the base model's existing mmproj GGUF keeps working. merge_export.py --vision
 writes the language GGUF and, where llama.cpp can convert it, the projector.
 
+Where (`--layers`): by default every layer trains. `--layers 10-17,20`
+limits training to those decoder layers: adapters only there with LoRA and
+QLoRA, and only their weights with `--method full`. `--layers plan` takes
+`focus_layers` from the data's plan.json: the layers where the neuron review
+found the model's wrong answers differ most from its right ones on the
+failing subjects (deficits.py --review-model). Changing fewer layers moves
+less of what the model already does well, and puts the change where the
+measured difference is.
+
 Which method:
   qlora   base weights in 4-bit NF4, adapters in 16-bit. Least memory; needs a
           CUDA GPU that bitsandbytes supports.
@@ -176,17 +185,86 @@ def load_model(a, rep):
     return model, tok, prec
 
 
-def lora_config(a):
+def parse_layers(spec: str | None, data: Path | None = None) -> list[int] | None:
+    """'all' / None -> None; '3-5,9' -> [3, 4, 5, 9]; 'plan' -> plan.json focus_layers."""
+    if not spec or spec == "all":
+        return None
+    if spec == "plan":
+        try:
+            fl = json.loads((Path(data) / "plan.json").read_text()).get("focus_layers") or {}
+        except (OSError, ValueError):
+            raise SystemExit(f"--layers plan: no plan.json in {data}") from None
+        if not fl.get("layers"):
+            raise SystemExit("--layers plan: plan.json has no focus layers ("
+                             + (fl.get("note") or "run deficits.py with --review-model") + "); use --layers all")
+        return sorted(int(x) for x in fl["layers"])
+    out = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        elif part:
+            out.add(int(part))
+    return sorted(out)
+
+
+def n_layers(model) -> int | None:
+    cfg = model.config
+    for c in (cfg, getattr(cfg, "text_config", None)):
+        if c is not None and getattr(c, "num_hidden_layers", None):
+            return int(c.num_hidden_layers)
+    return None
+
+
+def check_layers(layers, model) -> None:
+    if layers is None:
+        return
+    n = n_layers(model)
+    if n is not None and (min(layers) < 0 or max(layers) >= n):
+        raise SystemExit(f"--layers {layers}: this model has layers 0-{n - 1}. Focus layers from the neuron review "
+                         "fit only a model of the same architecture as the GGUF the review recorded.")
+
+
+def freeze_outside(model, layers) -> int:
+    """--method full with --layers: only the chosen decoder layers learn. -> trainable parameter count."""
+    import re as _re
+    keep = set(layers)
+    n = 0
+    for name, prm in model.named_parameters():
+        m = _re.search(r"\.layers\.(\d+)\.", name)
+        prm.requires_grad_(bool(m) and int(m.group(1)) in keep and "vision" not in name)
+        n += prm.numel() if prm.requires_grad else 0
+    return n
+
+
+def decoder_linear_names(model) -> list[str]:
+    """The linear modules inside the decoder layers (q_proj, ..., down_proj): what
+    all-linear means, spelled out, since peft needs names to combine with layers."""
+    import torch.nn as nn
+    names = set()
+    for name, mod in model.named_modules():
+        if ".layers." in name and "vision" not in name and (isinstance(mod, nn.Linear)
+                                                             or type(mod).__name__ in ("Linear4bit", "Linear8bitLt")):
+            names.add(name.rsplit(".", 1)[-1])
+    return sorted(names)
+
+
+def lora_config(a, model=None):
     if a.method == "full":
         return None
     from peft import LoraConfig
     targets = "all-linear" if a.lora_targets == "all-linear" else a.lora_targets.split(",")
+    if targets == "all-linear" and getattr(a, "layer_list", None) is not None and model is not None:
+        targets = decoder_linear_names(model)
     extra = {}
     if a.vision:
         # language model and projector only; the vision encoder stays as it is
         frozen = "vision_tower|vision_model|visual" + ("|multi_modal_projector|mm_projector|merger|connector"
                                                        if a.freeze_projector else "")
         extra["exclude_modules"] = rf".*({frozen})\..*"
+    if getattr(a, "layer_list", None) is not None:
+        extra["layers_to_transform"] = a.layer_list
     return LoraConfig(r=a.lora_r, lora_alpha=a.lora_alpha, lora_dropout=a.lora_dropout,
                       target_modules=targets, task_type="CAUSAL_LM", **extra)
 
@@ -221,9 +299,15 @@ def train(a) -> int:
         print("note: --fsdp is meant for --method full; adapters train fine with plain data parallelism")
     model, tok, prec = load_model(a, rep)
     data = Path(a.data)
+    a.layer_list = parse_layers(a.layers, data)
+    check_layers(a.layer_list, model)
+    if a.layer_list is not None:
+        print(f"training layers {a.layer_list} of {n_layers(model)}")
+        if a.method == "full":
+            print(f"  {freeze_outside(model, a.layer_list):,} trainable parameters")
     out = Path(a.out)
     from trl import SFTConfig, SFTTrainer
-    peft_cfg = lora_config(a)
+    peft_cfg = lora_config(a, model)
     sft_file, dpo_file = ("sft_vision.jsonl", "dpo_vision.jsonl") if a.vision else ("sft.jsonl", "dpo.jsonl")
     extra = {"max_length": None} if a.vision else {}      # truncation would cut image tokens
     sft_args = config(SFTConfig, **{**common_args(a, prec, out / "sft-run", model), **extra},
@@ -258,6 +342,7 @@ def train(a) -> int:
         tok.save_pretrained(out)
     meta = {"base": a.model, "method": a.method, "vision": bool(a.vision), "data": str(data), "dpo": bool(a.dpo),
             "lora": None if a.method == "full" else {"r": a.lora_r, "alpha": a.lora_alpha, "targets": a.lora_targets},
+            "layers": a.layer_list,
             "precision": prec, "hardware": rep}
     (out / "neuronscope-finetune.json").write_text(json.dumps(meta, indent=2))
     print(f"wrote {out}")
@@ -278,6 +363,9 @@ def main(argv=None) -> int:
     p.add_argument("--fsdp", action="store_true", help="shard weights across GPUs (for --method full)")
     p.add_argument("--launch", type=int, default=0, metavar="N_GPUS", help="re-run this command under accelerate on N GPUs")
     p.add_argument("--check", action="store_true", help="print the hardware report and exit")
+    p.add_argument("--layers", default="all",
+                   help="all (default), a list like 10-17,20, or plan: the focus layers deficits.py found in the "
+                        "neuron review")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--lora-dropout", type=float, default=0.05)

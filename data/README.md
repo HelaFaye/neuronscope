@@ -7,8 +7,10 @@ Put the TriviaQA parquet files here:
 
 They ship with the upstream H-Neurons repo, or:
 
-    huggingface-cli download mandarjoshi/trivia_qa --repo-type dataset \
+    hf download mandarjoshi/trivia_qa --repo-type dataset \
         --include "rc.nocontext/*" --local-dir data/TriviaQA
+
+(`hf` comes with `huggingface_hub`; older versions call it `huggingface-cli`.)
 
 Generated artifacts (consistency_samples.jsonl, answer_tokens.jsonl,
 *_qids.json, activations/) land here too and are gitignored.

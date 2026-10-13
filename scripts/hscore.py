@@ -33,15 +33,18 @@ sys.path.insert(0, HERE)
 
 
 class HScorer:
-    def __init__(self, binary: str, gguf: str, classifier: str, ngl: int = 99, batch: int = 4096,
+    def __init__(self, binary: str, gguf: str, classifier: str | None, ngl: int = 99, batch: int = 4096,
                  device: str = "", timeout: float = 600, tokenizer=None):
+        """`classifier` may be None: profile() then works, score() and trace() need one."""
         self.binary, self.gguf, self.ngl, self.batch, self.device = binary, gguf, ngl, batch, device
         self.timeout = timeout
-        blob = np.load(classifier)
-        self.coef = np.asarray(blob["coef"], dtype=np.float32)
-        self.intercept = float(blob["intercept"])
-        self.n_layers = int(blob["n_layers"]) if "n_layers" in blob else None
-        self.n_neurons = int(blob["n_neurons"]) if "n_neurons" in blob else None
+        self.coef, self.intercept, self.n_layers, self.n_neurons = None, 0.0, None, None
+        if classifier:
+            blob = np.load(classifier)
+            self.coef = np.asarray(blob["coef"], dtype=np.float32)
+            self.intercept = float(blob["intercept"])
+            self.n_layers = int(blob["n_layers"]) if "n_layers" in blob else None
+            self.n_neurons = int(blob["n_neurons"]) if "n_neurons" in blob else None
         if self.n_layers and self.n_neurons and self.coef.size != self.n_layers * self.n_neurons:
             raise ValueError("classifier coefficient size does not match its n_layers x n_neurons "
                              "(MoE classifiers are not supported for live scoring)")
@@ -109,16 +112,28 @@ class HScorer:
             raise ValueError("MoE models are not supported for live scoring")
         return agg, n_layers
 
-    def score(self, messages: list[dict], response: str) -> dict:
+    def profile(self, messages: list[dict], response: str) -> dict:
+        """CETT of every MLP neuron averaged over the response: {cett [L, N],
+        n_tokens}, plus score and prob when a classifier is loaded. One prefill."""
         with self.lock, tempfile.TemporaryDirectory(prefix="hscore-") as work:
             text, ids, start = self._prepare(messages, response, work)
             agg, n_layers = self._dump(text, [[start, -1]], work)
-        feats = (agg[0] * self._col_norms(n_layers)).ravel().astype(np.float32)
-        if feats.size != self.coef.size:
-            raise ValueError(f"feature size {feats.size} != classifier {self.coef.size}: wrong classifier for this model?")
-        s = float(feats @ self.coef + self.intercept)
-        return {"score": s, "prob": 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, s)))),
-                "n_tokens": int(len(ids) - start)}
+        cett = (agg[0] * self._col_norms(n_layers)).astype(np.float32)
+        out = {"cett": cett, "n_tokens": int(len(ids) - start)}
+        if self.coef is not None:
+            feats = cett.ravel()
+            if feats.size != self.coef.size:
+                raise ValueError(f"feature size {feats.size} != classifier {self.coef.size}: "
+                                 "wrong classifier for this model?")
+            s = float(feats @ self.coef + self.intercept)
+            out.update(score=s, prob=1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, s)))))
+        return out
+
+    def score(self, messages: list[dict], response: str) -> dict:
+        if self.coef is None:
+            raise ValueError("no classifier loaded")
+        p = self.profile(messages, response)
+        return {"score": p["score"], "prob": p["prob"], "n_tokens": p["n_tokens"]}
 
     def trace(self, messages: list[dict], response: str, bins: int = 512, max_frames: int = 512) -> dict:
         """Per-token CETT over the response (one span per token, or per `stride`
@@ -126,6 +141,8 @@ class HScorer:
         -> {frames [T, L, bins], scores [T] (logits), prob [T], pieces [T], stride,
             h_cells, col_weight, n_layers}"""
         from trace_sample import bin_axis, classifier_cells
+        if self.coef is None:
+            raise ValueError("no classifier loaded")
         with self.lock, tempfile.TemporaryDirectory(prefix="htrace-") as work:
             text, ids, start = self._prepare(messages, response, work)
             n = len(ids) - start

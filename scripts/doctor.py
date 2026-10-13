@@ -122,6 +122,55 @@ def check_cuda(gpus=None, torch=None):
         add("cuda", "note", WARN if "newer than" in n else OK, n)
 
 
+def check_vulkan_icds(icds=None):
+    """A driver failed to load: try each installed ICD alone and say which."""
+    import accelerators
+    icds = accelerators.vulkan_icds() if icds is None else icds
+    bad = [i for i in icds if not i["ok"]]
+    good = [i for i in icds if i["gpu"]] or [i for i in icds if i["ok"]]
+    if not bad:
+        add("compute", "vulkan ICD conflict", WARN, "a driver failed to initialise and was skipped",
+            "run VK_LOADER_DEBUG=driver vulkaninfo --summary to see which", "llama.cpp may pick the wrong driver")
+        return
+    names = ", ".join(os.path.basename(i["path"]) + (f" (package {i['owner']})" if i.get("owner") else "")
+                      for i in bad)
+    pin = good[0]["path"] if good else None
+    fix = []
+    if pin:
+        fix.append(f"use the working one: export VK_DRIVER_FILES={pin}  (or set it as the environment of the "
+                   f"Vulkan devices in Studio: Setup -> Hardware)")
+    owners = sorted({i["owner"] for i in bad if i.get("owner")})
+    if owners:
+        fix.append("or remove the broken driver's package: " + ", ".join(owners))
+    add("compute", "vulkan ICD conflict", WARN, f"fails to load: {names}",
+        "; ".join(fix) or "remove the failing manifest(s) from /usr/share/vulkan/icd.d",
+        "llama.cpp and wgpu may pick the broken driver")
+
+
+_DEVS = {}
+
+
+def _devices():
+    """Accelerators as Studio's worker pool sees them (scripts/accelerators.py)."""
+    if "list" not in _DEVS:
+        try:
+            import accelerators
+            _DEVS["list"] = accelerators.detect(accelerators.load_config())
+        except Exception:
+            _DEVS["list"] = []
+    return _DEVS["list"]
+
+
+def check_devices():
+    for d in _devices():
+        mem = "memory unknown" if d["memory_total"] is None else \
+            f"{(d['memory_free'] or 0) / 2**30:.1f} of {d['memory_total'] / 2**30:.1f} GiB free"
+        if not d["enabled"]:
+            add("devices", d["id"], SKIP, f"{d['name']}, off" + (f" ({d['note']})" if d.get("note") else ""))
+        else:
+            add("devices", d["id"], OK, f"{d['name']}, {mem}" + (f"; {d['note']}" if d.get("note") else ""))
+
+
 def check_compute():
     torch, _ = have("torch")
     try:
@@ -138,9 +187,17 @@ def check_compute():
                 add("compute", "torch GPU", OK, f"{name}"
                     + (f" (ROCm {hip})" if hip else ""))
             else:
-                add("compute", "torch GPU", WARN, "CPU only",
-                    "expected on a Vega iGPU; use the llama.cpp Vulkan path",
-                    "PyTorch extraction will be slow")
+                gpus = [d for d in _devices() if d["backend"] != "cpu" and d["enabled"]]
+                amd = [d for d in gpus if d.get("vendor") == "amd"]
+                if amd:
+                    fix = (f"{amd[0]['name']} found: use the llama.cpp path (Vulkan or ROCm), "
+                           "which needs no PyTorch GPU support; see docs/HARDWARE.md")
+                elif gpus:
+                    fix = (f"{gpus[0]['name']} found but torch cannot use it: re-run ./install.sh "
+                           "(it picks the wheel for this GPU), or use the llama.cpp path")
+                else:
+                    fix = "no GPU found; CPU works, and the llama.cpp path is the faster way to extract"
+                add("compute", "torch GPU", WARN, "CPU only", fix, "PyTorch extraction will be slow")
         except Exception as e:
             add("compute", "torch GPU", WARN, str(e)[:60])
 
@@ -160,13 +217,8 @@ def check_compute():
             else:
                 add("compute", "vulkan device", FAIL, "no device enumerated",
                     "check your ICD and driver", "llama.cpp Vulkan")
-            if "Skipping this driver" in out or "-3 from call" in out:
-                icd = "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
-                add("compute", "vulkan ICD conflict", WARN,
-                    "a driver failed to initialise and was skipped",
-                    f"export VK_DRIVER_FILES={icd}" if os.path.exists(icd)
-                    else "remove the failing ICD",
-                    "llama.cpp and wgpu may pick the broken driver")
+            if "Skipping this driver" in out or "-3 from call" in out or "Failed to CreateInstance" in out:
+                check_vulkan_icds()
         except Exception as e:
             add("compute", "vulkan", WARN, str(e)[:60])
 
@@ -187,8 +239,9 @@ def check_llama(root):
     root = os.path.expanduser(root)
     if not os.path.isdir(root):
         add("llama.cpp", "source tree", WARN, f"{root} not found",
-            "git clone https://github.com/ggml-org/llama.cpp",
-            "extraction, serving, merging to GGUF")
+            "scripts/build_llama_tools.sh --backend vulkan  (or cpu, cuda, hip, metal), or point "
+            "NS_LLAMA at an existing checkout",
+            "Studio, extraction, serving, merging to GGUF")
         return
     add("llama.cpp", "source tree", OK, root)
     bins = {
@@ -203,8 +256,7 @@ def check_llama(root):
         status = OK if found else WARN
         fix = (f"cmake --build {root}/build --target {b} -j"
                if b != "llama-cett-dump" else
-               "copy llama-tools/cett-dump into llama.cpp/tools and rebuild "
-               "(see BUILD.md)")
+               f"scripts/build_llama_tools.sh --dir {root}  (adds cett-dump and rebuilds)")
         add("llama.cpp", b, status, p if found else "", fix, why)
     for s in ("convert_hf_to_gguf.py", "convert_lora_to_gguf.py"):
         add("llama.cpp", s, OK if os.path.exists(os.path.join(root, s)) else WARN,
@@ -255,15 +307,17 @@ def check_model(gguf):
 
 
 def check_data(root):
+    # Stage numbers follow docs/PIPELINE.md. Stages 6 (visualise) and 8 (apply
+    # at runtime) write no files, so there is nothing to check for them.
     stages = [
-        ("data/consistency_samples.jsonl", "1 collect",
-         "scripts/collect_responses_lmstudio.py"),
-        ("data/answer_tokens.jsonl", "2 tag", "scripts/make_answer_tokens.py"),
-        ("data/train_qids.json", "3 split", "scripts/sample_balanced_ids.py"),
-        ("data/activations/neuron_index.json", "4 extract",
+        ("data/consistency_samples.jsonl", "1 collect answers",
+         "scripts/collect_responses_lmstudio.py  (needs data/TriviaQA, see data/README.md)"),
+        ("data/answer_tokens.jsonl", "2 tag answer tokens", "scripts/make_answer_tokens.py"),
+        ("data/train_qids.json", "3 balanced split", "scripts/sample_balanced_ids.py"),
+        ("data/activations/neuron_index.json", "4 extract CETT",
          "scripts/extract_activations_gguf.py"),
-        ("models/h_neurons.json", "5 classify", "scripts/classifier.py"),
-        ("profiles", "7 tune", "scripts/tune_scale_server.py"),
+        ("models/h_neurons.json", "5 find H-Neurons", "scripts/classifier.py"),
+        ("profiles", "7 tune the scale", "scripts/tune_scale_server.py"),
         ("adapters", "9 export", "scripts/export_lora.py"),
     ]
     first_missing = None
@@ -287,18 +341,43 @@ def check_ports():
 
 # ---------------------------------------------------------------------- main
 
+def studio_section(r):
+    """Where in Studio a problem is fixed (the same places the web pages link to)."""
+    text = f"{r['stage']} {r['name']} {r['fix']}".lower()
+    for keys, where in ((("llama-server", "cett", "llama.cpp", "build_llama"), "/setup#build"),
+                        (("vulkan", "icd", "rocm", "cuda", "gpu"), "/setup#hardware"),
+                        (("pip install", "package", "python"), "/setup#requirements"),
+                        (("workspace", "models folder"), "/settings#workspaces")):
+        if any(k in text for k in keys):
+            return where
+    return None
+
+
 def main():
+    import ns_workspace
     p = argparse.ArgumentParser()
-    p.add_argument("--gguf", default=os.environ.get("NS_GGUF"))
-    p.add_argument("--llama", default=os.environ.get("NS_LLAMA", "~/llama.cpp"))
-    p.add_argument("--root", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ".."))
+    p.add_argument("--workspace", help="whose folders to check (default: the active workspace, Settings -> Workspaces)")
+    p.add_argument("--gguf")
+    p.add_argument("--llama")
+    p.add_argument("--root")
     p.add_argument("--json", action="store_true")
     a = p.parse_args()
+    # Flags, then NS_* variables, then the workspace: no layout is assumed.
+    if a.workspace:
+        if a.workspace not in ns_workspace.names():
+            print(f"no workspace {a.workspace!r}; have {', '.join(ns_workspace.names())}", file=sys.stderr)
+            return 2
+        os.environ["NS_WORKSPACE"] = a.workspace
+    ws = ns_workspace.active()
+    a.gguf = a.gguf or os.environ.get("NS_GGUF") or ws["gguf"]
+    a.llama = a.llama or os.environ.get("NS_LLAMA") or ws["llama_dir"]
+    a.root = a.root or os.environ.get("NS_ROOT") or ws["root"]
+    add("core", "workspace", OK, f"{ws['name']} (root {ws['root']})")
 
     check_python()
     check_packages()
     check_compute()
+    check_devices()
     check_llama(a.llama)
     check_model(a.gguf)
     first_missing = check_data(os.path.abspath(a.root))
@@ -332,17 +411,28 @@ def main():
     print("\nNEXT")
     if fails:
         print(f"  Fix first: {fails[0]['name']} -- {fails[0]['fix']}")
-    elif first_missing:
-        label, how = first_missing
-        print(f"  Stage {label} has no output yet. Run:\n    {how}")
-        if label.startswith("4"):
-            print("  This is the gate: if llama-cett-dump prints one record "
-                  "per layer\n  on a toy prompt, the whole local half works.")
+        where = studio_section(fails[0])
+        if where:
+            print(f"  In Studio: http://127.0.0.1:7870{where}")
+        return 1
+    server = next((r["detail"] for r in results if r["name"] == "llama-server" and r["status"] == OK), None)
+    print("  Use and compare models (Studio: chat, /v1 API, TestQA, Projects):")
+    if server:
+        print("    ./neuronscope            (Studio in your browser; set your models folder under Settings)")
+        print(f"    or: python viz/studio.py --models-dir ~/models --server {server}")
     else:
-        print("  Every stage has output. Compare a suppressed model against "
-              "the base:\n    python scripts/merge_eval.py --endpoint "
-              "base=... --endpoint tuned=...")
-    return 1 if fails else 0
+        print("    first build llama-server:  scripts/build_llama_tools.sh --backend vulkan  (or cpu, cuda, hip, metal)")
+    print("\n  Find H-Neurons in a model (docs/PIPELINE.md):")
+    if first_missing:
+        label, how = first_missing
+        print(f"    stage {label} has no output yet:  python {how}")
+        if label.startswith("4"):
+            print("    This is the gate: if llama-cett-dump works on a toy prompt (docs/GETTING_STARTED.md),\n"
+                  "    the whole local half works.")
+    else:
+        print("    every stage has output. Compare a suppressed model against the base:\n"
+              "    python scripts/merge_eval.py --endpoint base=... --endpoint tuned=...")
+    return 0
 
 
 if __name__ == "__main__":

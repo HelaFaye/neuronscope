@@ -251,6 +251,13 @@ else:
 
 
 def main() -> None:
+    import argparse
+    p = argparse.ArgumentParser(
+        description="MCP server (stdio) for NeuronScope transfers. An MCP client starts it; "
+                    "it reads requests on stdin, so run on its own it waits silently.",
+        epilog='client config: {"mcpServers": {"neuronscope-transfer": {"command": "python", '
+               '"args": ["/path/to/neuronscope/scripts/ns_transfer_mcp.py"]}}}')
+    p.parse_args()
     ensure()
     mcp.run("stdio")  # no network listener
 

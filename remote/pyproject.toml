@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuronscope-remote"
+version = "0.1.0"
+description = "Let NeuronScope (or any MCP client) control the LLMs on this computer: LM Studio, Ollama, llama.cpp."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+tls = ["cryptography>=41"]
+
+[project.scripts]
+neuronscope-remote = "neuronscope_remote.agent:main"
+
+[tool.setuptools]
+packages = ["neuronscope_remote"]

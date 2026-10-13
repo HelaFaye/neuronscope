@@ -106,6 +106,21 @@ def declare(root, py):
             "needs": ["trace"],
             "desc": "Token-resolved 3D trace, scrubbable.",
         },
+        # Labs and dashboards: fixed argv, loopback only, no user-supplied values.
+        **{name: {"mode": name, "port": port, "script": script, "health": health, "needs": [], "desc": desc,
+                  "args": (lambda script, extra: lambda port, cfg: [
+                      py, "-u", os.path.join(root, script), "--port", str(port), *extra])(script, extra)}
+           for name, port, script, health, extra, desc in (
+               ("pipeline", 7861, "viz/control.py", "/api/modes", ["--root", root],
+                "Pipeline dashboard: what each stage has produced, stage launching, live logs."),
+               ("quant_lab", 8796, "viz/quant_lab.py", "/", [],
+                "Capability-preserving quantization: compare quants of one model, keep the H-Neuron edit."),
+               ("scale_sweep", 8797, "viz/scale_sweep_lab.py", "/", [],
+                "Sweep the suppression scale and see accuracy, abstention and damage at each step."),
+               ("adaptive_tuning", 8800, "viz/adaptive_tuning_lab.py", "/", [],
+                "Tune the scale on a remote worker, adaptively."),
+               ("transfer", 8798, "viz/transfer_lab.py", "/health", [],
+                "Send models between machines: encrypted browser-to-browser transfer."))},
     }
 
 

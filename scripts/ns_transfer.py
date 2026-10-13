@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -43,6 +44,47 @@ MAX_JSON = sec.MAX_JSON_BYTES
 MAX_NAME = 240
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{12,64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server bound to IPv6 only (no implicit IPv4-mapped bind)."""
+
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        # Make the bind semantics predictable across Linux and Windows.
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
+
+
+def normalize_bind_host(host: str) -> str:
+    """Normalize a bind host; bracketed literals are accepted for convenience.
+
+    For a bind argument, ``::`` is conventional. Brackets are normally used
+    in URLs, but stripping them here avoids confusing behavior when copied
+    from a URL. IPv6 zone identifiers (for link-local addresses) are retained.
+    """
+    value = (host or "").strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if not value or value.startswith("[") or value.endswith("]"):
+        raise ValueError(f"invalid bind host: {host!r}")
+    return value
+
+
+def server_class_for_host(host: str, family: str = "auto"):
+    """Choose a server socket family, auto-detecting literal IPv6 addresses.
+
+    ``--family ipv6`` is available for DNS names that resolve to IPv6 but do
+    not themselves contain a colon. ``auto`` preserves existing IPv4 behavior.
+    """
+    value = normalize_bind_host(host)
+    if family not in {"auto", "ipv4", "ipv6"}:
+        raise ValueError(f"unsupported address family: {family!r}")
+    selected = family
+    if selected == "auto":
+        selected = "ipv6" if ":" in value else "ipv4"
+    return IPv6ThreadingHTTPServer if selected == "ipv6" else ThreadingHTTPServer
 
 
 def sha256_file(path: Path, chunk: int = 8 * 1024 * 1024) -> str:
@@ -465,7 +507,9 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("serve", help="run the receiver")
-    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--host", default="127.0.0.1", help="bind address; use :: for all IPv6 interfaces")
+    s.add_argument("--family", choices=("auto", "ipv4", "ipv6"), default="auto",
+                   help="socket family (auto selects IPv6 for a literal IPv6 bind address)")
     s.add_argument("--port", type=int, default=8810)
     s.add_argument("--root", required=True)
     s.add_argument("--max-active", type=int, default=8, help="concurrent in-progress transfers")
@@ -506,19 +550,23 @@ def main(argv=None) -> int:
     if a.cmd == "serve":
         tls = bool(a.tls_cert and a.tls_key)
         try:
-            for w in sec.check_bind(a.host, token, tls=tls, allow_plaintext=a.allow_plaintext):
+            bind_host = normalize_bind_host(a.host)
+            server_class = server_class_for_host(bind_host, a.family)
+            for w in sec.check_bind(bind_host, token, tls=tls, allow_plaintext=a.allow_plaintext):
                 print("warning:", w, file=sys.stderr)
-        except sec.SecurityConfigError as e:
+        except (sec.SecurityConfigError, ValueError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
         Handler.receiver = Receiver(Path(a.root), a.max_active)
         Handler.token = token
-        srv = ThreadingHTTPServer((a.host, a.port), Handler)
+        srv = server_class((bind_host, a.port), Handler)
         if tls:
             ctx = sec.server_ssl_context(a.tls_cert, a.tls_key)
             srv.socket = ctx.wrap_socket(srv.socket, server_side=True, do_handshake_on_connect=False)
         scheme = "https" if tls else "http"
-        print(f"NeuronScope transfer receiver: {scheme}://{a.host}:{a.port}  root={Handler.receiver.root}"
+        display_host = f"[{bind_host}]" if ":" in bind_host else bind_host
+        print(f"NeuronScope transfer receiver: {scheme}://{display_host}:{a.port}  root={Handler.receiver.root}"
+              f"  family={server_class.address_family}"
               f"  auth={'token' if token else 'none (loopback only)'}")
         srv.serve_forever()
         return 0

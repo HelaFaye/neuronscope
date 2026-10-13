@@ -211,3 +211,18 @@ def test_m10_on_arm_board_splits_over_measured_gpus_before_the_mali(tmp_path):
     # With every M10 booked, a small model may still use the Mali.
     full = {f"cuda:{i}": 7 * GIB for i in range(4)}
     assert acc.place(devs, 4 * GIB, reserved=full)["devices"][0]["id"] == "vulkan:0"
+
+
+def test_vulkan_icd_conflict_names_the_broken_driver(tmp_path):
+    import doctor
+    d = tmp_path / "icd.d"
+    d.mkdir()
+    (d / "amd_icd64.json").write_text("{}")
+    (d / "radeon_icd.x86_64.json").write_text("{}")
+    ok = "GPU0:\n\tdeviceName = AMD Radeon Graphics (RADV RENOIR)\n\tvendorID = 0x1002\n"
+    icds = acc.vulkan_icds(dirs=[str(d)], probe=lambda p: ok if "radeon" in p else "")
+    assert [(i["ok"], i["gpu"]) for i in icds] == [(False, False), (True, True)]
+    doctor.results.clear()
+    doctor.check_vulkan_icds(icds)
+    r = doctor.results[-1]
+    assert "amd_icd64.json" in r["detail"] and f"VK_DRIVER_FILES={d}/radeon_icd.x86_64.json" in r["fix"]

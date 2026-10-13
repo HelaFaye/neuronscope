@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import glob
 import os
 import platform
 import re
@@ -165,6 +166,45 @@ def parse_vulkan_summary(text: str) -> list[dict]:
             elif k == "driverName":
                 cur["driver"] = v
     return devs
+
+
+ICD_DIRS = ("/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", "/usr/local/share/vulkan/icd.d")
+
+
+def icd_owner(path: str) -> str | None:
+    """The distro package that installed an ICD manifest, if the package manager knows."""
+    for cmd, pick in ((["pacman", "-Qoq", path], lambda o: o.split()[0]),
+                      (["dpkg", "-S", path], lambda o: o.split(":")[0]),
+                      (["rpm", "-qf", "--qf", "%{NAME}", path], lambda o: o.split()[0])):
+        out = _run(cmd, timeout=10)
+        if out and out.strip():
+            try:
+                return pick(out.strip())
+            except IndexError:
+                continue
+    return None
+
+
+def vulkan_icds(dirs=ICD_DIRS, probe=None) -> list[dict]:
+    """Every installed Vulkan driver manifest, tried on its own:
+    [{path, ok, devices, owner}]. A machine with a broken ICD next to a working
+    one (common after installing AMDVLK, a vendor driver or a Mesa variant)
+    makes the loader skip drivers or pick the wrong one; trying each manifest
+    alone says which. probe(path) -> vulkaninfo text, for tests."""
+    out = []
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "*.json"))):
+            if probe is not None:
+                text = probe(path)
+            else:
+                env = {**os.environ, "VK_DRIVER_FILES": path, "VK_ICD_FILENAMES": path}
+                text = _run(["vulkaninfo", "--summary"], timeout=20, env=env) or ""
+            devs = [x.get("name") for x in parse_vulkan_summary(text) if x.get("name")]
+            # llvmpipe is a CPU rasterizer: present, but no use for compute here.
+            real = [x for x in devs if "llvmpipe" not in x.lower()]
+            out.append({"path": path, "ok": bool(devs), "devices": devs, "gpu": bool(real),
+                        "owner": None if devs or probe is not None else icd_owner(path)})
+    return out
 
 
 def parse_rocminfo(text: str) -> list[str]:

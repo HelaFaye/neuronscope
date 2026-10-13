@@ -43,3 +43,35 @@ def test_resume_existing_partial(tmp_path):
     first=b'abcdef'*100; nt.request(base,'PUT',f"/v1/transfers/{meta['id']}/chunk",'x',first,headers={'Content-Range':f'bytes 0-{len(first)-1}/{size}','X-Chunk-SHA256':nt.sha256_bytes(first)},raw=True)
     final=nt.send_one(base,src,'x',chunk=1024)
     assert Path(final['path']).read_bytes()==src.read_bytes(); s.shutdown()
+
+
+def test_server_family_selection():
+    assert nt.server_class_for_host("127.0.0.1") is ThreadingHTTPServer
+    assert nt.server_class_for_host("::1") is nt.IPv6ThreadingHTTPServer
+    assert nt.server_class_for_host("[::1]") is nt.IPv6ThreadingHTTPServer
+    assert nt.server_class_for_host("transfer.example", "ipv6") is nt.IPv6ThreadingHTTPServer
+    assert nt.server_class_for_host("transfer.example", "ipv4") is ThreadingHTTPServer
+
+
+def test_normalize_bind_host():
+    assert nt.normalize_bind_host("[2001:db8::1]") == "2001:db8::1"
+    assert nt.normalize_bind_host("::") == "::"
+    try:
+        nt.normalize_bind_host("[::1")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("malformed bracketed bind host accepted")
+
+
+def test_ipv6_loopback_bind_if_available():
+    try:
+        s = nt.IPv6ThreadingHTTPServer(("::1", 0), nt.Handler)
+    except OSError as exc:
+        import pytest
+        pytest.skip(f"IPv6 loopback unavailable on this host: {exc}")
+    try:
+        assert ":" in s.server_address[0]
+        assert s.server_port > 0
+    finally:
+        s.server_close()

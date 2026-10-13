@@ -315,3 +315,29 @@ See [SECURITY.md](SECURITY.md).
 `/projects` splits a project into tasks by skill, keeps a plan you approve,
 starts worker models on whatever accelerators the machine has (AMD first), and
 sends every result back for review. See [DIRECTOR.md](DIRECTOR.md).
+
+## Settings
+
+`/settings`: workspaces (where models, llama.cpp, pipeline data and Studio's
+state live, by name), the default model per subject for `auto`, and tool
+approval rules for MCP tools in chat. See [SETTINGS.md](SETTINGS.md).
+
+## Review
+
+`/review` shows, for every neuron, how its activity relates to wrong answers
+across everything recorded for a model: chat checks (mark them right or
+wrong under the check), live scoring, project work, and TestQA runs and
+benchmarks ingested from Jobs → Review. Filter by source, subject, verdict
+and dates; play it over time in 3D. See [REVIEW.md](REVIEW.md).
+
+## Requirements
+
+Setup → Requirements lists what each feature needs and what is missing,
+installs missing Python packages, and keeps environment snapshots to
+compare. See [REQUIREMENTS.md](REQUIREMENTS.md).
+
+## Connect
+
+`/connect` has ready-made settings for Cline, Claude Desktop and other
+OpenAI-compatible apps, and Studio serves MCP at `/mcp` so agents can use
+NeuronScope's tools. See [CONNECT.md](CONNECT.md).

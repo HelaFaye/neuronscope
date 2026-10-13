@@ -23,34 +23,77 @@ abstain. NeuronScope extends the method in several directions:
 | **Vision H-Neurons** | the same method for CLIP/SigLIP: confident image-caption mismatches, `mmproj` editing | [docs/VISION.md](docs/VISION.md) |
 | **Studio** | LM Studio-style model library, chat with images, saved chats, Hugging Face downloads, and an OpenAI-compatible `/v1` server with JIT loading, idle unload and `model: "auto"` routing; chat with your documents (RAG), MCP tools with per-call approval, paired devices and linked machines' models, a jobs page for evaluation and retraining; plus a live suppression slider and MoE expert control | [docs/STUDIO.md](docs/STUDIO.md) |
 | **TestQA** | 210 graded items, 30 in each of seven subjects (reasoning, executable code, API existence, false-premise facts, instruction-following writing, generated-image vision) against any endpoints; per-subject right/hallucinated/abstained rates; paired comparison; feeds routing stats | [docs/TESTQA.md](docs/TESTQA.md) |
-| **Subject classifier + stats routing** | labels prompts (code, math, logic, science, factual, writing, vision); `model: "auto"` picks the model with the best measured record for that subject, from rolling per-model stats | [docs/TESTQA.md](docs/TESTQA.md#subject-classifier-and-routing) |
+| **Subject classifier + stats routing** | labels prompts (code, math, logic, science, factual, writing, vision); `model: "auto"` picks the model with the best measured record for that subject, from rolling per-model stats | [docs/TESTQA.md](docs/TESTQA.md#subject-classifier) |
 | **Transfer** | encrypted P2P browser transfer, resumable HTTPS CLI with watch mode, remote tuning worker, MCP control plane | [docs/TRANSFER.md](docs/TRANSFER.md) |
 | **External benchmarks** | CLIP_benchmark (ImageNetV2, ImageNet-Sketch, VTAB, ...) for CLIP and its edits; LiveBench and SWE-bench for chat/coding models, feeding stats; leaderboard (BenchLM) imports as reference | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | **Retraining on deficits** | turns measured failures into verified SFT and DPO data with replay and a holdout, trains with QLoRA, LoRA or full fine-tuning (DDP/FSDP), merges and converts to GGUF | [docs/RETRAINING.md](docs/RETRAINING.md) |
 | **Labs** | capability-preserving quantization, scale sweeps, adaptive remote tuning | [docs/LABS.md](docs/LABS.md) |
+| **Connect** | your models as the AI of Cline, Claude Desktop or any OpenAI-compatible app; NeuronScope's harness and lab as MCP tools (models, reply checks, jobs, projects), with a Connect page that writes the settings | [docs/CONNECT.md](docs/CONNECT.md) |
+| **Neuron review** | every neuron's link to wrong answers across tests, benchmarks and checked chat replies, filtered by source, subject and time, played over time in 3D | [docs/REVIEW.md](docs/REVIEW.md) |
+| **Clients** | the web pages, a terminal client (`./neuronscope cli`) and a Godot client (`./neuronscope godot`) over the same API; the Godot client is a full UI with a native 3D view, built to run on another computer so drawing never takes GPU memory from the model | [docs/CLIENTS.md](docs/CLIENTS.md) |
+| **Remote hosts** | use the models on computers that run LM Studio, Ollama or llama.cpp but not NeuronScope: a small agent there (distributed on its own) is controlled over MCP; same network, VPN (Tailscale, ZeroTier, WireGuard…), SSH, a public tunnel, or the host calling in from behind NAT; pairing with a short code, and the host's owner sees and revokes every controller | [docs/REMOTE.md](docs/REMOTE.md), [remote/](remote/README.md) |
+| **Settings** | named workspaces for every folder and binary (no fixed layout), the default model per subject for `auto`, and rules for when chat tool calls are allowed, asked or denied (by tool, kind of operation, argument regexes, rate limits) | [docs/SETTINGS.md](docs/SETTINGS.md) |
+| **Requirements** | what each feature needs (packages, programs, llama.cpp GPU backends, drivers, device access, memory), fixes for your OS, one-click Python installs, environment snapshots and diffs | [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) |
 | **Visualization** | 2D/3D activation maps, token-resolved timelines, live tracing proxy, weight views | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) |
 | **Merging** | neuron-granular selective merges, mergekit plugin, MoE expert-count sweeps | [docs/MERGING.md](docs/MERGING.md) |
+
+New to the terms (GGUF, CETT, H-Neurons, abstention, MCP…)? The
+[glossary](docs/GLOSSARY.md) explains each one and why it matters here.
 
 ## Quick start
 
 ```bash
-./install.sh && source venv/bin/activate     # picks CUDA / ROCm / MPS / CPU PyTorch
-python scripts/doctor.py                     # what is ready, and what to do next
+./install.sh            # picks CUDA / ROCm / MPS / CPU PyTorch, adds NeuronScope to the app menu
+./neuronscope           # or the app menu: starts Studio and opens it in your browser
 ```
 
-Full setup, including building llama.cpp with the `cett-dump` extractor:
-[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). Hardware notes:
-[docs/HARDWARE.md](docs/HARDWARE.md).
+From there everything is in the browser: **Setup** builds llama.cpp and finds
+your models, **Jobs** runs evaluations, retraining and every pipeline stage,
+**Lab** opens the labs and 3D views, **Projects** plans work for worker models,
+**Connect** sets up Cline. [docs/UI_AND_CLI.md](docs/UI_AND_CLI.md) maps every
+feature to its place in the UI, its command and its MCP tool.
+
+From a terminal instead:
 
 ```bash
-# Serve and chat with local GGUFs; OpenAI clients use http://127.0.0.1:7870/v1
-python viz/studio.py --models-dir ~/models --server ~/llama.cpp/build/bin/llama-server
+source venv/bin/activate
+#   ./install.sh --no-torch                  # lighter: Studio, TestQA, Projects and the llama.cpp path need no PyTorch
+python scripts/doctor.py                     # checks Python, packages, GPUs, llama.cpp, your model; says what to do next
+scripts/build_llama_tools.sh --backend vulkan  # llama.cpp + the cett-dump extractor (or cpu, cuda, hip, metal); ~5 min
+```
 
-# Benchmark endpoints on reasoning, coding (executed), facts and canaries
-python scripts/testqa.py --endpoint base=http://127.0.0.1:7870/v1@<model-id> --allow-exec
+Full setup: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). Hardware notes,
+including AMD APUs: [docs/HARDWARE.md](docs/HARDWARE.md).
 
-# Find H-Neurons in a CLIP model
-python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --images <imagefolder> --out runs/clip
+Each block below is safe to paste as a whole. Set your folders once (or set
+them on Studio's **Settings** page and skip the flags):
+
+```bash
+MODELS=~/models                               # the folder that holds your .gguf files
+LLAMA=~/llama.cpp/build/bin                   # where build_llama_tools.sh put llama-server
+```
+
+Serve and chat with local GGUFs. This keeps running; OpenAI clients use
+`http://127.0.0.1:7870/v1`. It prints the model ids it found.
+
+```bash
+python viz/studio.py --models-dir "$MODELS" --server "$LLAMA/llama-server"
+```
+
+In a second terminal, benchmark a model on reasoning, coding, facts and
+canaries. `--allow-exec` runs the model's code to grade it; `--sandbox docker`
+(or `podman`) keeps it in a container. Replace the id with one Studio printed:
+
+```bash
+MODEL_ID=acme/model-q4_k_m
+python scripts/testqa.py --endpoint "base=http://127.0.0.1:7870/v1@$MODEL_ID" --allow-exec --sandbox docker
+```
+
+Find H-Neurons in a CLIP model, from a folder of images:
+
+```bash
+IMAGES=~/Pictures/samples
+python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --images "$IMAGES" --out runs/clip
 ```
 
 ## Read before you trust a result

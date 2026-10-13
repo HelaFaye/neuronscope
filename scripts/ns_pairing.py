@@ -264,6 +264,9 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             raise ssl.SSLError("server certificate does not match the pinned fingerprint")
 
 
+_WARNED: set = set()
+
+
 def request(base: str, method: str, path: str, body: dict | None = None, token: str = "", fingerprint: str = "",
             timeout: float = 30, stream: bool = False):
     """JSON request to a Studio, pinning `fingerprint` when given. With stream=True
@@ -273,7 +276,8 @@ def request(base: str, method: str, path: str, body: dict | None = None, token: 
         conn = (PinnedHTTPSConnection(u.netloc, fingerprint, timeout=timeout) if fingerprint
                 else http.client.HTTPSConnection(u.netloc, timeout=timeout, context=ssl.create_default_context()))
     else:
-        if not sec.is_loopback(u.hostname or ""):
+        if not sec.is_loopback(u.hostname or "") and base not in _WARNED:
+            _WARNED.add(base)
             print(f"warning: {base} is plain HTTP; the device token crosses the network unencrypted "
                   "(fine only inside a VPN)", file=sys.stderr)
         conn = http.client.HTTPConnection(u.netloc, timeout=timeout)

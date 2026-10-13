@@ -42,6 +42,9 @@ import json
 import os
 import queue
 import re
+import secrets
+import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -49,6 +52,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -616,7 +620,7 @@ def wait_healthy(port, proc, timeout=600):
 
 def start_server(model, settings, port):
     if not STATE["server_bin"]:
-        return False, "no --server binary configured"
+        return False, "no llama-server set: Setup -> Build llama.cpp, or point Settings -> Workspaces at one"
     stop_server()
     if port_busy(port):
         # Something else (often an orphaned llama-server) holds the port and would
@@ -725,7 +729,8 @@ def stop_server():
 
 # What a paired device may POST. Everything else needs the owner's token.
 DEVICE_POSTS = {"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/api/chat", "/api/chats",
-                "/api/chats/delete", "/api/rag/search", "/api/tools/approve", "/api/trace"}
+                "/api/chats/delete", "/api/rag/search", "/api/tools/approve", "/api/trace",
+                "/mcp", "/api/route"}
 
 LINKS = {"cache": {}, "lock": threading.Lock()}
 LINK_SEP = ":"
@@ -743,8 +748,19 @@ def save_links(links: list[dict]) -> None:
     sec.write_secret_file(Path(STATE["links_path"]), json.dumps({"links": links}, indent=1))
 
 
+REMOTE: dict = {"obj": None}
+
+
+def remote():
+    """Remote hosts: computers that run models and the NeuronScope Remote agent, not Studio."""
+    if REMOTE["obj"] is None:
+        import remote_hosts
+        REMOTE["obj"] = remote_hosts.Remote(load_links, save_links)
+    return REMOTE["obj"]
+
+
 def link_models(refresh: bool = False) -> list[dict]:
-    """Models of every linked host, as '<link>:<remote id>' (cached 30 s)."""
+    """Models of every linked Studio and remote host, as '<link>:<remote id>' (cached 30 s)."""
     out = []
     for ln in load_links():
         with LINKS["lock"]:
@@ -758,11 +774,17 @@ def link_models(refresh: bool = False) -> list[dict]:
                     "%Y-%m-%d %H:%M", time.localtime(ln["expires"])) + "; ask that host for a new pairing link")
             continue
         try:
-            r = ns_pairing.request(ln["url"], "GET", "/v1/models", token=ln["token"],
-                                   fingerprint=ln.get("fingerprint", ""), timeout=5)
-            ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"link:{ln['name']}",
-                   "remote_id": m["id"], "link": ln["name"], "vision": m.get("vision", False)}
-                  for m in r.get("data", []) if m.get("id") != "auto"]
+            if ln.get("kind") == "agent":
+                ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"remote:{ln['name']}",
+                       "remote_id": m["id"], "link": ln["name"], "vision": False, "loaded": m.get("loaded"),
+                       "backend": m.get("backend")}
+                      for m in remote().models(ln) if m.get("type") not in ("embeddings", "embedding")]
+            else:
+                r = ns_pairing.request(ln["url"], "GET", "/v1/models", token=ln["token"],
+                                       fingerprint=ln.get("fingerprint", ""), timeout=5)
+                ms = [{"id": f"{ln['name']}{LINK_SEP}{m['id']}", "object": "model", "owned_by": f"link:{ln['name']}",
+                       "remote_id": m["id"], "link": ln["name"], "vision": m.get("vision", False)}
+                      for m in r.get("data", []) if m.get("id") != "auto"]
             err = None
         except Exception as e:
             ms, err = [], f"{type(e).__name__}: {e}"[:200]
@@ -780,6 +802,8 @@ def link_target(model_id: str | None):
     ln = next((x for x in load_links() if x["name"] == name), None)
     if ln is None:
         return None
+    if ln.get("kind") == "agent":
+        return remote().upstream(ln), rid
     return {"base": ln["url"], "token": ln["token"], "fingerprint": ln.get("fingerprint", "")}, rid
 
 
@@ -794,8 +818,14 @@ def _upstream_stream(upstream: dict, path: str, payload: dict):
 # ---------------------------------------------------------------- MCP tools
 
 APPROVALS: dict = {}            # call key -> {"event": Event, "allow": bool}
+PENDING_CALLS: dict = {}        # call key -> {server, tool, args}: what an "always" button turns into a rule
 APPROVALS_LOCK = threading.Lock()
 MAX_TOOL_ROUNDS = 8
+
+
+def tool_rules():
+    import tool_rules as tr
+    return tr.Rules(STATE.get("tool_rules_path"))
 
 
 def mcp_hub():
@@ -849,11 +879,29 @@ def chat_with_tools(wfile, payload: dict, msgs: list, hub, upstream=None) -> dic
                 args, err = None, f"invalid arguments: {e}"
             else:
                 err = None
-            need = err is None and not hub.auto_approved(c["name"])
+            decision = None
+            if err is None:
+                try:
+                    info = hub.tool_info(c["name"])
+                    decision = tool_rules().decide(info["server"], info["tool"], args, info["annotations"],
+                                                   auto_approve=info["auto_approve"])
+                except KeyError as e:
+                    err = str(e).strip("'\"")
+            need = err is None and decision["action"] == "ask"
             sse(wfile, {"tool_call": {"key": key, "name": c["name"], "arguments": args if args is not None
-                                      else c["arguments"], "needs_approval": need}})
-            if err is None and need and not wait_approval(key):
-                err = "the user declined this tool call"
+                                      else c["arguments"], "needs_approval": need,
+                                      "decision": decision and {k: decision[k] for k in ("action", "by", "reason")}}})
+            if err is None and decision["action"] == "deny":
+                err = f"not allowed: {decision['reason']} (Settings -> Tool approval)"
+            elif err is None and need:
+                with APPROVALS_LOCK:
+                    PENDING_CALLS[key] = {"server": info["server"], "tool": info["tool"], "args": args}
+                try:
+                    if not wait_approval(key):
+                        err = "the user declined this tool call"
+                finally:
+                    with APPROVALS_LOCK:
+                        PENDING_CALLS.pop(key, None)
             if err is None:
                 try:
                     ok, text = hub.call(c["name"], args)
@@ -886,7 +934,7 @@ def rag_embedder():
         p = EMBED["proc"]
         if p is None or p.poll() is not None:
             if not STATE["server_bin"]:
-                raise RuntimeError("--rag-embed-gguf needs --server")
+                raise RuntimeError("document embeddings need llama-server: Setup -> Build llama.cpp")
             if port_busy(port):
                 raise RuntimeError(f"port {port} (embedding sidecar) is already in use")
             cmd = [STATE["server_bin"], "-m", gguf, "--embedding", "--pooling", "mean", "-ngl",
@@ -936,6 +984,8 @@ def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
     With hold_done the final [DONE] is not forwarded (a tool round follows),
     and streamed tool calls are assembled and returned.
     """
+    if upstream is not None and upstream.get("callhome"):
+        return _callhome_chat(upstream["callhome"], path, payload, stream_to, hold_done)
     if upstream is not None:
         # a linked host's model: same OpenAI API, its device token, its pinned certificate
         if stream_to is None:
@@ -978,6 +1028,31 @@ def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
                 except (ValueError, KeyError, IndexError, TypeError):
                     pass
     return {"text": "".join(text), "tool_calls": [calls[k] for k in sorted(calls)], "finish_reason": finish}
+
+
+def _callhome_chat(host, path, payload, stream_to, hold_done):
+    """A host that calls in has no address to proxy to: chat goes as its MCP chat tool
+    and comes back whole (streamed to the client as one piece)."""
+    if path != "/v1/chat/completions":
+        raise RuntimeError(f"{host} calls in to this Studio; only chat is available through it")
+    args = {k: payload[k] for k in ("model", "messages", "temperature", "max_tokens", "top_p", "seed", "stop")
+            if payload.get(k) is not None}
+    r = remote().call(host, "chat", args)
+    resp = r.get("response") or {"choices": [{"index": 0, "message": {"role": "assistant", "content": r.get("reply", "")},
+                                              "finish_reason": "stop"}], "model": args.get("model")}
+    if stream_to is None:
+        return resp
+    text = r.get("reply", "")
+    base = {"id": resp.get("id", "callhome"), "object": "chat.completion.chunk", "model": resp.get("model")}
+    for ch in ({"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None},
+               {"index": 0, "delta": {}, "finish_reason": "stop"}):
+        stream_to.write(f"data: {json.dumps({**base, 'choices': [ch]})}\n\n".encode())
+    if resp.get("usage"):
+        stream_to.write(f"data: {json.dumps({**base, 'choices': [], 'usage': resp['usage']})}\n\n".encode())
+    if not hold_done:
+        stream_to.write(b"data: [DONE]\n\n")
+    stream_to.flush()
+    return {"text": text, "tool_calls": [], "finish_reason": "stop"}
 
 
 # ------------------------------------------------------- OpenAI-compatible API
@@ -1055,9 +1130,19 @@ def auto_pick(body, models):
         proba = {"vision": 1.0}
     st = load_settings()
     by_id = {m["id"]: m for m in pool}
+    # Your pick for a subject (Settings -> Models per subject) wins over the
+    # measured best, for the strongest subject in the prompt that has one.
+    chosen = STATE.get("subject_models") or {}
+    for subj, w in sorted(proba.items(), key=lambda kv: -kv[1]):
+        mid = chosen.get(subj)
+        if mid and w >= 0.3 and mid in by_id:
+            return by_id[mid], {"model": mid, "subject": subj, "candidates": [], "by": "setting",
+                                "reason": f"your default for {subj} (Settings), {w:.0%} {subj}",
+                                "proba": {k: round(v, 3) for k, v in list(proba.items())[:3]}}
     sums = {m["id"]: model_summary(m, st) for m in pool}
     pick = model_stats.rank(proba, sums, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
     pick["proba"] = {k: round(v, 3) for k, v in list(proba.items())[:3]}
+    pick["by"] = "measured"
     return by_id.get(pick["model"]), pick
 
 
@@ -1075,8 +1160,9 @@ def resolve_request_model(body):
             excluded = "; ".join(f"{k}: {v}" for k, v in list(pick.get("excluded", {}).items())[:6])
             return None, {"mode": "auto", "error": (
                 "auto: no model has enough performance stats to choose from "
-                f"(need {STATE['min_graded']} graded results). Run scripts/testqa.py "
-                f"--publish-stats against your models, or name a model explicitly. {excluded}")}
+                f"(need {STATE['min_graded']} graded results). Grade your models with Jobs -> Evaluate "
+                "(TestQA), pick a default per subject under Settings -> Models per subject, or name a model "
+                f"explicitly. {excluded}")}
         return target, {"mode": "auto", "model": target["id"], "reason": pick["reason"],
                         "candidates": pick["candidates"][:5]}
     if not ref or (current and find_model(ref, [current])):
@@ -1120,7 +1206,18 @@ def score_worker():
         while ACTIVITY["active"] > 0:
             time.sleep(1)
         try:
-            res = _scorer(model, clf).score([m for m in messages if m.get("role") != "system"] or messages, text)
+            sc = _scorer(model, clf)
+            msgs = [m for m in messages if m.get("role") != "system"] or messages
+            prof = getattr(sc, "profile", None)
+            res = prof(msgs, text) if prof else sc.score(msgs, text)
+            if "cett" in res:
+                try:
+                    import neuron_review
+                    review_store().record(model["id"], neuron_review.bin_profile(res["cett"]), source="live",
+                                          kind="observed", subjects=[subject] if subject else None,
+                                          risk=res.get("prob"))
+                except Exception as e:
+                    print(f"[studio] review record failed: {e}", file=sys.stderr)
             STATE["stats"].record(model["id"], "activation", size=model["size"], subject=subject,
                                   h_score=res["score"], prob=res["prob"], n_tokens=res["n_tokens"],
                                   threshold=0.0)
@@ -1131,6 +1228,7 @@ def score_worker():
 # ------------------------------------------------------- per-reply checks
 
 TRACES = {"lock": threading.Lock(), "payloads": {}}
+REVIEW_VIEWS = {"lock": threading.Lock(), "views": {}}
 TRACE_ID = re.compile(r"[A-Za-z0-9_-]{6,64}")
 
 
@@ -1142,14 +1240,35 @@ def _scorer(model, clf):
     return _SCORERS[key]
 
 
-def trace_reply(model, messages, text, threshold=0.5):
+def _configured_bins():
+    return {"llama-server": STATE.get("server_bin"), "llama-cett-dump": STATE.get("cett")}
+
+
+def review_store():
+    if "review" not in STATE or STATE["review"] is None:
+        import neuron_review
+        STATE["review"] = neuron_review.ReviewStore(STATE.get("review_dir"))
+    return STATE["review"]
+
+
+def _review_subjects(text):
+    try:
+        from subject_classifier import default_classifier
+        return default_classifier().analyze(text)["labels"] or ["unknown"]
+    except Exception:
+        return ["unknown"]
+
+
+def trace_reply(model, messages, text, threshold=0.5, source="chat-check"):
     """Score one reply token by token and save it as a trace session that the
-    3D view (viz/bloom.py) and timeline.py can open. -> summary for the chat."""
+    3D view (viz/bloom.py) and timeline.py can open. -> summary for the chat.
+    The reply's mean activation also goes into the neuron review store."""
     clf = load_settings().get(_key(model["path"]), {}).get("classifier")
     if not clf:
-        raise ValueError(f"{model['id']} has no classifier set (model settings: classifier)")
+        raise ValueError(f"{model['id']} has no classifier set (Studio -> Models, the model's settings: classifier)")
     if not STATE["cett"]:
-        raise ValueError("activation checks need llama-cett-dump (studio --cett)")
+        raise ValueError("activation checks need llama-cett-dump: Setup -> Build llama.cpp, "
+                         "or point Settings -> Workspaces at an existing build")
     msgs = [m for m in messages if m.get("role") != "system"] or messages
     r = _scorer(model, clf).trace(msgs, text)
     frames = r["frames"]
@@ -1164,10 +1283,19 @@ def trace_reply(model, messages, text, threshold=0.5):
                 question=(_last_user_text({"messages": msgs}) or "")[:500], verdict=None,
                 h_cells=r["h_cells"], col_weight=r["col_weight"].tolist())
     prob = [round(float(p), 4) for p in r["prob"]]
+    review = None
+    try:
+        q = _last_user_text({"messages": msgs}) or ""
+        oid = review_store().record(model["id"], frames.mean(axis=0), source=source, kind="observed",
+                                    subjects=_review_subjects(q), risk=float(sum(prob) / len(prob)),
+                                    item=tid)
+        review = {"model": model["id"], "id": oid}
+    except Exception as e:
+        print(f"[studio] review record failed: {e}", file=sys.stderr)
     return {"id": tid, "pieces": r["pieces"], "prob": prob,
             "flagged": [i for i, p in enumerate(prob) if p >= threshold], "threshold": threshold,
             "max": max(prob), "mean": round(sum(prob) / len(prob), 4),
-            "url": f"viz/{tid}/"}
+            "url": f"viz/{tid}/", "review": review}
 
 
 def trace_payload(tid):
@@ -1289,8 +1417,8 @@ class WorkerPool:
                     port += 1
                 binary = devs[0].get("server") or STATE["server_bin"]
                 if not binary:
-                    raise RuntimeError(f"no llama-server for {devs[0]['backend']}: set servers.{devs[0]['backend']} "
-                                       "in the hardware config, or pass --server")
+                    raise RuntimeError(f"no llama-server for {devs[0]['backend']}: set one under Setup -> Hardware "
+                                       "(servers per backend), or Setup -> Build llama.cpp for it")
                 cmd, env = server_cmd(model, settings, port)
                 cmd[0] = binary
                 env = {**(env or os.environ), **accelerators.launch_env(devs)}
@@ -1405,6 +1533,242 @@ def _director():
     return director
 
 
+# ------------------------------------------------------------ studio settings
+
+# Settings the Setup page may change, with their type and whether they apply
+# without a restart. Network exposure (host, token, TLS, remote jobs) is never
+# editable from the web: those stay in the config file and on the command line.
+SETUP_FIELDS = {
+    "models_dir": ("dirs", True, "Folders searched for .gguf models"),
+    "server": ("file", True, "llama-server binary"),
+    "cett": ("file", True, "llama-cett-dump binary (activation checks, the GGUF pipeline)"),
+    "download_dir": ("dir", True, "Where model downloads go (default: the first models folder)"),
+    "idle_ttl": ("int", True, "Unload the chat model after this many idle seconds (0 = never)"),
+    "no_jit": ("bool", True, "Never load or swap models for API requests"),
+    "min_graded": ("int", True, "Graded results a model needs before auto routing considers it"),
+    "hallucination_cost": ("float", True, "How much a wrong answer costs against a right one, for routing"),
+    "max_workers": ("int", True, "Worker models the director may run at once"),
+    "worker_idle": ("int", True, "Stop an idle worker model after this many seconds"),
+    "score_every": ("int", True, "Score one live reply in N with the activation classifier"),
+    "score_ngl": ("int", True, "GPU layers for activation scoring (0 keeps it off the GPU)"),
+    "max_jobs": ("int", False, "Jobs that may run at once"),
+    "rag_embed_gguf": ("file", False, "Embedding GGUF for document search"),
+}
+
+
+def _ws_path():
+    from pathlib import Path as _P
+    return _P(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+
+
+def subject_defaults():
+    """Per subject: the model measured best for it, and the one you chose (which wins)."""
+    from subject_classifier import SUBJECTS
+    models = scan_models()
+    st = load_settings()
+    sums = {m["id"]: model_summary(m, st) for m in models}
+    chosen = STATE.get("subject_models") or {}
+    out = {}
+    for subj in SUBJECTS:
+        if subj == "unknown":
+            continue
+        pick = model_stats.rank({subj: 1.0}, sums, STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
+        best = pick.get("model")
+        row = next((r for r in pick.get("candidates") or [] if r["model"] == best), None)
+        own = (sums.get(best) or {}).get("subjects", {}).get(subj, {}).get("n", 0) if best else 0
+        out[subj] = {"best": best, "reason": pick.get("reason"), "expected": row and row["expected"],
+                     "subject_n": own, "chosen": chosen.get(subj),
+                     "chosen_missing": bool(chosen.get(subj)) and not any(m["id"] == chosen[subj] for m in models),
+                     "uses": chosen.get(subj) or best}
+    return out
+
+
+def settings_state():
+    rules = tool_rules()
+    hub = STATE.get("mcp")
+    tools = []
+    if hub is not None:
+        try:
+            for t in hub.tool_list():
+                d = rules.decide(t["server"], t["tool"], {}, t["annotations"], auto_approve=t["auto_approve"],
+                                 record=False)
+                tools.append({**t, "decision": d})
+        except Exception:
+            tools = []
+    import tool_rules as tr
+    return {"subjects": subject_defaults(), "models": [m["id"] for m in scan_models()],
+            "min_graded": STATE["min_graded"], "tool_rules": rules.load(), "tool_rules_path": str(rules.path),
+            "tool_kinds": tr.KINDS, "tools": tools, "mcp_configured": bool(STATE.get("mcp_config"))}
+
+
+def workspaces_state():
+    import ns_workspace
+    d = ns_workspace.describe(_ws_path(), STATE.get("workspace_forced"))
+    d["running"] = STATE.get("workspace_name") or d["active"]
+    return d
+
+
+def load_studio_config(path=None):
+    p = os.path.expanduser(path or STATE.get("config_path") or "~/.neuronscope/config.json")
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        return d.get("studio", {}) if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_studio_config(values):
+    p = os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json")
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("studio", {}).update(values)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, p)
+
+
+def clean_setup(values):
+    """Validate Setup page values -> (clean, errors)."""
+    out, errs = {}, {}
+    for k, v in values.items():
+        if k not in SETUP_FIELDS:
+            errs[k] = "not editable here"
+            continue
+        kind = SETUP_FIELDS[k][0]
+        try:
+            if kind == "dirs":
+                v = [os.path.expanduser(str(x).strip()) for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
+                bad = [x for x in v if not os.path.isdir(x)]
+                if bad:
+                    raise ValueError(f"not a folder: {', '.join(bad)}")
+            elif kind in ("file", "dir"):
+                v = os.path.expanduser(str(v or "").strip()) or None
+                if v and kind == "file" and not (os.path.isfile(v) and (k == "rag_embed_gguf" or os.access(v, os.X_OK))):
+                    raise ValueError("not an executable file" if k != "rag_embed_gguf" else "no such file")
+                if v and kind == "dir" and not os.path.isdir(v):
+                    raise ValueError("not a folder")
+            elif kind == "int":
+                v = int(v)
+                if v < 0:
+                    raise ValueError("must be 0 or more")
+            elif kind == "float":
+                v = float(v)
+            elif kind == "bool":
+                v = bool(v)
+            out[k] = v
+        except (TypeError, ValueError) as e:
+            errs[k] = str(e) or "invalid"
+    return out, errs
+
+
+def apply_setup(values):
+    """Apply what can change without a restart; -> keys that need one."""
+    later = []
+    for k, v in values.items():
+        if k == "models_dir":
+            STATE["models_dirs"] = v or STATE["models_dirs"]
+        elif k == "server":
+            STATE["server_bin"] = v
+        elif k == "cett":
+            STATE["cett"] = v
+            _SCORERS.clear()
+        elif k == "download_dir":
+            STATE["download_dir"] = v
+        elif k == "idle_ttl":
+            STATE["idle_ttl"] = v
+        elif k == "no_jit":
+            STATE["jit"] = not v
+        elif k == "min_graded":
+            STATE["min_graded"] = max(1, v)
+        elif k == "hallucination_cost":
+            STATE["halluc_cost"] = v
+        elif k == "max_workers":
+            STATE["max_workers"] = max(1, v)
+        elif k == "worker_idle":
+            STATE["worker_idle"] = max(30, v)
+        elif k in ("score_every", "score_ngl"):
+            STATE[k] = v
+        else:
+            later.append(k)
+    return later
+
+
+def setup_state():
+    cfg = load_studio_config()
+    eff = {"models_dir": STATE["models_dirs"], "server": STATE["server_bin"], "cett": STATE["cett"],
+           "download_dir": STATE["download_dir"], "idle_ttl": STATE["idle_ttl"], "no_jit": not STATE["jit"],
+           "min_graded": STATE["min_graded"], "hallucination_cost": STATE["halluc_cost"],
+           "max_workers": STATE["max_workers"], "worker_idle": STATE["worker_idle"],
+           "score_every": STATE["score_every"], "score_ngl": STATE["score_ngl"],
+           "max_jobs": cfg.get("max_jobs"), "rag_embed_gguf": STATE.get("rag_embed_gguf")}
+    # Binaries a llama.cpp build would have produced, to offer when nothing is set.
+    found = {}
+    for root in [os.path.expanduser("~/llama.cpp"), os.environ.get("NS_LLAMA") or ""]:
+        for name, key in (("llama-server", "server"), ("llama-cett-dump", "cett")):
+            pth = os.path.join(root, "build", "bin", name)
+            if root and os.path.isfile(pth):
+                found.setdefault(key, pth)
+    return {"fields": {k: {"kind": v[0], "live": v[1], "help": v[2], "value": eff.get(k)}
+                       for k, v in SETUP_FIELDS.items()},
+            "config_path": os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"),
+            "found": found, "models": len(scan_models()),
+            "ready": {"server": bool(STATE["server_bin"] and os.path.exists(STATE["server_bin"])),
+                      "models": bool(scan_models()), "cett": bool(STATE["cett"])}}
+
+
+_HUB = {}
+
+
+def lab_hub():
+    """viz/hub.py's service manager, run inside Studio: the labs, live and replay
+    views and the pipeline dashboard. Studio holds what it starts until stopped."""
+    if "m" not in _HUB:
+        import hub
+        root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        hub.STATE["root"] = root
+        hub.SERVICES.update({k: v for k, v in hub.declare(root, sys.executable).items() if k != "chat"})
+        _HUB["m"] = hub
+    return _HUB["m"]
+
+
+def stop_labs():
+    if "m" in _HUB:
+        for name in list(_HUB["m"].RUNNING):
+            _HUB["m"].stop(name)
+
+
+def restart_studio():
+    """Re-exec Studio with the same arguments, after stopping the model servers it
+    started (an orphaned llama-server would hold their ports)."""
+    time.sleep(0.5)                       # let the response reach the browser
+    stop_server()
+    POOL.stop()
+    stop_labs()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def run_doctor():
+    """scripts/doctor.py --json, with this Studio's llama.cpp and model."""
+    env = dict(os.environ)
+    if STATE.get("server_bin"):
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(STATE["server_bin"]))))
+        env.setdefault("NS_LLAMA", root)
+    try:
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                                         "scripts", "doctor.py"), "--json"],
+                           capture_output=True, text=True, timeout=150, env=env)
+        checks = json.loads(r.stdout or "[]")
+    except Exception as e:
+        return {"ok": False, "error": f"doctor failed: {e}", "checks": []}
+    return {"ok": not any(c["status"] == "fail" for c in checks), "checks": checks}
+
+
 def assign_candidates():
     st = load_settings()
     out, sums = [], {}
@@ -1464,7 +1828,7 @@ def run_task(pid, tid):
             POOL.release(w)
         if policy.get("check") and STATE["cett"] and text:
             try:
-                r = trace_reply(model, msgs, text)
+                r = trace_reply(model, msgs, text, source="project")
                 check = {"id": r["id"], "url": r["url"], "max": r["max"], "mean": r["mean"],
                          "n_flagged": len(r["flagged"]), "flagged": bool(r["flagged"])}
             except ValueError:
@@ -1755,7 +2119,9 @@ class Handler(BaseHTTPRequestHandler):
                 if target is None:
                     if route.get("error"):
                         return self._json(409, {"error": {"message": route["error"], "type": "invalid_request_error"}})
-                    return self._json(404, {"error": {"message": f"model not found: {body.get('model')}",
+                    return self._json(404, {"error": {"message": f"model not found: {body.get('model')}" if body.get("model")
+                                                      else "no model is loaded: name one (or auto), or load one under "
+                                                           "Studio -> Models",
                                                       "type": "invalid_request_error"}})
                 ok, msg = ensure_loaded(target)
             if not ok:
@@ -1831,6 +2197,46 @@ class Handler(BaseHTTPRequestHandler):
                 LINKS["cache"].pop(name, None)
             return self._json(200, {"ok": True})
 
+    def _self_url(self, public=False):
+        """This Studio's URL: the loopback address for calling itself, or the address
+        the client used (Host header) for settings shown to it."""
+        scheme = "https" if STATE["tls"] else "http"
+        if public and self.headers.get("Host"):
+            return f"{scheme}://{self.headers['Host']}"
+        return f"{scheme}://127.0.0.1:{self.server.server_address[1]}"
+
+    # ---------------------------------------------------------- MCP
+    def _mcp_post(self):
+        """MCP over streamable HTTP: JSON-RPC in, JSON-RPC out (scripts/ns_mcp.py).
+        Every tool call goes back through this API with the caller's own token,
+        so an agent can do exactly what the person or device it acts for can."""
+        import ns_mcp
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and urllib.parse.urlparse(origin).netloc != host:
+            return self._json(403, {"error": "cross-origin MCP requests are refused"})
+        if "application/json" not in self.headers.get("Content-Type", ""):
+            return self._json(415, {"error": "MCP requests must be application/json"})
+        try:
+            payload = self._read(4 * 1024 * 1024)
+        except ValueError as e:
+            body = json.dumps(ns_mcp._err(None, -32700, f"parse error: {e}")).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        token = (self._presented() or [None])[0] if STATE["token"] else None
+        studio = ns_mcp.Studio(self._self_url(), token, insecure_loopback=True)
+        resp = ns_mcp.handle_payload(payload, studio)
+        if resp is None:
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        return self._json(200, resp)
+
     # ---------------------------------------------------------- projects
     def _projects_get(self):
         if not self._owner_only():
@@ -1855,7 +2261,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/projects":
             return self._json(200, {"projects": store.list(),
                                     "models": [{"id": m["id"], "size": m["size"]} for m in scan_models()],
-                                    "subjects": dr.sc.SUBJECTS, "checks": bool(STATE["cett"])})
+                                    "subjects": dr.sc.SUBJECTS, "checks": bool(STATE["cett"]),
+                                    "req_kinds": dr.nrq.PROJECT_KINDS,
+                                    "req_features": {k: v["title"] for k, v in dr.nrq.FEATURES.items()},
+                                    "req_hardware": dr.nrq.HARDWARE_ITEMS})
+        m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)/requirements", self.path)
+        if m:
+            try:
+                with store.lock(m.group(1)):
+                    plan = store.load(m.group(1))
+                    dr.check_requirements(plan, configured=_configured_bins())
+                    store.save(plan)
+            except dr.PlanError as e:
+                return self._json(404, {"error": str(e)})
+            return self._json(200, plan["requirements"])
         m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)", self.path)
         if m:
             try:
@@ -1863,6 +2282,7 @@ class Handler(BaseHTTPRequestHandler):
             except dr.PlanError as e:
                 return self._json(404, {"error": str(e)})
             plan.pop("source", None)
+            dr._reqs(plan)                    # plans from before per-project requirements
             plan["skills"] = dr.skill_breakdown(plan["tasks"])
             plan["gaps"] = dr.coverage_gaps(plan["tasks"], plan.get("census"))
             plan["ready"] = [t["id"] for t in dr.ready_tasks(plan)] if plan["status"] == "running" else []
@@ -1892,7 +2312,7 @@ class Handler(BaseHTTPRequestHandler):
                 store.save(plan)
                 return self._json(200, {"id": plan["id"]})
             m = re.fullmatch(r"/api/projects/([A-Za-z0-9_-]+)/(edit|approve|start|pause|decide|review|answer|"
-                             r"policy|refine|delete)", self.path)
+                             r"policy|refine|delete|requirements|requirements/scan)", self.path)
             if not m:
                 return self._json(404, {"error": "not found"})
             pid, action = m.groups()
@@ -1917,8 +2337,31 @@ class Handler(BaseHTTPRequestHandler):
                     out = dr.edit(plan, req.get("changes") or [], by="human", reason=str(req.get("reason") or ""))
                 elif action == "approve":
                     dr.approve(plan, assign_fn=assign_fn_for(plan))
-                elif action in ("start", "pause"):
-                    dr.set_running(plan, action == "start")
+                elif action == "start":
+                    # Nothing starts on a machine that lacks what the project needs,
+                    # unless the person says so.
+                    if (plan.get("requirements") or {}).get("items") and not req.get("force"):
+                        last = dr.check_requirements(plan, configured=_configured_bins())
+                        if last["missing"]:
+                            store.save(plan)
+                            return self._json(409, {"error": "this machine is missing what the project needs: "
+                                                             + ", ".join(last["missing"])
+                                                             + " (fix it, or start anyway)",
+                                                    "missing": last["missing"]})
+                    dr.set_running(plan, True)
+                elif action == "pause":
+                    dr.set_running(plan, False)
+                elif action == "requirements":
+                    out = dr.set_requirements(plan, req.get("items"), reason=str(req.get("reason") or ""))
+                elif action == "requirements/scan":
+                    root = str(req.get("root") or (plan.get("requirements") or {}).get("root")
+                               or (plan.get("census") or {}).get("path") or "")
+                    if not root:
+                        return self._json(400, {"error": "which folder? give the project's checkout"})
+                    try:
+                        out = dr.scan_requirements(plan, root, by="human")
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
                 elif action == "decide":
                     out = dr.decide(plan, str(req.get("proposal")), bool(req.get("accept")),
                                     note=str(req.get("note") or ""))
@@ -1941,6 +2384,14 @@ class Handler(BaseHTTPRequestHandler):
         runner = STATE.get("jobs")
         if self.path == "/api/jobs/specs":
             return self._json(200, ns_jobs.public_specs())
+        if self.path == "/api/jobs/defaults":
+            # What the forms can fill in from the running workspace.
+            ws = STATE.get("workspace") or {}
+            ex = lambda p: p if p and os.path.exists(p) else None   # noqa: E731
+            return self._json(200, {"gguf": ex(ws.get("gguf")), "cett": ex(STATE.get("cett") or ws.get("cett")),
+                                    "server": ex(STATE.get("server_bin") or ws.get("server")),
+                                    "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
+                                    "workspace": STATE.get("workspace_name"), "root": ws.get("root")})
         if runner is None:
             return self._jobs_off()
         if self.path == "/api/jobs":
@@ -2001,8 +2452,402 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)[:300]})
         return self._json(404, {"error": "not found"})
 
+    # ------------------------------------------------ remote hosts (this Studio is the controller)
+
+    def _host_token(self):
+        auth = self.headers.get("Authorization", "")
+        tok = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        rec = remote().host_for_token(tok) if tok else None
+        if rec is None:
+            THROTTLE.fail(self.client_address[0])
+            self._json(401, {"error": "this host is not joined to this Studio (removed?): join again with a new invite"})
+        return rec
+
+    def _remote_public(self, method):
+        """The routes a host that calls in uses. They carry the host's own token, never the owner's."""
+        ip = self.client_address[0]
+        if THROTTLE.blocked(ip):
+            return self._json(429, {"error": "too many attempts; wait a few minutes"})
+        path = self.path.split("?")[0]
+        hub = remote().hub
+        if method == "POST" and path == "/api/remote/claim":
+            req = self._read()
+            got = hub.claim(str(req.get("proof", "")))
+            if got is None:
+                THROTTLE.fail(ip)
+                return self._json(403, {"error": "the invite is wrong, used or expired: make a new one in Studio "
+                                                 "(Remote → Add a host)"})
+            inv, code = got
+            name = re.sub(r"[^A-Za-z0-9_.-]", "-", inv["name"] or str(req.get("name") or "host"))[:32].strip("-") or "host"
+            tok = secrets.token_urlsafe(32)
+            import remote_hosts
+            remote().add({"name": name, "method": "callhome", "url": f"callhome:{name}", "token": "",
+                          "host_token_sha256": remote_hosts.token_hash(tok), "host": str(req.get("name", ""))[:40],
+                          "studio_fingerprint": inv["fingerprint"], "agent_version": str(req.get("version", ""))[:20]})
+            with LINKS["lock"]:
+                LINKS["cache"].pop(name, None)
+            return self._json(200, {"token": tok, "name": name, "controller": inv["controller"],
+                                    "confirm": remote_hosts.nsr.pair_proof(code, inv["fingerprint"], "accept")})
+        rec = None
+        if path in ("/api/remote/next", "/api/remote/reply"):
+            rec = self._host_token()
+            if rec is None:
+                return
+        if method == "GET" and path == "/api/remote/next":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            return self._json(200, {"messages": hub.next(rec["name"], float((q.get("wait") or ["25"])[0]))})
+        if method == "POST" and path == "/api/remote/reply":
+            req = self._read(MAX_BODY)
+            return self._json(200, {"ok": hub.reply(str(req.get("id", "")), req.get("response"))})
+        m = re.fullmatch(r"/api/remote/file/([A-Za-z0-9_-]+)", path)
+        if method == "GET" and m:
+            fp = hub.ticket_path(m.group(1))
+            if not fp or not os.path.isfile(fp):
+                THROTTLE.fail(ip)
+                return self._json(404, {"error": "no such file, or the link expired"})
+            return self._send_file(fp)
+        return self._json(404, {"error": "not found"})
+
+    def _send_file(self, fp):
+        size = os.path.getsize(fp)
+        start = 0
+        rng = re.fullmatch(r"bytes=(\d+)-", self.headers.get("Range", "").strip())
+        if rng:
+            start = min(int(rng.group(1)), size)
+        self.send_response(206 if rng else 200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size - start))
+        if rng:
+            self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+        self.end_headers()
+        with open(fp, "rb") as f:
+            f.seek(start)
+            shutil.copyfileobj(f, self.wfile, 1 << 20)
+
+    def _remote_state(self):
+        import remote_hosts
+        r = remote()
+        hosts = []
+        for h in r.hosts():
+            st = r.status(h)
+            with LINKS["lock"]:
+                hit = LINKS["cache"].get(h["name"])
+            st["models"] = [m["remote_id"] for m in (hit[1] if hit else [])]
+            st["error"] = hit[2] if hit else None
+            hosts.append(st)
+        bind = STATE.get("bind_host") or "127.0.0.1"
+        return {"role": "controller", "hosts": hosts, "sends": list(r.sends.values())[-20:],
+                "studio": {"bind": bind, "network": not sec.is_loopback(bind), "tls": bool(STATE.get("tls")),
+                           "token": bool(STATE.get("token")),
+                           "short_fingerprint": remote_hosts.nsr.short_fp(STATE.get("fingerprint") or ""),
+                           "url": self._self_url(public=True)},
+                "local_models": [{"id": m["id"], "path": m["path"], "size": m["size"]} for m in scan_models()]}
+
+    def _remote_get(self):
+        if not self._owner_only():
+            return
+        if self.path == "/remote":
+            import remote_page
+            return self._html(remote_page.PAGE)
+        if self.path == "/remote/download":
+            import remote_hosts
+            body = remote_hosts.package_zip()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="neuronscope-remote.zip"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in ("/api/remote", "/api/remote?refresh=1"):
+            if self.path.endswith("refresh=1"):
+                link_models(refresh=True)
+            return self._json(200, self._remote_state())
+        return self._json(404, {"error": "not found"})
+
+    def _remote_post(self):
+        if not self._owner_only():
+            return
+        import remote_hosts
+        r = remote()
+        req = self._read()
+        controller = f"NeuronScope Studio ({socket.gethostname()})"
+        try:
+            if self.path == "/api/remote/discover":
+                return self._json(200, {"hosts": remote_hosts.discover(float(req.get("seconds") or 3))})
+            if self.path == "/api/remote/pair":
+                method = req.get("method") or "lan"
+                address, code, fp = str(req.get("address", "")).strip(), str(req.get("code", "")), ""
+                if req.get("link"):
+                    inv = remote_hosts.nsr.parse_invite(str(req["link"]))
+                    address, code, fp = inv["url"], inv["code"], inv["fingerprint"]
+                    req.setdefault("name", inv["name"])
+                ssh = None
+                if method == "ssh":
+                    ssh = {"target": str(req.get("ssh_target", "")).strip(), "port": req.get("ssh_port") or None,
+                           "remote_port": int(req.get("remote_port") or remote_hosts.nsr.DEFAULT_PORT),
+                           "local_port": remote_hosts.Tunnels.free_port()}
+                    if not ssh["target"]:
+                        raise remote_hosts.RemoteError("the SSH login is needed, like you@host")
+                    tmp = {"name": "__pairing__", "ssh": ssh}
+                    r.tunnels.ensure(tmp)
+                    address = f"http://127.0.0.1:{ssh['local_port']}"
+                if not address or not remote_hosts.nsr.norm_code(code):
+                    raise remote_hosts.RemoteError("the host's address and its pairing code are needed")
+                try:
+                    out = remote_hosts.pair_direct(address, code, controller, fp)
+                finally:
+                    if ssh:
+                        r.tunnels.stop("__pairing__")
+                name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("name") or out["host"] or "host"))[:32].strip("-") \
+                    or "host"
+                rec = {"name": name, "method": method, "url": out["url"], "token": out["token"],
+                       "fingerprint": out["fingerprint"], "host": out["host"]}
+                if ssh:
+                    rec["ssh"] = ssh
+                r.add(rec)
+                with LINKS["lock"]:
+                    LINKS["cache"].pop(name, None)
+                models = [m["remote_id"] for m in link_models(refresh=True) if m["link"] == name]
+                return self._json(200, {"name": name, "host": out["host"], "models": models,
+                                        "short_fingerprint": remote_hosts.nsr.short_fp(out["fingerprint"]),
+                                        "error": (LINKS["cache"].get(name) or (0, [], None))[2]})
+            if self.path == "/api/remote/invite":
+                url = str(req.get("url") or self._self_url(public=True)).rstrip("/")
+                same = urllib.parse.urlsplit(url).netloc == (self.headers.get("Host") or "")
+                fp = (STATE.get("fingerprint") or "") if (STATE.get("tls") and same) else ""
+                name = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("name") or ""))[:32].strip("-")
+                out = r.hub.invite(url, name, fp, controller)
+                warn = None
+                host = urllib.parse.urlsplit(url).hostname or ""
+                if sec.is_loopback(host) or sec.is_loopback(STATE.get("bind_host") or "127.0.0.1"):
+                    warn = ("This Studio listens on this computer only, so another computer cannot call it. Start "
+                            "Studio for the network (with a token and TLS, see Security), or put a tunnel in front "
+                            "of it and give its address here.")
+                out["warning"] = warn
+                out["command"] = f"neuronscope-remote connect {out['invite']}"
+                return self._json(200, out)
+            if self.path == "/api/remote/call":
+                return self._json(200, r.call(str(req["host"]), str(req["tool"]), req.get("args") or {},
+                                              timeout=float(req.get("timeout") or 900)))
+            if self.path == "/api/remote/tools":
+                return self._json(200, {"tools": r.tools(str(req["host"]))})
+            if self.path == "/api/remote/send":
+                path = str(req.get("path", ""))
+                if path not in {m["path"] for m in scan_models()} and not req.get("any_file"):
+                    raise remote_hosts.RemoteError("pick one of this Studio's models to send")
+                return self._json(200, {"id": r.send(str(req["host"]), path, self._self_url(public=True),
+                                                       bool(req.get("install")))})
+            if self.path == "/api/remote/remove":
+                r.remove(str(req.get("host", "")))
+                with LINKS["lock"]:
+                    LINKS["cache"].pop(str(req.get("host", "")), None)
+                return self._json(200, {"ok": True})
+        except remote_hosts.RemoteError as e:
+            return self._json(400, {"error": str(e)})
+        except (ValueError, KeyError, OSError) as e:
+            return self._json(400, {"error": f"{type(e).__name__}: {e}"})
+        return self._json(404, {"error": "not found"})
+
+    # ------------------------------------------------ neuron review
+
+    def _html(self, page):
+        body = page.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _review_get(self):
+        if not self._owner_only():
+            return
+        if self.path == "/review":
+            import review_page
+            return self._html(review_page.PAGE)
+        if self.path == "/api/review":
+            st = review_store()
+            ms = st.models()
+            return self._json(200, {"models": ms, "facets": {m["model"]: st.facets(m["model"]) for m in ms},
+                                    "store": str(st.root)})
+        m = re.fullmatch(r"/review/view/([0-9a-f]{12})/(|api/meta|api/theme|api/trace)", self.path)
+        with REVIEW_VIEWS["lock"]:
+            pl = REVIEW_VIEWS["views"].get(m.group(1)) if m else None
+        if pl is None:
+            return self._json(404, {"error": "no such view (views last until Studio restarts)"})
+        import bloom
+        kind = m.group(2)
+        if kind == "":
+            return self._html(bloom.PAGE)
+        if kind == "api/trace":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(pl["blob"])))
+            self.end_headers()
+            self.wfile.write(pl["blob"])
+            return
+        return self._json(200, pl["meta" if kind == "api/meta" else "theme"])
+
+    def _review_post(self):
+        if not self._owner_only():
+            return
+        import neuron_review as nrv
+        req = self._read()
+        st = review_store()
+        model = str(req.get("model") or "")
+        if self.path == "/api/review/label":
+            try:
+                st.label(model, str(req.get("id") or ""), str(req.get("verdict") or ""))
+            except KeyError as e:
+                return self._json(404, {"error": str(e).strip("'\"")})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+            return self._json(200, {"ok": True})
+        if self.path not in ("/api/review/summary", "/api/review/view"):
+            return self._json(404, {"error": "not found"})
+        if not any(m["model"] == model for m in st.models()):
+            return self._json(404, {"error": f"no observations for {model!r}"})
+        stat = req.get("stat") or "association"
+        how = req.get("by") or "week"
+        if stat not in nrv.STATS or how not in nrv.BUCKETS:
+            return self._json(400, {"error": f"stat is one of {nrv.STATS}, by one of {nrv.BUCKETS}"})
+
+        def lst(k):
+            v = req.get(k)
+            return [str(x) for x in v] if isinstance(v, list) and v else None
+        filters = {"sources": lst("sources"), "kinds": lst("kinds"), "subjects": lst("subjects"),
+                   "verdicts": lst("verdicts"),
+                   "since": float(req["since"]) if req.get("since") else None,
+                   "until": float(req["until"]) if req.get("until") else None}
+        every = max(0, int(req.get("every") or 0))
+        try:
+            if self.path == "/api/review/summary":
+                return self._json(200, nrv.summary(st, model, stat, how, every, top=int(req.get("top") or 25),
+                                                   **filters))
+            blob, meta = nrv.view_payload(st, model, stat, how, every, **filters)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        import bloom
+        vid = uuid.uuid4().hex[:12]
+        theme = dict(bloom.THEMES.get(STATE.get("viz_theme") or "dark") or next(iter(bloom.THEMES.values())))
+        with REVIEW_VIEWS["lock"]:
+            if len(REVIEW_VIEWS["views"]) >= 8:
+                REVIEW_VIEWS["views"].pop(next(iter(REVIEW_VIEWS["views"])))
+            REVIEW_VIEWS["views"][vid] = {"blob": blob, "meta": meta, "theme": theme}
+        return self._json(200, {"id": vid, "url": f"/review/view/{vid}/", "frames": meta["frames"],
+                                "cells": meta["cells"]})
+
+    # ------------------------------------------------ settings: workspaces, subject defaults, tool rules
+
+    def _settings(self):
+        if not self._owner_only():
+            return
+        import ns_workspace
+        if self.command == "GET":
+            if self.path == "/settings":
+                import settings_page
+                return self._html(settings_page.PAGE)
+            if self.path == "/api/workspaces":
+                return self._json(200, workspaces_state())
+            return self._json(200, settings_state())
+        req = self._read()
+        path = _ws_path()
+        try:
+            if self.path == "/api/workspaces/save":
+                name = str(req.get("name") or "")
+                ns_workspace.save(name, req.get("values") or {}, path=path, replace=bool(req.get("replace")))
+                out = workspaces_state()
+                out["restart_needed"] = name == STATE.get("workspace_name")
+                return self._json(200, out)
+            if self.path == "/api/workspaces/use":
+                ns_workspace.use(str(req.get("name") or ""), path=path)
+                out = workspaces_state()
+                out["restart_needed"] = out["active"] != STATE.get("workspace_name")
+                return self._json(200, out)
+            if self.path == "/api/workspaces/delete":
+                name = str(req.get("name") or "")
+                if name == STATE.get("workspace_name"):
+                    return self._json(409, {"error": "Studio is running in this workspace; switch first"})
+                ns_workspace.delete(name, path=path)
+                return self._json(200, workspaces_state())
+            if self.path.startswith("/api/settings/"):
+                return self._settings_post(req)
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
+    def _settings_post(self, req):
+        import tool_rules as tr
+        if self.path == "/api/settings/subjects":
+            vals = req.get("subject_models") or {}
+            from subject_classifier import SUBJECTS
+            ids = {m["id"] for m in scan_models()}
+            bad = [f"{k}: {v}" for k, v in vals.items() if k not in SUBJECTS or (v and v not in ids)]
+            if bad:
+                return self._json(400, {"error": "unknown subject or model: " + ", ".join(bad)})
+            clean = {k: v for k, v in vals.items() if v}
+            save_studio_config({"subject_models": clean})
+            STATE["subject_models"] = clean
+            return self._json(200, {"subjects": subject_defaults()})
+        if self.path == "/api/settings/tool-rules":
+            rules = tool_rules().replace(req.get("rules") or {})
+            return self._json(200, {"tool_rules": rules})
+        if self.path == "/api/settings/tool-rules/test":
+            try:
+                args = req.get("args") or {}
+                if isinstance(args, str):
+                    args = json.loads(args or "{}")
+                ann = req.get("annotations") or {}
+            except ValueError as e:
+                return self._json(400, {"error": f"arguments: {e}"})
+            d = tool_rules().decide(str(req.get("server") or ""), str(req.get("tool") or ""), args, ann,
+                                    record=False)
+            return self._json(200, d)
+        return self._json(404, {"error": "not found"})
+
+    # ------------------------------------------------ requirements (scripts/ns_requirements.py)
+
+    def _requirements(self):
+        if not self._owner_only():
+            return
+        import ns_requirements as nrq
+        post = self.command == "POST"
+        req = self._read() if post else {}
+        configured = _configured_bins()
+        try:
+            if not post and self.path == "/api/requirements":
+                return self._json(200, nrq.check(configured=configured))
+            if not post and self.path == "/api/requirements/snapshots":
+                return self._json(200, {"snapshots": nrq.list_snapshots(), "dir": str(nrq.SNAP_DIR)})
+            if not post and self.path == "/api/requirements/freeze":
+                body = nrq.freeze().encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="neuronscope-env.txt"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if post and self.path == "/api/requirements/snapshot":
+                path = nrq.save_snapshot(nrq.snapshot(configured))
+                return self._json(200, {"id": path.stem})
+            if post and self.path == "/api/requirements/diff":
+                snaps = [x["id"] for x in nrq.list_snapshots()]
+                a = req.get("a") or (snaps[1] if len(snaps) > 1 else None)
+                b = req.get("b") or (snaps[0] if snaps else None)
+                if not a or not b:
+                    return self._json(400, {"error": "take two snapshots first (one now, one after a change)"})
+                return self._json(200, nrq.diff(nrq.load_snapshot(str(a)), nrq.load_snapshot(str(b))))
+        except FileNotFoundError:
+            return self._json(404, {"error": "no such snapshot"})
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
     def do_GET(self):
         self._route = None
+        if self.path.startswith(("/api/remote/next", "/api/remote/file/")):
+            return self._remote_public("GET")
         if self.path.split("?")[0] == "/pair":
             body = PAIR_PAGE.encode()
             self.send_response(200)
@@ -2032,7 +2877,7 @@ class Handler(BaseHTTPRequestHandler):
                                                "expires": x.get("expires"),
                                                "error": (LINKS["cache"].get(x["name"]) or (0, [], None))[2],
                                                "models": len((LINKS["cache"].get(x["name"]) or (0, []))[1])}
-                                              for x in load_links()]})
+                                              for x in load_links() if x.get("kind") != "agent"]})
         if self.path == "/api/links/models":
             return self._json(200, link_models())
         if self.path == "/":
@@ -2062,6 +2907,75 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/traces":
             return self._json(200, {"traces": list_traces()})
+        if self.path in ("/lab", "/api/lab"):
+            if not self._owner_only():
+                return
+            if self.path == "/lab":
+                import lab_page
+                body = lab_page.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            hub = lab_hub()
+            return self._json(200, {"services": hub.service_state(), "traces": hub.find_traces()})
+        if self.path in ("/setup", "/api/setup", "/api/hardware"):
+            if not self._owner_only():
+                return
+            if self.path == "/setup":
+                import setup_page
+                body = setup_page.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/api/setup":
+                return self._json(200, setup_state())
+            import accelerators
+            path = STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG)
+            return self._json(200, {"path": path, "config": accelerators.load_config(path),
+                                    "devices": POOL.devices(refresh=True)})
+        if self.path in ("/remote", "/remote/download") or self.path.startswith("/api/remote"):
+            return self._remote_get()
+        if self.path in ("/connect", "/api/connect"):
+            if not self._owner_only():
+                return
+            if self.path == "/connect":
+                import connect_page
+                body = connect_page.PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            import ns_connect
+            base = self._self_url(public=True)
+            out = ns_connect.snippets(base, "token" if STATE["token"] else None)
+            out["token_required"] = bool(STATE["token"])
+            out["models"] = ["auto"] + [m["id"] for m in scan_models()]
+            return self._json(200, out)
+        if self.path == "/mcp":
+            # Streamable HTTP lets a server offer an SSE stream here; this one answers POSTs only.
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path == "/api/doctor":
+            if not self._owner_only():
+                return
+            return self._json(200, run_doctor())
+        if self.path in ("/review", "/api/review") or self.path.startswith("/review/view/"):
+            return self._review_get()
+        if self.path.startswith("/api/requirements"):
+            return self._requirements()
+        if self.path in ("/settings", "/api/workspaces", "/api/settings"):
+            return self._settings()
         if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
             return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
@@ -2166,6 +3080,8 @@ class Handler(BaseHTTPRequestHandler):
                 "idle_ttl": STATE["idle_ttl"], "jit": STATE["jit"],
                 "auto_ready": any(model_summary(m)["eligible"] for m in scan_models()),
                 "idle_for": int(time.time() - ACTIVITY["last"]),
+                # What this caller may do: "owner" (everything) or "device" (models, chat, checks).
+                "role": self._role, "workspace": STATE.get("workspace_name"),
             })
         self._json(404, {"error": "not found"})
 
@@ -2189,6 +3105,8 @@ class Handler(BaseHTTPRequestHandler):
                 THROTTLE.fail(self.client_address[0])
                 self._json(401, {"error": "bad token"})
             return
+        if self.path in ("/api/remote/claim", "/api/remote/reply"):
+            return self._remote_public("POST")
         if self.path == "/api/pair/claim":
             ip = self.client_address[0]
             if THROTTLE.blocked(ip):
@@ -2220,6 +3138,8 @@ class Handler(BaseHTTPRequestHandler):
             # run code), no load flags or downloads, no MCP reloads, no pairing.
             return self._json(403, {"error": "paired devices can chat and use /v1; this needs the owner"})
         try:
+            if self.path.startswith("/api/remote/"):
+                return self._remote_post()
             if self.path in ("/api/pair/start", "/api/devices/revoke", "/api/devices/update", "/api/links/add",
                              "/api/links/remove"):
                 return self._pairing_post()
@@ -2235,6 +3155,109 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/projects") or self.path == "/api/workers/stop":
                 return self._projects_post()
 
+            if self.path == "/mcp":
+                return self._mcp_post()
+
+            if self.path.startswith("/api/review/"):
+                return self._review_post()
+
+            if self.path.startswith("/api/requirements/"):
+                return self._requirements()
+
+            if self.path.startswith("/api/workspaces/") or self.path.startswith("/api/settings/"):
+                return self._settings()
+
+            if self.path in ("/api/lab/start", "/api/lab/stop"):
+                if not self._owner_only():
+                    return
+                req = self._read()
+                hub = lab_hub()
+                name = str(req.get("name") or "")
+                if name not in hub.SERVICES:
+                    return self._json(404, {"error": f"no lab service {name!r}"})
+                if self.path == "/api/lab/stop":
+                    hub.stop(name)
+                    return self._json(200, {"ok": True})
+                ok, why, port = hub.acquire(name, "studio", req.get("cfg") or {})
+                return self._json(200 if ok else 400, {"ok": ok, "port": port, "message": why} if ok
+                                  else {"error": why})
+
+            if self.path in ("/api/setup", "/api/hardware", "/api/restart"):
+                if not self._owner_only():
+                    return
+                if self.path == "/api/restart":
+                    threading.Thread(target=restart_studio, daemon=True).start()
+                    return self._json(200, {"ok": True, "note": "Studio restarts in a moment"})
+                req = self._read()
+                if self.path == "/api/setup":
+                    clean, errs = clean_setup(req.get("values") or {})
+                    if errs:
+                        return self._json(400, {"error": "; ".join(f"{k}: {v}" for k, v in errs.items()), "fields": errs})
+                    import ns_workspace
+                    ws_keys = {"models_dir": "models_dirs", "server": "server", "cett": "cett",
+                               "download_dir": "download_dir"}
+                    to_ws = {ws_keys[k]: v for k, v in clean.items() if k in ws_keys}
+                    if to_ws:
+                        ns_workspace.save(STATE.get("workspace_name") or ns_workspace.active_name(_ws_path()),
+                                          to_ws, path=_ws_path(), check_exists=False)
+                    rest = {k: v for k, v in clean.items() if k not in ws_keys}
+                    if rest:
+                        save_studio_config(rest)
+                    later = apply_setup(clean)
+                    return self._json(200, {"saved": sorted(clean), "restart_needed": later, **setup_state()})
+                cfg = req.get("config")
+                if not isinstance(cfg, dict) or set(cfg) - {"prefer", "servers", "devices", "manual"}:
+                    return self._json(400, {"error": "hardware config must be an object with prefer, servers, "
+                                                     "devices and manual"})
+                for b, pth in (cfg.get("servers") or {}).items():
+                    if pth and not os.path.isfile(os.path.expanduser(pth)):
+                        return self._json(400, {"error": f"servers.{b}: {pth} does not exist"})
+                for dev, c in (cfg.get("devices") or {}).items():
+                    if not isinstance(c, dict):
+                        return self._json(400, {"error": f"devices.{dev} must be an object"})
+                    if c.get("server") and not os.path.isfile(os.path.expanduser(c["server"])):
+                        return self._json(400, {"error": f"{dev}: llama-server {c['server']} does not exist"})
+                import accelerators
+                path = os.path.expanduser(STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                os.replace(tmp, path)
+                return self._json(200, {"ok": True, "devices": POOL.devices(refresh=True)})
+
+            if self.path == "/api/connect/token":
+                # A separate, revocable token for an app (Cline, Claude Desktop): a paired
+                # device with persistent access, minted and claimed in one step.
+                if not self._owner_only():
+                    return
+                reg = STATE.get("devices")
+                if reg is None:
+                    return self._json(400, {"error": "device pairing is not available"})
+                req = self._read()
+                try:
+                    code, _, _ = reg.new_code(True, None)
+                except ValueError:          # this host only grants temporary access
+                    code, _, _ = reg.new_code(False, None)
+                r = reg.claim(code, str(req.get("name") or "app")[:60])
+                return self._json(200, {"token": r["token"], "name": r.get("name"),
+                                        "note": "a paired device: chat, /v1, MCP read tools and reply checks; "
+                                                "revoke it under Link"})
+
+            if self.path == "/api/route":
+                req = self._read()
+                text = str(req.get("text") or "")
+                if not text.strip():
+                    return self._json(400, {"error": "text required"})
+                from subject_classifier import default_classifier
+                a = default_classifier().analyze(text)
+                models = scan_models()
+                _, pick = auto_pick({"messages": [{"role": "user", "content": text}]}, models)
+                return self._json(200, {"subjects": a["labels"] or ["unknown"], "why": a["why"],
+                                        "proba": dict(list(a["proba"].items())[:5]),
+                                        "auto_would_pick": pick.get("model"), "reason": pick.get("reason"),
+                                        "candidates": pick.get("candidates", [])[:5]})
+
             if self.path == "/api/trace":
                 req = self._read(MAX_BODY)
                 ref = req.get("model")
@@ -2248,19 +3271,44 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, trace_reply(model, req.get("messages") or [], text,
                                                        float(req.get("threshold", 0.5))))
                 except ValueError as e:
-                    return self._json(400, {"error": str(e)})
+                    links = []
+                    if "classifier" in str(e):
+                        links = [{"href": f"/#model={urllib.parse.quote(model['id'])}&field=classifier",
+                                  "label": "set this model's classifier"},
+                                 {"href": "/jobs#kind=classify", "label": "make one (H-Neuron pipeline, stage 5)"}]
+                    elif "cett" in str(e):
+                        links = [{"href": "/setup#build", "label": "build llama.cpp with cett-dump"},
+                                 {"href": "/settings#workspaces", "label": "use an existing build"}]
+                    return self._json(400, {"error": str(e), "links": links})
 
             if self.path.startswith("/api/rag/"):
                 return self._rag_post()
 
             if self.path == "/api/tools/approve":
                 req = self._read()
+                key, remember = str(req.get("key", "")), req.get("remember")
+                rule = None
+                if remember:
+                    # A standing rule changes what every later chat may do: the owner's call.
+                    if self._role != "owner":
+                        return self._json(403, {"error": "only the owner can make a standing rule"})
+                    import tool_rules as tr
+                    with APPROVALS_LOCK:
+                        call = PENDING_CALLS.get(key)
+                    if call is None:
+                        return self._json(404, {"error": "that call is no longer waiting"})
+                    try:
+                        rule = tool_rules().add(tr.rule_from_call(str(remember), call["server"], call["tool"],
+                                                                  call["args"]))
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                allow = bool(req.get("allow")) and remember != "deny"
                 with APPROVALS_LOCK:
-                    a = APPROVALS.get(str(req.get("key", "")))
+                    a = APPROVALS.get(key)
                     if a:
-                        a["allow"] = bool(req.get("allow"))
+                        a["allow"] = allow
                         a["event"].set()
-                return self._json(200 if a else 404, {"ok": bool(a)})
+                return self._json(200 if a else 404, {"ok": bool(a), "rule": rule})
 
             if self.path == "/api/mcp/reload":
                 hub = mcp_hub()
@@ -2545,11 +3593,11 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><meta charset="utf-8">
   --warn:#e7b65c;--acc:#6ea8e0;--accfg:#0d1117;--soft:#1d2733;--code:#20242b;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.5 ui-sans-serif,system-ui,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column}
-header{padding:.55rem 1rem;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:.8rem;background:var(--panel);flex-wrap:wrap}
+header{padding:.55rem 1rem;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:.5rem;background:var(--panel);flex-wrap:wrap}
 h1{margin:0;font-size:15px;font-weight:600}
 .status{font-size:13px;color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--line);margin-right:.35rem}.dot.on{background:var(--ok)}
-.chip{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:999px;padding:.1rem .6rem;color:var(--mut);cursor:pointer;background:var(--bg)}
+.chip{font:12px ui-monospace,monospace;border:1px solid var(--line);border-radius:999px;padding:.1rem .5rem;color:var(--mut);cursor:pointer;background:var(--bg)}
 main{flex:1;display:grid;grid-template-columns:330px 1fr;min-height:0}
 @media(max-width:800px){main{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{max-height:30vh;border-right:none;border-bottom:1px solid var(--line)}
   .dials{gap:.45rem .7rem;padding:.4rem .8rem}.dials input[type=range]{width:90px}#export{display:none}
@@ -2608,7 +3656,13 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <h1>NeuronScope Studio</h1>
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
-  <a href="/link" class="chip" style="margin-left:auto;text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/remote" class="chip" style="margin-left:auto;text-decoration:none" title="this Studio controls other computers' models (LM Studio, Ollama, llama.cpp) through the NeuronScope Remote agent">Remote</a>
+  <a href="/link" class="chip" style="text-decoration:none" title="pair devices and link other machines' models">Link</a>
+  <a href="/lab" class="chip" style="text-decoration:none" title="labs, live and 3D views, pipeline dashboard">Lab</a>
+  <a href="/setup" class="chip" style="text-decoration:none" title="paths, building llama.cpp, hardware, health check">Setup</a>
+  <a href="/settings" class="chip" style="text-decoration:none" title="workspaces (folders), the model per subject, tool approval rules">Settings</a>
+  <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
+  <a href="/review" class="chip" style="text-decoration:none" title="how each neuron behaves across tests, benchmarks and checked replies, by subject and over time">Review</a>
   <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
   <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
   <button id="theme" title="toggle theme">◐</button>
@@ -2726,7 +3780,7 @@ let chat={id:null,title:'New chat',messages:[]};
 const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra","classifier","gpus","split_mode","tensor_split","main_gpu"];
 const TEXT_FIELDS=["served_name","lora","extra","draft_model","classifier","gpus","split_mode","tensor_split"];
 const pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
-const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, run scripts/testqa.py against it with --publish-stats (see docs/TESTQA.md).';
+const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, grade it with TestQA (Jobs → Evaluate, or the link under its settings).';
 function statBadge(m){ const s=m.stats; if(!s) return '';
   if(!s.eligible) return `<span class="warnico" title="${esc(s.why_not+NOSTATS_HELP)}">⚠</span>`;
   return ''; }
@@ -2740,8 +3794,12 @@ function statTitle(s){ const g=s.graded; let t=`Rolling stats over the last ${g.
   return t; }
 function statLine(m){ const s=m.stats; if(!s||!s.graded.n) return '';
   const g=s.graded; return `<div class="stat" title="${esc(statTitle(s))}">✓ ${pct(g.accuracy)} · halluc ${pct(g.hallucination_rate)} · abst ${pct(g.abstention_rate)} · n ${g.n}</div>`; }
+// A TestQA job for this model, filled in (Jobs page).
+function gradeLink(m){ if(!m) return ''; const ep=`m=${location.origin}/v1@${m.id}`;
+  const out='runs/testqa-'+m.id.replace(/[^A-Za-z0-9_.-]+/g,'_')+'.json';
+  return `<a href="/jobs#kind=testqa&endpoint=${encodeURIComponent(ep)}&publish_stats=${encodeURIComponent(location.origin)}&out=${encodeURIComponent(out)}">Grade it with TestQA →</a>`; }
 function statsTable(s){ if(!s) return '';
-  if(!s.graded.n && !(s.activation&&s.activation.n) && !(s.live&&s.live.n)) return `<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not+NOSTATS_HELP)}</div>`;
+  if(!s.graded.n && !(s.activation&&s.activation.n) && !(s.live&&s.live.n)) return `<div class="note"><span class="warnico">⚠</span> ${esc(s.why_not+NOSTATS_HELP)} ${gradeLink(sel)}</div>`;
   let h='<table class="st"><tr><th>subject</th><th>n</th><th>right</th><th>halluc</th><th>abstain</th></tr>';
   const rows=[['all',s.graded],...Object.entries(s.subjects||{})];
   for(const [k,v] of rows) if(v.n) h+=`<tr><td>${esc(k)}</td><td>${v.n}</td><td>${pct(v.accuracy)}</td><td>${pct(v.hallucination_rate)}</td><td>${pct(v.abstention_rate)}</td></tr>`;
@@ -2762,8 +3820,19 @@ $('#api').onclick=async()=>{try{await navigator.clipboard.writeText(location.ori
   setTimeout(()=>$('#api').textContent=location.origin+'/v1',1200)}catch{}};
 
 // tabs
-$$('.tabs button').forEach(b=>b.onclick=()=>{ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x===b));
-  ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===b.dataset.tab?'block':'none'); });
+function showTab(name){ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x.dataset.tab===name));
+  ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===name?'block':'none'); }
+$$('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+// Links from other pages: /#tools, /#models, /#hub, /#docs, /#chats, or
+// /#model=<id>&field=classifier to open a model's settings at that field.
+const TAB_ALIAS={models:'local',local:'local',chats:'chats',hub:'hub',docs:'docs',tools:'tools'};
+function applyHash(){ const h=location.hash.slice(1); if(!h) return;
+  if(TAB_ALIAS[h]) return showTab(TAB_ALIAS[h]);
+  const q=new URLSearchParams(h), id=q.get('model');
+  if(id){ showTab('local'); const i=models.findIndex(m=>m.id===id); if(i<0) return;
+    pick(i); const f=q.get('field'); const el=f&&document.getElementById(f);
+    if(el){ el.scrollIntoView({block:'center'}); el.focus(); el.style.outline='2px solid var(--acc)'; setTimeout(()=>el.style.outline='',2500); } } }
+addEventListener('hashchange',applyHash);
 
 // ---------- models
 let linked=[];
@@ -2820,7 +3889,7 @@ $('#load').onclick=async()=>{
   $('#load').disabled=true; $('#loadmsg').textContent='starting llama-server…';
   const r=await (await post('/api/load',{path:sel.path,settings:s})).json();
   $('#load').disabled=false;
-  $('#loadmsg').innerHTML = r.ok?'<span class="okc">loaded</span>':'<span class="bad">'+esc(r.message||r.error||'failed')+'</span>';
+  $('#loadmsg').innerHTML = r.ok?'<span class="okc">loaded</span>':'<span class="bad">'+linkify(esc(r.message||r.error||'failed'))+'</span>';
   status();
 };
 $('#unload').onclick=async()=>{ await post('/api/unload'); status(); };
@@ -2893,9 +3962,15 @@ function toolCard(box,t){
   const args=typeof t.arguments==='string'?t.arguments:JSON.stringify(t.arguments,null,1);
   const state=t.result?(t.result.ok?'<span class="okc">done</span>':'<span class="bad">failed</span>'):(t.needs_approval&&!t.decided?'<span class="warn">waiting for you</span>':'<span>running…</span>');
   el.innerHTML=`<span class="tn">🔧 ${esc(t.name)}</span> ${state}<details ${t.needs_approval&&!t.decided?'open':''}><summary>arguments</summary><pre>${esc(args)}</pre></details>`+
-    (t.needs_approval&&!t.decided&&!t.result?`<button class="pri" data-a="1">Allow</button><button data-a="0">Deny</button>`:'')+
+    (t.needs_approval&&!t.decided&&!t.result?`<button class="pri" data-a="1">Allow once</button><button data-a="0">Deny</button>
+      <select data-r title="make it a standing rule (Settings → Tool approval)"><option value="">always…</option>
+      <option value="tool">always allow this tool</option><option value="args">always allow these exact arguments</option>
+      <option value="deny">always deny this tool</option></select>`:'')+
+    (!t.needs_approval&&t.decision&&t.decision.by!=='default'?`<div class="note">${esc(t.decision.action==='deny'?'blocked':'allowed')} by ${esc(t.decision.reason)} · <a href="/settings#tools">rules</a></div>`:'')+
     (t.result?`<details><summary>result</summary><pre>${esc(t.result.text)}</pre></details>`:'');
   el.querySelectorAll('button[data-a]').forEach(b=>b.onclick=async()=>{ t.decided=true; toolCard(box,t); await post('/api/tools/approve',{key:t.key,allow:b.dataset.a==='1'}); });
+  const rs=el.querySelector('select[data-r]'); if(rs) rs.onchange=async()=>{ const v=rs.value; if(!v) return; t.decided=true; toolCard(box,t);
+    const r=await post('/api/tools/approve',{key:t.key,allow:v!=='deny',remember:v}); if(!r.ok){ try{ alert((await r.json()).error) }catch{} } };
 }
 function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
 function renderChat(){
@@ -2905,12 +3980,19 @@ function renderChat(){
 }
 // ---------- per-reply check: token risk from the activation classifier
 function showRisk(el,c){
-  if(c.error){ el.innerHTML=`<div class="sum bad">check failed: ${esc(c.error)}</div>`; return; }
+  if(c.error){ el.innerHTML=`<div class="sum bad">check failed: ${linkify(esc(c.error))}${c.links&&c.links.length?' · '+linkList(c.links):''}</div>`; return; }
   const n=c.flagged.length, T=c.prob.length;
   const verdict=n?`<b class="bad">${n} of ${T} tokens flagged</b>`:`<b class="okc">no tokens flagged</b>`;
   el.innerHTML=`<div class="sum">risk: ${verdict} · peak ${(c.max*100).toFixed(0)}% · mean ${(c.mean*100).toFixed(0)}% `+
     `(flag at ${(c.threshold*100).toFixed(0)}%) · <a href="${esc(c.url)}" target="_blank" rel="noopener">open 3D view ↗</a>`+
-    ` · <a href="#" data-a="tog">${n?'hide':'show'} tokens</a></div><div class="rt"${n?'':' hidden'}></div>`;
+    ` · <a href="#" data-a="tog">${n?'hide':'show'} tokens</a>`+
+    (c.review?` · <span class="lbl">was it right? <a href="#" data-v="correct">right</a> / <a href="#" data-v="wrong">wrong</a>${c.label?` <b>(${esc(c.label==='correct'?'right':c.label)})</b>`:''}</span>`:'')+
+    `</div><div class="rt"${n?'':' hidden'}></div>`;
+  // A person's verdict makes the reply count in the Review page's right-vs-wrong statistics.
+  el.querySelectorAll('[data-v]').forEach(a=>a.onclick=async e=>{ e.preventDefault();
+    const r=await post('/api/review/label',{model:c.review.model,id:c.review.id,verdict:a.dataset.v});
+    if(r.ok){ c.label=a.dataset.v; const m=el.closest('.msg')?._msg; if(m&&m.check){ m.check.label=c.label; await persist(); } showRisk(el,c); }
+    else alert((await r.json()).error||r.statusText); });
   // Shade each token by its risk; underline the ones over the threshold.
   // Shading starts at half the threshold, so tokens the classifier calls clean stay unshaded.
   el.querySelector('.rt').innerHTML=c.pieces.map((p,i)=>{ const r=c.prob[i]||0, a=Math.max(0,Math.min(1,(r-c.threshold/2)/(c.threshold/2)));
@@ -2923,9 +4005,9 @@ async function checkReply(d){
   el.innerHTML='<div class="sum">checking… (one extra pass over the reply)</div>';
   let c;
   try{ const r=await post('/api/trace',{model:m.model||$('#modelPick').value||undefined,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)});
-    c=await r.json(); if(!r.ok) c={error:c.error||r.statusText}; }catch(e){ c={error:String(e)}; }
+    c=await r.json(); if(!r.ok) c={error:c.error||r.statusText,links:c.links}; }catch(e){ c={error:String(e)}; }
   showRisk(el,c);
-  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url}; await persist(); }
+  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url,review:c.review}; await persist(); }
 }
 try{ $('#autoCheck').checked=localStorage.getItem('ns_autocheck')==='1'; }catch{}
 $('#autoCheck').onchange=()=>{ try{ localStorage.setItem('ns_autocheck',$('#autoCheck').checked?'1':'0'); }catch{} };
@@ -2957,7 +4039,7 @@ async function stream(){
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
         rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined})});
-    if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} out.body.textContent='error: '+e; throw 0; }
+    if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} e=typeof e==='string'?e:(e.message||JSON.stringify(e)); out.body.innerHTML='error: '+linkify(esc(e)); throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
       if(rt) servedBy=rt.model;
       if(rt){ routeNote = rt.mode==='auto' ? `auto → ${rt.model}: ${rt.reason}` : `model: ${rt.model}${rt.mode==='manual'?' (chosen manually)':''}`;
@@ -2971,7 +4053,7 @@ async function stream(){
         if(!line.startsWith('data:')) continue;
         const d=line.slice(5).trim(); if(d==='[DONE]') continue;
         let j; try{ j=JSON.parse(d) }catch{ continue }
-        if(j.error){ out.body.textContent='error: '+(j.error.message||j.error); continue; }
+        if(j.error){ out.body.innerHTML='error: '+linkify(esc(j.error.message||j.error)); continue; }
         if(j.sources){ sources=j.sources; showSources(out.src,sources); continue; }
         if(j.tool_call){ tools.push(j.tool_call); toolCard(out.tools,j.tool_call); $('#log').scrollTop=1e9; continue; }
         if(j.tool_result){ const t=tools.find(x=>x.key===j.tool_result.key); if(t){ t.result=j.tool_result; t.decided=true; toolCard(out.tools,t); } continue; }
@@ -3086,8 +4168,18 @@ async function mcp(reload){
 }
 $('#mcpreload').onclick=()=>mcp(true);
 
-refresh(); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
+refresh(); (function hashWhenReady(n){ if(models.length||n>40) applyHash(); else setTimeout(()=>hashWhenReady(n+1),150); })(0); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
+// First run: point at Setup while llama-server or models are missing (owner only; devices get 403).
+fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server&&s.ready.models)) return;
+  const miss=[!s.ready.server&&'llama-server',!s.ready.models&&'models'].filter(Boolean).join(' and ');
+  const d=document.createElement('div'); d.id='setupBanner';
+  d.style.cssText='padding:.55rem 1rem;background:color-mix(in srgb,var(--acc) 18%,var(--panel));border-bottom:1px solid var(--line);font-size:13px';
+  d.innerHTML=`Almost there: Studio needs ${miss}. <a href="/setup" style="color:var(--acc);font-weight:600">Open Setup →</a>`;
+  document.querySelector('header').after(d); }).catch(()=>{});
 </script>"""
+from ui_links import inject as _inject_links  # noqa: E402
+PAGE = _inject_links(PAGE)
+
 
 
 LOGIN = """<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3145,6 +4237,8 @@ def main(argv=None):
                         "cpu), per-device settings, devices to skip (see scripts/accelerators.py)")
     p.add_argument("--traces-dir", default=os.path.expanduser("~/.neuronscope/traces"),
                    help="where per-reply checks are saved (open them in the 3D view or timeline.py)")
+    p.add_argument("--review-dir", default=os.path.expanduser("~/.neuronscope/review"),
+                   help="neuron review store: every checked reply's activations, for the /review page")
     p.add_argument("--idle-ttl", type=int, default=0, help="unload the model after N idle seconds (0 = never)")
     p.add_argument("--no-jit", action="store_true", help="/v1 requests never load or swap models")
     p.add_argument("--jobs-dir", default=os.path.expanduser("~/.neuronscope/jobs"),
@@ -3173,16 +4267,49 @@ def main(argv=None):
     p.add_argument("--rag-embed-gguf", help="embedding GGUF; Studio runs it with llama-server --embedding on demand")
     p.add_argument("--rag-embed-ngl", type=int, default=0, help="GPU layers for the embedding model")
     sec.add_server_security_args(p)
+    p.add_argument("--config", default=os.environ.get("NS_CONFIG", "~/.neuronscope/config.json"),
+                   help="settings file (\"studio\" section); the Setup page writes it, and flags override it")
+    p.add_argument("--workspace", help="which workspace's folders to use (Settings -> Workspaces; "
+                                       "default: the active one)")
+    pre, _ = p.parse_known_args(argv)
+    STATE["config_path"] = pre.config
+    os.environ["NS_CONFIG"] = os.path.expanduser(pre.config)
+    import ns_workspace
+    # A workspace chosen for this run (flag or variable) wins over the file's choice.
+    STATE["workspace_forced"] = pre.workspace or os.environ.get("NS_WORKSPACE")
+    if pre.workspace:
+        if pre.workspace not in ns_workspace.names():
+            print(f"error: no workspace {pre.workspace!r}; have {', '.join(ns_workspace.names())}", file=sys.stderr)
+            return 2
+        os.environ["NS_WORKSPACE"] = pre.workspace
+    ws = ns_workspace.active()
+    # Where things are comes from the workspace; the "studio" section holds behaviour.
+    # Precedence: flags, then the studio section, then the workspace.
+    WS_FLAGS = {"models_dir", "server", "cett", "download_dir", "chats_dir", "traces_dir", "review_dir",
+                "projects_dir", "jobs_dir", "stats_dir", "rag_dir"}
+    builtin = {d: p.get_default(d) for d in WS_FLAGS}
+    cfg = load_studio_config(pre.config)
+    dests = {x.dest for x in p._actions}
+    p.set_defaults(**{k: (list(v) if isinstance(v, list) else v) for k, v in cfg.items()
+                      if k in dests and k not in WS_FLAGS})
     a = p.parse_args(argv)
+    for d in WS_FLAGS - {"models_dir", "server", "cett", "download_dir"}:
+        if getattr(a, d) == builtin[d]:
+            setattr(a, d, ws[d])
+    STATE["workspace_name"], STATE["workspace"] = ws["name"], ws
+    STATE["subject_models"] = dict(cfg.get("subject_models") or {})
+    STATE["tool_rules_path"] = cfg.get("tool_rules") or None
+    os.environ.update(ns_workspace.env_for(ws))
 
-    STATE["models_dirs"] = [os.path.expanduser(d) for d in a.models_dir] or [
-        os.path.expanduser("~/.lmstudio/models"),
-        os.path.expanduser("~/.cache/lm-studio/models"),
-    ]
+    STATE["models_dirs"] = [os.path.expanduser(d) for d in a.models_dir] or ws["models_dirs"]
+    a.server = a.server or (ws["server"] if os.path.isfile(ws["server"]) else None)
+    a.cett = a.cett or (ws["cett"] if os.path.isfile(ws["cett"]) else None)
+    a.download_dir = a.download_dir or ws["download_dir"]
     STATE["server_bin"] = a.server or os.environ.get("NS_LLAMA_SERVER")
     STATE["settings_path"] = os.path.expanduser(a.settings)
     STATE["chats_dir"] = os.path.expanduser(a.chats_dir)
     STATE["traces_dir"] = os.path.expanduser(a.traces_dir)
+    STATE["review_dir"], STATE["review"] = os.path.expanduser(a.review_dir), None
     STATE.update(max_workers=max(1, a.max_workers), worker_idle=max(30, a.worker_idle),
                  hardware_path=os.path.expanduser(a.hardware))
     import director
@@ -3200,6 +4327,7 @@ def main(argv=None):
                  cett=a.cett if a.cett and os.path.exists(a.cett) else None)
     tls = bool(a.tls_cert and a.tls_key)
     STATE["tls"] = tls
+    STATE["bind_host"] = a.host
     try:
         for w in sec.check_bind(a.host, STATE["token"] or "", tls=tls,
                                 allow_plaintext=a.allow_plaintext):
@@ -3226,7 +4354,7 @@ def main(argv=None):
         STATE["jobs_off"] = ("jobs are off on a network bind: they can train models and run model-written code. "
                              "Restart Studio with --allow-remote-jobs to enable them.")
     else:
-        STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs)
+        STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs, cwd=ws["root"])
 
     scheme = "https" if tls else "http"
     print(f"NeuronScope Studio on {scheme}://{a.host}:{a.port}")
@@ -3237,9 +4365,22 @@ def main(argv=None):
     if STATE["cett"]:
         notes.append("activation scoring available")
     print(f"OpenAI-compatible API: {scheme}://{a.host}:{a.port}/v1  ({', '.join(notes)})")
+    print(f"workspace: {ws['name']}  (root {ws['root']})")
     print("model dirs:")
     for d in STATE["models_dirs"]:
         print(f"  {d}{'' if os.path.isdir(d) else '   (missing)'}")
+    if not any(os.path.isdir(d) for d in STATE["models_dirs"]):
+        print(f"  set your models folder: {scheme}://{a.host}:{a.port}/settings#workspaces, or\n"
+              f"  python scripts/ns_workspace.py set {ws['name']} models_dirs /path/to/models")
+    try:
+        found = [m["id"] for m in scan_models()]
+    except Exception:
+        found = []
+    if found:
+        # These ids are what API clients, TestQA (--endpoint x=URL/v1@<id>) and Cline put in "model".
+        print(f"models ({len(found)}): " + ", ".join(found[:8]) + (" …" if len(found) > 8 else ""))
+    else:
+        print("no .gguf models found yet: download some from the Models tab, or set the folder under Settings")
     if not STATE["server_bin"]:
         print("\nno --server given: models can be listed but not loaded")
     elif not os.path.exists(STATE["server_bin"]):
@@ -3261,7 +4402,10 @@ def main(argv=None):
         pass
     finally:
         stop_server()
+        if REMOTE["obj"] is not None:
+            REMOTE["obj"].tunnels.stop_all()
         POOL.stop()
+        stop_labs()
         if EMBED["proc"] is not None and EMBED["proc"].poll() is None:
             EMBED["proc"].terminate()
         if STATE.get("mcp") is not None:
