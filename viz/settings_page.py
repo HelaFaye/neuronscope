@@ -42,7 +42,7 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 </style>
 <header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
+<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
 
 <section class="card" id="appearance"><h2>Appearance</h2>
 <div class="note">A theme colours Studio's pages, its charts (the model radar) and the 3D views of activations and hallucination risk. Your choice is kept in this browser; <b>Make default</b> sets it for browsers that have not chosen one, and for the Godot client's 3D view.</div>
@@ -74,6 +74,36 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 <select id="tann" style="width:auto"><option value="{}">no annotations</option><option value='{"readOnlyHint":true}'>read-only</option><option value='{"readOnlyHint":false,"destructiveHint":false}'>writes</option><option value='{"readOnlyHint":false,"destructiveHint":true}'>destructive</option><option value='{"readOnlyHint":true,"openWorldHint":true}'>read-only, open world</option></select><button id="ttest">Test</button></div>
 <div id="tout" class="note"></div>
 <h3>Connected tools</h3><div id="tlist" class="note"></div></section>
+<section class="card" id="sharing"><h2>Sharing results</h2>
+<div class="note"><b>Off unless you turn it on.</b> When on, TestQA results can be sent to a scoreboard you name, so models can be compared across machines and setups. NeuronScope runs no scoreboard of its own; anyone can host <code>scripts/scoreboard_server.py</code>.</div>
+<details open style="margin:.5rem 0"><summary><b>What is sent, and what it is for</b></summary>
+<ul class="note">
+<li><b>A card, which may be public</b>:
+  <ul>
+  <li>the model file's SHA-256, size, name (not its path), quantization, and its Hugging Face repo if the file is verified to come from one;</li>
+  <li>what makes this setup different, so results are never mixed: the hash of the H-Neuron set and the suppression scale, the LoRA's hash and scale, fine-tune / merge / concept-edit lineage, the engine and its version, the engine options that can change answers (context, KV cache, speculative decoding, flash attention), and the sampling;</li>
+  <li>coarse hardware (OS, CPU model, cores, RAM and GPU memory in whole GB, GPU names);</li>
+  <li>the test bank's fingerprint and the right / wrong / declined counts per subject.</li>
+  </ul></li>
+<li><b>A verification log, private</b>: per test item, its id, the verdict and the model's reply. The scoreboard uses it only to check the card by grading the replies again; it must not publish it.</li>
+<li><b>Never sent</b>: your chats, prompts you typed, file paths, user or computer names, tokens, other models.</li>
+<li><b>Public only for models anyone can find</b>: the file's SHA-256 matches a file in its Hugging Face repo, or you list an unlisted model below. Everything else is private, or not sent.</li>
+<li>Every submission is kept on this computer exactly as sent (<code>~/.neuronscope/submissions/</code>), and listed below.</li>
+</ul></details>
+<label><input type="checkbox" id="shOn"> Share results</label>
+<label>Scoreboard address<input id="shEp" placeholder="https://scores.example.org"></label>
+<label><input type="checkbox" id="shAuto"> Submit automatically when a TestQA run finishes, for models found on Hugging Face</label>
+<details style="margin:.4rem 0"><summary class="note">Advanced</summary>
+<label><input type="checkbox" id="shUnl"> Also submit results for unlisted models automatically <span class="note">(sent privately: only the scoreboard's operator can see them, unless you list the model below)</span></label></details>
+<div class="row" style="margin-top:.4rem"><button class="pri" id="shSave">Save</button><span id="shMsg" class="note"></span></div>
+<h3>Models</h3><div class="note">Found on Hugging Face = this exact file is in the repo it came from (checking reads the whole file once).</div>
+<table id="shModels"></table>
+<h3>Submit a result by hand</h3>
+<div class="grid"><label>Results (TestQA runs from Jobs)<select id="shRes"></select></label><label>Model<select id="shModel"></select></label></div>
+<div class="row" style="margin-top:.4rem"><button id="shPrev">Preview exactly what is sent</button><button id="shSend">Submit</button></div>
+<pre id="shOut" class="note" style="max-height:22rem;overflow:auto;white-space:pre-wrap"></pre>
+<h3>Sent so far</h3><table id="shHist"></table>
+</section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -193,6 +223,29 @@ async function themes(){ const j=await (await fetch('/api/themes')).json(); cons
   document.querySelectorAll('[data-def]').forEach(b=>b.onclick=async()=>{ const r=await fetch('/api/settings/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:b.dataset.def})});
     $('#themeMsg').textContent=r.ok?'Default theme saved.':(await r.json()).error; themes(); }); }
 themes();
+
+let SH=null;
+async function shLoad(){ const r=await fetch('/api/settings/sharing'); SH=await r.json(); const st=SH.settings;
+  $('#shOn').checked=st.enabled; $('#shEp').value=st.endpoint; $('#shAuto').checked=st.auto_listed; $('#shUnl').checked=st.auto_unlisted;
+  $('#shModels').innerHTML='<tr><th>model</th><th>Hugging Face</th><th>public</th></tr>'+SH.models.map(m=>{ const c=m.check;
+    const hf=c?(c.listed?`<span class="okm">found in ${esc(c.repo)}</span>`:`<span class="note">${esc(c.reason)}</span>`):'<span class="note">not checked</span>';
+    const pub=c&&c.listed?'yes (listed)':`<label style="margin:0"><input type="checkbox" data-pub="${esc(m.id)}"${st.public_models.includes(m.id)?' checked':''}> list this unlisted model</label>`;
+    return `<tr><td>${esc(m.id)}</td><td>${hf} <button data-chk="${esc(m.path)}">Check</button></td><td>${pub}</td></tr>`; }).join('');
+  document.querySelectorAll('[data-chk]').forEach(b=>b.onclick=async()=>{ b.disabled=true; b.textContent='checking…';
+    await fetch('/api/settings/sharing/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:b.dataset.chk})}); shLoad(); });
+  $('#shRes').innerHTML=SH.results.length?SH.results.flatMap(r=>r.labels.map(l=>`<option value="${esc(r.file)}|${esc(l.label)}">${esc(r.file.split('/').pop())} · ${esc(l.label)}${l.model?' ('+esc(l.model)+')':''}</option>`)).join(''):'<option value="">no finished TestQA runs yet</option>';
+  $('#shModel').innerHTML=SH.models.map(m=>`<option value="${esc(m.path)}">${esc(m.id)}</option>`).join('');
+  $('#shHist').innerHTML=SH.history.length?'<tr><th>file</th><th>model</th><th>visibility</th><th>answer</th></tr>'+SH.history.map(h=>`<tr><td>${esc(h.file)}</td><td>${esc(h.model)}</td><td>${esc(h.visibility)}</td><td>${esc(h.answer?h.answer.status+(h.answer.shown_publicly?' · shown':''):'')}</td></tr>`).join(''):'<tr><td class="note">Nothing sent.</td></tr>';
+}
+$('#shSave').onclick=async()=>{ const pub=[...document.querySelectorAll('[data-pub]')].filter(x=>x.checked).map(x=>x.dataset.pub);
+  const r=await fetch('/api/settings/sharing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:$('#shOn').checked,endpoint:$('#shEp').value,auto_listed:$('#shAuto').checked,auto_unlisted:$('#shUnl').checked,public_models:pub})});
+  $('#shMsg').textContent=r.ok?'Saved.':(await r.json()).error; if(r.ok) shLoad(); };
+async function shAct(kind){ const [results,label]=($('#shRes').value||'|').split('|');
+  $('#shOut').textContent=kind==='preview'?'building the card (hashing the model file the first time)…':'sending…';
+  const r=await fetch('/api/settings/sharing/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({results,label,path:$('#shModel').value})});
+  const j=await r.json(); $('#shOut').textContent=r.ok?JSON.stringify(j,null,1):'error: '+j.error; if(kind==='submit') shLoad(); }
+$('#shPrev').onclick=()=>shAct('preview'); $('#shSend').onclick=()=>shAct('submit');
+shLoad();
 </script>
 """
 

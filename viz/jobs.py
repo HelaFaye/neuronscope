@@ -523,6 +523,8 @@ def build_argv(kind: str, values: dict) -> list[str]:
 
 
 class JobRunner:
+    on_finish = None          # callable(job meta), run when a job ends (Studio: automatic score submission)
+
     def __init__(self, root: str | Path, max_running: int = 2, cwd: str | Path | None = None):
         """cwd: where jobs run, so the pipeline's relative data/, models/ and runs/
         land in the workspace's root (default: the repository)."""
@@ -572,6 +574,11 @@ class JobRunner:
             meta["status"] = "done" if rc == 0 else "failed"
         meta.update(returncode=rc, ended=time.time())
         self._write(meta)
+        if self.on_finish is not None:
+            try:
+                self.on_finish(meta)
+            except Exception:
+                pass
 
     def get(self, jid: str) -> dict:
         return json.loads(self._meta_path(jid).read_text())

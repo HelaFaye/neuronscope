@@ -63,6 +63,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | A whole retraining cycle: baseline, data, one or more layer arms, holdout, verdict | **Jobs → Retrain → Retraining cycle** | `python scripts/retrain_cycle.py` | `start_job retrain_cycle` |
 | Find and remove a concept's direction from the weights (norm-preserving, KL damage meter, optimized) | **Jobs → Retrain → Concept edit** | `python scripts/concept_edit.py` ([CONCEPT_EDITING.md](CONCEPT_EDITING.md)) | `start_job concept_edit` |
 | Adapt to a task while protecting a subspace (SAGE) | **Jobs → Retrain → SAGE** | `python scripts/sage_edit.py train / chat / export` | `start_job sage_train` |
+| Share results with a scoreboard (opt-in; what is sent is listed and previewed) | **Settings → Sharing results** | `python scripts/score_cards.py`, `scripts/scoreboard_server.py` ([SHARING.md](SHARING.md)) | — |
 | Keep or reject a retrained model (holdout, per subject, hallucination) | **Jobs → Retrain → Keep or reject a retrain** | `python scripts/retrain_gate.py` | `start_job retrain_gate` |
 | Compare models, item by item; does suppression help | **Jobs → Analysis** | `merge_eval.py`, `compare_models.py` | `start_job …` |
 | Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |

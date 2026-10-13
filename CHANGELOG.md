@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added (sharing results, opt-in)
+- Score cards (`scripts/score_cards.py`, Settings → **Sharing results**),
+  off unless turned on and given a scoreboard address.
+  - A card holds: the model's SHA-256, name, quant and verified Hugging
+    Face repo; the setup variant (H-Neuron set and scale, LoRA, lineage,
+    engine and its answer-changing options, sampling); coarse hardware;
+    the per-subject counts.
+  - A private verification log holds the replies, used only to re-grade.
+  - Public only for models found on Hugging Face (file SHA-256 verified)
+    or listed by hand. Unlisted models are submitted automatically only
+    with the Advanced switch, and then privately.
+  - Preview of exactly what is sent, and a local copy of every submission.
+- `scripts/scoreboard_server.py`: a reference scoreboard.
+  - It re-grades every reply, rejects cards that do not match their
+    replies, and keeps logs private (admin token only).
+  - It shows public verified results grouped by model file and setup.
+- Jobs: an on_finish hook, used for automatic submission after TestQA.
+- docs/SHARING.md.
+
 ### Added (appearance)
 - Named themes (Settings → **Appearance**; the header ◐ button steps
   through them).

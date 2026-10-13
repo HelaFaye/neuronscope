@@ -1676,6 +1676,82 @@ def workspaces_state():
     return d
 
 
+SHARING_DEFAULTS = {"enabled": False, "endpoint": "", "auto_listed": False, "auto_unlisted": False,
+                    "public_models": []}
+
+
+def sharing() -> dict:
+    """Score sharing settings (Settings → Sharing results). Off until the owner turns it on."""
+    return {**SHARING_DEFAULTS, **(load_studio_config().get("sharing") or {})}
+
+
+def sharing_listed(path: str, refresh: bool = False) -> dict:
+    """Is this model file the one in its Hugging Face repo (cached; checking hashes the file)."""
+    cache = STATE.setdefault("hf_checks", {})
+    if refresh or path not in cache:
+        import score_cards
+        cache[path] = score_cards.hf_check(path)
+    return cache[path]
+
+
+def sharing_results() -> list[dict]:
+    """TestQA results files from Studio's jobs, newest first."""
+    out, seen = [], set()
+    jobs = STATE.get("jobs")
+    for j in (jobs.list(200) if jobs else []):
+        if j.get("kind") != "testqa" or j.get("status") != "done":
+            continue
+        f = (j.get("values") or {}).get("out")
+        if not f:
+            continue
+        p = Path(f) if os.path.isabs(f) else Path(jobs.cwd or ".") / f
+        if str(p) in seen or not p.exists():
+            continue
+        seen.add(str(p))
+        try:
+            d = json.loads(p.read_text())
+            eps = d.get("endpoints") or {}
+        except (OSError, ValueError):
+            continue
+        out.append({"file": str(p), "ended": j.get("ended"), "cache": (j.get("values") or {}).get("cache"),
+                    "labels": [{"label": k, "model": v.get("model")} for k, v in eps.items()]})
+    return out
+
+
+def sharing_card(results: str, label: str, model: dict, cache: str | None = None):
+    import score_cards
+    st = load_settings().get(_key(model["path"]), {})
+    sh = sharing()
+    listed = sharing_listed(model["path"])
+    return score_cards.build(results, label, model["path"], {**DEFAULTS, **st}, STATE.get("server_bin"), cache,
+                             listed=listed, public_by_hand=model["id"] in sh["public_models"])
+
+
+def sharing_after_job(meta: dict) -> None:
+    """Automatic submission when a TestQA job ends, within the owner's settings."""
+    sh = sharing()
+    if meta.get("kind") != "testqa" or meta.get("status") != "done" or not (sh["enabled"] and sh["endpoint"]):
+        return
+    if not (sh["auto_listed"] or sh["auto_unlisted"]):
+        return
+    import score_cards
+    for r in sharing_results():
+        if r["ended"] != meta.get("ended"):
+            continue
+        for lb in r["labels"]:
+            m = find_model(lb.get("model") or lb["label"])
+            if m is None:
+                continue
+            listed = sharing_listed(m["path"])["listed"]
+            if not ((listed and sh["auto_listed"]) or (not listed and sh["auto_unlisted"])):
+                continue
+            try:
+                card, log = sharing_card(r["file"], lb["label"], m, r.get("cache"))
+                score_cards.submit(sh["endpoint"], card, log)
+            except Exception as e:
+                STATE.setdefault("sharing_errors", []).append(f"{m['id']}: {type(e).__name__}: {e}"[:300])
+
+
 def studio_themes() -> dict:
     """Named Studio themes (viz/themes.json, "_studio"): UI colours, chart colours, and the
     3D viewer theme each one uses."""
@@ -2837,6 +2913,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._html(settings_page.PAGE)
             if self.path == "/api/workspaces":
                 return self._json(200, workspaces_state())
+            if self.path == "/api/settings/sharing":
+                import score_cards
+                cache = STATE.get("hf_checks", {})
+                return self._json(200, {"settings": sharing(),
+                                        "models": [{"id": m["id"], "path": m["path"], "check": cache.get(m["path"])}
+                                                   for m in scan_models() if m.get("format") != "hf"],
+                                        "results": sharing_results(), "history": score_cards.submissions(),
+                                        "errors": STATE.get("sharing_errors", [])[-10:]})
             return self._json(200, settings_state())
         req = self._read()
         path = _ws_path()
@@ -2877,6 +2961,44 @@ class Handler(BaseHTTPRequestHandler):
             save_studio_config({"subject_models": clean})
             STATE["subject_models"] = clean
             return self._json(200, {"subjects": subject_defaults()})
+        if self.path == "/api/settings/sharing":
+            cur = sharing()
+            for k in ("enabled", "auto_listed", "auto_unlisted"):
+                if k in req:
+                    cur[k] = bool(req[k])
+            if "endpoint" in req:
+                ep = str(req["endpoint"]).strip().rstrip("/")
+                if ep and not re.match(r"https?://[\w.\-\[\]:]+(/[\w./-]*)?$", ep):
+                    return self._json(400, {"error": "the scoreboard address is a URL like https://board.example"})
+                cur["endpoint"] = ep
+            if "public_models" in req:
+                ids = {m["id"] for m in scan_models()}
+                cur["public_models"] = sorted(str(x) for x in req["public_models"] if x in ids)
+            save_studio_config({"sharing": cur})
+            return self._json(200, {"settings": cur})
+        if self.path in ("/api/settings/sharing/check", "/api/settings/sharing/preview",
+                         "/api/settings/sharing/submit"):
+            m = next((x for x in scan_models() if x["path"] == req.get("path")), None)
+            if m is None:
+                return self._json(404, {"error": "no such model"})
+            if self.path.endswith("/check"):
+                return self._json(200, sharing_listed(m["path"], refresh=True))
+            known = {r["file"]: r for r in sharing_results()}
+            res = known.get(str(req.get("results", "")))
+            if res is None:
+                return self._json(400, {"error": "pick a TestQA results file from the list"})
+            card, log = sharing_card(res["file"], str(req.get("label") or ""), m, res.get("cache"))
+            if self.path.endswith("/preview"):
+                return self._json(200, {"card": card, "log": {"items": log["items"][:5],
+                                                              "total_items": len(log["items"])}})
+            sh = sharing()
+            if not (sh["enabled"] and sh["endpoint"]):
+                return self._json(400, {"error": "turn sharing on and give a scoreboard address first"})
+            import score_cards
+            try:
+                return self._json(200, score_cards.submit(sh["endpoint"], card, log))
+            except Exception as e:
+                return self._json(502, {"error": f"the scoreboard did not accept it: {type(e).__name__}: {e}"})
         if self.path == "/api/settings/theme":
             name = str(req.get("theme", ""))
             th = studio_themes()
@@ -3084,7 +3206,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._review_get()
         if self.path.startswith("/api/requirements"):
             return self._requirements()
-        if self.path in ("/settings", "/api/workspaces", "/api/settings"):
+        if self.path in ("/settings", "/api/workspaces", "/api/settings", "/api/settings/sharing"):
             return self._settings()
         if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
             return self._projects_get()
@@ -4551,6 +4673,8 @@ def main(argv=None):
                              "Restart Studio with --allow-remote-jobs to enable them.")
     else:
         STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs, cwd=ws["root"])
+        STATE["jobs"].on_finish = lambda meta: threading.Thread(target=sharing_after_job, args=(meta,),
+                                                                daemon=True).start()
 
     scheme = "https" if tls else "http"
     print(f"NeuronScope Studio on {scheme}://{a.host}:{a.port}")
