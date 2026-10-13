@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Added (engines)
+- Engine options (`scripts/engine_options.py`, model panel → **Engine
+  options**). One table drives the form, the command line and the
+  optimizer.
+  - Covers flash attention, KV cache types, loading mode, context shift
+    with tokens to keep, prompt cache reuse, and speculative decoding
+    (draft model, its device, n-gram draft-free methods, EAGLE-3/MTP).
+  - Also covers devices and RPC servers, CPU core range/mask and strict
+    placement, NUMA, a closed list of documented environment variables
+    (ROCm, Vulkan, CUDA, vLLM), and `numactl`/`taskset` wrappers.
+  - Each option is checked against the installed `llama-server --help`;
+    those a build lacks are folded away and reported after loading.
+- Fixed: llama.cpp renamed `--draft-max`/`--draft-min`, so loading with a
+  draft model failed on current builds. The spelling now follows the build.
+- vLLM as a second engine, per model. Hugging Face checkpoint folders appear
+  in the model list. Options include prefix caching, chunked prefill, fp8
+  KV cache, tensor/pipeline parallel, a speculative config and
+  quantization; `--vllm`/`$NS_VLLM` names the command. The remote agent
+  detects vLLM on port 8000.
+- `scripts/engine_optimizer.py` (Jobs → Setup → *Find the fastest engine
+  settings*): it measures tokens/s per combination of engine options with
+  the real server.
+  - Bayesian search with Optuna TPE when installed, else random search plus
+    refinement.
+  - Baseline first, cached trials, `--apply` to Studio's settings.
+- docs/ENGINE.md: the options, recipes (small GPU and long chats, draft-free
+  speedups, NVIDIA + AMD over Vulkan, ROCm + vLLM, Ryzen core pinning,
+  NUMA), and what is outside an application's reach.
+
 ### Improved (retraining on deficits)
 - `scripts/retrain_cycle.py` (Jobs → Retrain → *Retraining cycle*): one
   command from baseline to verdict. It serves the base GGUF with

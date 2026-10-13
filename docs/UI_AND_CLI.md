@@ -42,6 +42,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 |---|---|---|---|
 | Find and download models (Hugging Face) | Studio → **Models** | `hf download …` | — |
 | Load, unload, per-model settings | Studio → **Models** | `POST /api/load`, `/api/unload` | `load_model`, `unload_model` |
+| Engine (llama.cpp or vLLM) and its options: flash attention, KV cache, speculative decoding, context shift, devices, CPU placement, environment ([ENGINE.md](ENGINE.md)) | Studio → **Models** → a model → **Engine options** | `python scripts/engine_options.py`; `GET /api/engine/options` | — |
 | Chat (images, saved chats, presets) | Studio → **Chats** | `/v1/chat/completions` (any OpenAI client) | `chat` |
 | `auto` routing by measured skill | model picker → auto | `"model": "auto"`; `python scripts/model_stats.py rank "…"` | `route_prompt` |
 | Check a reply for hallucination risk, 3D view of it | chat → **check** | `POST /api/trace` | `check_reply` |

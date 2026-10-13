@@ -181,6 +181,22 @@ def scan_models():
                 "mmproj": projectors[0] if projectors else None,
                 **meta,
             })
+    # Hugging Face checkpoint folders (config.json + safetensors): served by vLLM.
+    for root in STATE["models_dirs"]:
+        for cfg in sorted(glob.glob(os.path.join(root, "**", "config.json"), recursive=True)):
+            d = os.path.dirname(cfg)
+            weights = glob.glob(os.path.join(d, "*.safetensors"))
+            if not weights or d in seen:
+                continue
+            seen.add(d)
+            try:
+                arch = json.loads(open(cfg).read()).get("model_type")
+            except (OSError, ValueError):
+                arch = None
+            found.append({"path": d, "name": os.path.basename(d), "format": "hf", "arch": arch,
+                          "size": sum(os.path.getsize(w) for w in weights),
+                          "id": f"{os.path.basename(os.path.dirname(d))}/{os.path.basename(d)}".lower(),
+                          "publisher": os.path.basename(os.path.dirname(d)), "mmproj": None})
     return found
 
 
@@ -401,13 +417,16 @@ def save_settings(all_settings):
 
 
 DEFAULTS = {"ngl": 99, "ctx": 8192, "batch": 2048, "threads": 0,
-            "parallel": 1, "flash_attn": True, "lora": "", "lora_scale": 1.0,
+            "parallel": 1, "flash_attn": "auto", "lora": "", "lora_scale": 1.0,
+            # llama (llama-server) or vllm (`vllm serve`); engine options and their
+            # spellings live in scripts/engine_options.py
+            "engine": "llama", "env": {}, "wrap": "",
             "experts": 0, "extra": "",
             # Speculative decoding. A small draft model proposes tokens that the
             # large one verifies in a batch, so on a bandwidth-bound host the
             # win can be large -- this is the biggest speed lever available on
             # an iGPU, where generation is limited by weight reads per token.
-            "draft_model": "", "draft_max": 16, "draft_min": 4,
+            "draft_model": "",
             # Load the model's mmproj projector when one sits next to it.
             "vision": True,
             # classifier.npz for this model: enables per-reply activation stats
@@ -619,7 +638,7 @@ def wait_healthy(port, proc, timeout=600):
 
 
 def start_server(model, settings, port):
-    if not STATE["server_bin"]:
+    if (settings.get("engine") or "llama") == "llama" and not STATE["server_bin"]:
         return False, "no llama-server set: Setup -> Build llama.cpp, or point Settings -> Workspaces at one"
     stop_server()
     if port_busy(port):
@@ -648,68 +667,117 @@ def start_server(model, settings, port):
     return True, "ready"
 
 
+def engine_settings(settings: dict) -> dict:
+    """Studio's settings as engine_options keys, mapping the older ones: flash_attn
+    True/False, a config's cache_type, draft limits only when drafting."""
+    s = dict(settings)
+    fa = s.get("flash_attn")
+    if fa is True:
+        s["flash_attn"] = "on"
+    elif fa is False:
+        s["flash_attn"] = "off"
+    if s.get("cache_type") and not s.get("cache_type_k"):
+        s["cache_type_k"] = s["cache_type"]
+        s.setdefault("cache_type_v", s.get("cache_type_v") or s["cache_type"])
+    if not s.get("cache_type_v"):
+        s.pop("cache_type_v", None)
+    drafting = s.get("draft_model") or (s.get("spec_type") not in (None, "", "none"))
+    if not drafting:
+        for k in ("draft_max", "draft_min", "draft_p_min", "draft_ngl", "draft_device"):
+            s.pop(k, None)
+    return s
+
+
 def server_cmd(model, settings, port):
-    """llama-server argv and environment for `model` with `settings`.
+    """The engine's argv and environment for `model` with `settings`.
     Raises ValueError on a setting that is not safe to pass through."""
-    cmd = [STATE["server_bin"], "-m", model["path"],
-           "-ngl", str(settings["ngl"]), "-c", str(settings["ctx"]),
-           "-b", str(settings["batch"]),
-           "--port", str(port), "--host", "127.0.0.1"]
-    if settings.get("threads"):
-        cmd += ["-t", str(settings["threads"])]
-    if settings.get("parallel", 1) > 1:
-        cmd += ["-np", str(settings["parallel"])]
-    if settings.get("flash_attn"):
-        # llama.cpp now requires a value: -fa on|off|auto
-        cmd += ["-fa", "on"]
-    if settings.get("cache_type"):
-        cmd += ["--cache-type-k", settings["cache_type"]]
-        cmd += ["--cache-type-v", settings.get("cache_type_v")
-                or settings["cache_type"]]
-    # What Cline and every other client sees in the model list.
-    cmd += ["--alias", settings.get("served_name") or model.get("id") or model["name"]]
-    if model.get("mmproj") and settings.get("vision", True):
-        cmd += ["--mmproj", model["mmproj"]]
-    if settings.get("cpu_cores"):
-        cmd += ["-t", str(settings["cpu_cores"])]
-    draft = settings.get("draft_model")
-    if draft:
-        if not os.path.exists(draft):
-            raise ValueError(f"draft model not found: {draft}")
-        cmd += ["-md", draft,
-                "--draft-max", str(settings.get("draft_max", 16)),
-                "--draft-min", str(settings.get("draft_min", 4))]
-    if settings.get("lora"):
-        cmd += ["--lora-scaled", settings["lora"],
-                str(settings.get("lora_scale", 1.0))]
-    # MoE only, and only when the model declares experts. The override key is
-    # architecture-prefixed, so it is read from the file rather than assumed.
-    if settings.get("experts") and model.get("n_experts"):
-        arch = model.get("arch")
-        if arch:
-            cmd += ["--override-kv",
-                    f"{arch}.expert_used_count=int:{settings['experts']}"]
+    import engine_options as eo
+    es = engine_settings(settings)
+    engine = settings.get("engine") or "llama"
+    alias = settings.get("served_name") or model.get("id") or model["name"]
+    if engine == "vllm":
+        cmd = vllm_cmd(model, es, port, alias)
+    elif engine != "llama":
+        raise ValueError(f"unknown engine {engine}")
+    else:
+        if model.get("format") == "hf":
+            raise ValueError("llama-server needs a GGUF. Serve this checkpoint with the vLLM engine, or convert it "
+                             "(Jobs → Merge and convert)")
+        cmd = [STATE["server_bin"], "-m", model["path"],
+               "-ngl", str(settings["ngl"]), "-c", str(settings["ctx"]),
+               "-b", str(settings["batch"]),
+               "--port", str(port), "--host", "127.0.0.1"]
+        if settings.get("threads"):
+            cmd += ["-t", str(settings["threads"])]
+        elif settings.get("cpu_cores"):
+            cmd += ["-t", str(settings["cpu_cores"])]
+        if settings.get("parallel", 1) > 1:
+            es["parallel"] = settings["parallel"]
+        else:
+            es.pop("parallel", None)
+        args, notes = eo.build_args(es, "llama", eo.probe(STATE["server_bin"], "llama"))
+        cmd += args
+        STATE["engine_notes"] = notes
+        # What Cline and every other client sees in the model list.
+        cmd += ["--alias", alias]
+        if model.get("mmproj") and settings.get("vision", True):
+            cmd += ["--mmproj", model["mmproj"]]
+        if settings.get("lora"):
+            cmd += ["--lora-scaled", settings["lora"],
+                    str(settings.get("lora_scale", 1.0))]
+        # MoE only, and only when the model declares experts. The override key is
+        # architecture-prefixed, so it is read from the file rather than assumed.
+        if settings.get("experts") and model.get("n_experts"):
+            arch = model.get("arch")
+            if arch:
+                cmd += ["--override-kv",
+                        f"{arch}.expert_used_count=int:{settings['experts']}"]
+        if settings.get("split_mode"):
+            if settings["split_mode"] not in ("layer", "row", "none", "tensor"):
+                raise ValueError("split mode must be layer, row, tensor or none")
+            cmd += ["-sm", settings["split_mode"]]
+        ts = str(settings.get("tensor_split") or "").replace(" ", "")
+        if ts:
+            if not re.fullmatch(r"\d+(\.\d+)?(,\d+(\.\d+)?)*", ts):
+                raise ValueError("tensor split must look like 1,1,1,1 or 3,1")
+            cmd += ["-ts", ts]
+        mg = settings.get("main_gpu")
+        if mg not in (None, "") and int(mg) >= 0:
+            cmd += ["-mg", str(int(mg))]
     env = None
+    extra_env = eo.build_env(settings)
     gpus = str(settings.get("gpus") or "").replace(" ", "")
     if gpus:
         if not re.fullmatch(r"\d+(,\d+)*", gpus):
             raise ValueError("visible GPUs must look like 0,1,2")
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpus}
-    if settings.get("split_mode"):
-        if settings["split_mode"] not in ("layer", "row", "none"):
-            raise ValueError("split mode must be layer, row or none")
-        cmd += ["-sm", settings["split_mode"]]
-    ts = str(settings.get("tensor_split") or "").replace(" ", "")
-    if ts:
-        if not re.fullmatch(r"\d+(\.\d+)?(,\d+(\.\d+)?)*", ts):
-            raise ValueError("tensor split must look like 1,1,1,1 or 3,1")
-        cmd += ["-ts", ts]
-    mg = settings.get("main_gpu")
-    if mg not in (None, "") and int(mg) >= 0:
-        cmd += ["-mg", str(int(mg))]
+        extra_env["CUDA_VISIBLE_DEVICES"] = gpus
+    if extra_env:
+        env = {**os.environ, **extra_env}
     if settings.get("extra"):
         cmd += settings["extra"].split()
-    return cmd, env
+    return eo.wrapper(settings) + cmd, env
+
+
+def vllm_cmd(model, es, port, alias):
+    """`vllm serve` for a Hugging Face checkpoint folder (or a GGUF, which vLLM
+    reads experimentally and needs the original tokenizer for)."""
+    import engine_options as eo
+    import shlex
+    exe = STATE.get("vllm_bin") or "vllm"
+    if not shutil.which(shlex.split(exe)[0]):
+        raise ValueError("vLLM is not installed (pip install vllm, or set its command under Setup)")
+    cmd = [*shlex.split(exe), "serve", model["path"], "--host", "127.0.0.1", "--port", str(port),
+           "--served-model-name", alias]
+    if model["path"].endswith(".gguf"):
+        tok = es.get("tokenizer") or model.get("tokenizer")
+        if not tok:
+            raise ValueError("vLLM needs the original model's tokenizer for a GGUF (set Tokenizer)")
+        cmd += ["--tokenizer", str(tok)]
+    if not es.get("max_model_len") and es.get("ctx"):
+        es["max_model_len"] = es["ctx"]
+    args, notes = eo.build_args(es, "vllm", None)
+    STATE["engine_notes"] = notes
+    return cmd + args
 
 
 def stop_server():
@@ -2939,6 +3007,17 @@ class Handler(BaseHTTPRequestHandler):
             path = STATE.get("hardware_path") or str(accelerators.DEFAULT_CONFIG)
             return self._json(200, {"path": path, "config": accelerators.load_config(path),
                                     "devices": POOL.devices(refresh=True)})
+        if self.path.startswith("/api/engine/options"):
+            import engine_options as eo
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            engine = (q.get("engine") or ["llama"])[0]
+            if engine not in ("llama", "vllm"):
+                return self._json(400, {"error": "engine is llama or vllm"})
+            sup = eo.probe(STATE["server_bin"], "llama") if engine == "llama" and STATE.get("server_bin") else None
+            sc = eo.schema(engine, sup)
+            sc["binary"] = STATE.get("server_bin") if engine == "llama" else STATE.get("vllm_bin")
+            sc["vllm_installed"] = bool(shutil.which((STATE.get("vllm_bin") or "vllm").split()[0]))
+            return self._json(200, sc)
         if self.path in ("/remote", "/remote/download") or self.path.startswith("/api/remote"):
             return self._remote_get()
         if self.path in ("/connect", "/api/connect"):
@@ -3351,7 +3430,8 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     ok, why = start_server(target, settings, req.get("port", 8080))
                 return self._json(200 if ok else 500,
-                                  {"ok": ok, "message": why})
+                                  {"ok": ok, "message": why, "notes": STATE.get("engine_notes") or [],
+                                   "args": PROC.get("args") if ok else None})
 
             if self.path == "/api/unload":
                 with LOCK:
@@ -3611,6 +3691,9 @@ section.chat{display:flex;flex-direction:column;min-height:0;min-width:0}
 .x{position:absolute;right:.4rem;top:.3rem;border:none;background:none;color:var(--mut);cursor:pointer;padding:0 .3rem}
 .tag{display:inline-block;font-size:11px;padding:0 .35rem;border:1px solid var(--line);border-radius:4px;margin-right:.25rem}
 .bad{color:var(--no)}.warn{color:var(--warn)}.okc{color:var(--ok)}
+details.eo{margin-top:.5rem;border:1px solid var(--line);border-radius:6px;padding:.3rem .5rem}details.eo>summary{cursor:pointer;font-size:12.5px}
+.eoG{margin:.3rem 0}.eoG>summary{cursor:pointer;font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.03em}
+.eoRow{margin:.25rem 0}.eoRow label{margin:.2rem 0 .1rem}.eoRow code{font-size:10.5px;color:var(--mut)}.eoRow .note{font-size:11px}
 label{display:block;font-size:12px;color:var(--mut);margin:.4rem 0 .1rem}
 input,select,textarea{font:12px ui-monospace,monospace;padding:.3rem .4rem;border:1px solid var(--line);border-radius:5px;width:100%;background:var(--bg);color:var(--fg)}
 input[type=checkbox]{width:auto}
@@ -3713,6 +3796,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div id="list">scanning…</div>
   <div id="panel" style="display:none">
     <hr style="border:none;border-top:1px solid var(--line);margin:.7rem 0">
+    <label>Engine</label><select id="engine"><option value="llama">llama.cpp (llama-server)</option><option value="vllm">vLLM</option></select>
     <div class="row2">
       <div><label>GPU layers</label><input id="ngl" value="99"></div>
       <div><label>Context</label><input id="ctx" value="8192"></div>
@@ -3738,9 +3822,9 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
     </div>
     <label>Served name (API model id)</label><input id="served_name" placeholder="defaults to the model id">
     <label>LoRA adapter (optional)</label><input id="lora" placeholder="/path/suppress-lora.gguf">
-    <label>Draft model (speculative decoding)</label>
-    <input id="draft_model" placeholder="/path/small-Q4_K_M.gguf">
-    <label>Extra llama-server flags</label><input id="extra" placeholder="--override-tensor '\.ffn_.*_exps\.=CPU'">
+    <details id="eoBox" class="eo"><summary>Engine options <span id="eoCount" class="note"></span></summary>
+      <div id="eoForm" class="note">loading…</div></details>
+    <label>Extra flags</label><input id="extra" placeholder="--override-tensor '\.ffn_.*_exps\.=CPU'">
     <label id="visionrow" style="display:none"><input type="checkbox" id="vision" checked> load vision projector <span id="mmname"></span></label>
     <label>H-Neuron classifier (optional, enables activation stats)</label><input id="classifier" placeholder="models/classifier.npz for this model">
     <button id="load" class="pri" style="margin-top:.7rem;width:100%">Load</button>
@@ -3777,8 +3861,44 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let models=[], sel=null, busy=false, ctrl=null, status_={}, pendingImgs=[];
 let chat={id:null,title:'New chat',messages:[]};
-const F=["ngl","ctx","batch","threads","experts","served_name","lora","draft_model","extra","classifier","gpus","split_mode","tensor_split","main_gpu"];
-const TEXT_FIELDS=["served_name","lora","extra","draft_model","classifier","gpus","split_mode","tensor_split"];
+const F=["ngl","ctx","batch","threads","experts","served_name","lora","extra","classifier","gpus","split_mode","tensor_split","main_gpu"];
+const TEXT_FIELDS=["served_name","lora","extra","classifier","gpus","split_mode","tensor_split"];
+// ---------- engine options (scripts/engine_options.py: one table for the form, the flags and the optimizer)
+let EO=null;
+async function loadEO(engine, values){
+  const r=await fetch('/api/engine/options?engine='+engine); EO=await r.json(); renderEO(values||{});
+}
+function eoInput(o,v){ const id='eo_'+o.key, dis=o.available?'':' disabled';
+  if(o.kind==='bool') return `<label class="eoRow" title="${esc(o.help)}"><input type="checkbox" id="${id}"${v?' checked':''}${dis}> ${esc(o.label)} <code>${esc(o.flag)}</code></label>`;
+  const ctl = o.kind==='choice' ? `<select id="${id}"${dis}><option value="">${o.default?esc(o.default)+' (default)':'engine default'}</option>${o.choices.map(c=>`<option${String(v)===c?' selected':''}>${esc(c)}</option>`).join('')}</select>`
+    : `<input id="${id}" value="${esc(v??'')}" placeholder="${o.kind==='text'?'':'engine default'}"${dis}>`;
+  return `<div class="eoRow" title="${esc(o.help)}"><label>${esc(o.label)} <code>${esc(o.flag)}</code></label>${ctl}${o.help?`<div class="note">${esc(o.help)}</div>`:''}</div>`; }
+function renderEO(s){
+  if(!EO) return; let n=0, html='';
+  for(const [g,opts] of Object.entries(EO.groups)){
+    const have=opts.filter(o=>o.available), lack=opts.filter(o=>!o.available);
+    n+=opts.filter(o=>s[o.key]!==undefined&&s[o.key]!==''&&s[o.key]!==null&&s[o.key]!==false&&!(o.key==='flash_attn'&&s[o.key]==='auto')&&!(o.key==='parallel'&&+s[o.key]===1)).length;
+    html+=`<details class="eoG"${opts.some(o=>s[o.key])?' open':''}><summary>${esc(g)}</summary>${have.map(o=>eoInput(o,s[o.key])).join('')}`+
+      (lack.length?`<details><summary class="note">${lack.length} not in this ${EO.engine==='llama'?'llama-server':'vLLM'} build</summary>${lack.map(o=>eoInput(o,s[o.key])).join('')}<div class="note">Update the engine (Setup → Build llama.cpp) to use these.</div></details>`:'')+`</details>`;
+  }
+  const env=s.env||{};
+  html+=`<details class="eoG"${Object.keys(env).length||s.wrap?' open':''}><summary>Environment and launch</summary>
+    <div class="note">Only these documented variables can be set. ${Object.entries(EO.env).map(([k,h])=>`<div class="eoRow"><label>${esc(k)}</label><input data-env="${esc(k)}" value="${esc(env[k]??'')}" placeholder="unset"><div class="note">${esc(h)}</div></div>`).join('')}</div>
+    <div class="eoRow"><label>Launch wrapper</label><select id="eo_wrap"><option value="">none</option>${Object.entries(EO.wrappers).map(([k,h])=>`<option value="${k}"${s.wrap===k?' selected':''}>${esc(h)}</option>`).join('')}</select></div>
+    <div class="row2"><div><label>NUMA node</label><input id="eo_numa_node" value="${esc(s.numa_node??0)}"></div><div><label>taskset cores</label><input id="eo_taskset_cores" value="${esc(s.taskset_cores??'')}" placeholder="0,2,4,6"></div></div></details>`;
+  if(EO.engine==='vllm') html=(EO.vllm_installed?'':'<div class="bad">vLLM is not installed here (pip install vllm), or set its command with studio --vllm.</div>')+
+    `<div class="eoRow"><label>Tokenizer (GGUF only)</label><input id="eo_tokenizer" value="${esc(s.tokenizer??'')}" placeholder="the original HF model id"></div>`+html;
+  $('#eoForm').innerHTML=html; $('#eoCount').textContent=n?`(${n} set)`:'';
+}
+function readEO(){ const s={};
+  for(const opts of Object.values(EO?EO.groups:{})) for(const o of opts){ const el=$('#eo_'+o.key); if(!el) continue;
+    if(o.kind==='bool'){ if(el.checked) s[o.key]=true; continue; }
+    const v=el.value.trim(); if(v==='') continue; s[o.key]= o.kind==='int'?parseInt(v): o.kind==='float'?parseFloat(v): v; }
+  s.env={}; $$('[data-env]').forEach(el=>{ if(el.value.trim()) s.env[el.dataset.env]=el.value.trim(); });
+  s.wrap=$('#eo_wrap')?$('#eo_wrap').value:''; if(s.wrap){ s.numa_node=$('#eo_numa_node').value.trim(); s.taskset_cores=$('#eo_taskset_cores').value.trim(); }
+  if($('#eo_tokenizer')&&$('#eo_tokenizer').value.trim()) s.tokenizer=$('#eo_tokenizer').value.trim();
+  return s; }
+$('#engine').onchange=()=>loadEO($('#engine').value, {...(sel&&sel.settings||{}), ...readEO()});
 const pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
 const NOSTATS_HELP=' Auto routing skips it: it only picks models whose answers have been graded. You can still load it or pick it by name. To add stats, grade it with TestQA (Jobs → Evaluate, or the link under its settings).';
 function statBadge(m){ const s=m.stats; if(!s) return '';
@@ -3880,16 +4000,21 @@ function pick(i){
   $('#visionrow').style.display = sel.mmproj?'block':'none';
   $('#statsbox').innerHTML = statsTable(sel.stats);
   $('#vision').checked = s.vision!==false; $('#mmname').textContent = sel.mmproj?'('+sel.mmproj.split('/').pop()+')':'';
+  const eng = s.engine || (sel.format==='hf'?'vllm':'llama'); $('#engine').value=eng;
+  const fa = s.flash_attn===true?'on':s.flash_attn===false?'off':s.flash_attn;
+  loadEO(eng, {...s, flash_attn: fa});
 }
 $('#load').onclick=async()=>{
   if(!sel) return;
   const s={}; F.forEach(k=>{ const el=$('#'+k); if(!el) return; s[k] = TEXT_FIELDS.includes(k) ? el.value : (parseFloat(el.value)||0); });
   if($('#main_gpu').value.trim()==='' || isNaN(parseFloat($('#main_gpu').value))) s.main_gpu=-1; else s.main_gpu=parseInt($('#main_gpu').value);
-  s.flash_attn=true; s.lora_scale=1.0; s.vision=$('#vision').checked;
-  $('#load').disabled=true; $('#loadmsg').textContent='starting llama-server…';
+  s.lora_scale=1.0; s.vision=$('#vision').checked; s.engine=$('#engine').value; Object.assign(s, readEO());
+  $('#load').disabled=true; $('#loadmsg').textContent=s.engine==='vllm'?'starting vLLM…':'starting llama-server…';
   const r=await (await post('/api/load',{path:sel.path,settings:s})).json();
-  $('#load').disabled=false;
-  $('#loadmsg').innerHTML = r.ok?'<span class="okc">loaded</span>':'<span class="bad">'+linkify(esc(r.message||r.error||'failed'))+'</span>';
+  $('#load').disabled=false; sel.settings=s;
+  $('#loadmsg').innerHTML = (r.ok?'<span class="okc">loaded</span>':'<span class="bad">'+linkify(esc(r.message||r.error||'failed'))+'</span>')+
+    (r.notes&&r.notes.length?'<div class="warn">'+r.notes.map(esc).join('<br>')+'</div>':'')+
+    (r.args?`<details><summary class="note">command</summary><code style="word-break:break-all">${esc(r.args.join(' '))}</code></details>`:'');
   status();
 };
 $('#unload').onclick=async()=>{ await post('/api/unload'); status(); };
@@ -4206,6 +4331,8 @@ def main(argv=None):
     p.add_argument("--models-dir", action="append", default=[],
                    help="repeatable; searched recursively for .gguf")
     p.add_argument("--server", help="path to llama-server (or $NS_LLAMA_SERVER)")
+    p.add_argument("--vllm", default=os.environ.get("NS_VLLM", "vllm"),
+                   help="the vLLM command, for models served with the vLLM engine (default $NS_VLLM or vllm)")
     p.add_argument("--port", type=int, default=7870)
     p.add_argument("--host", default="127.0.0.1",
                    help="non-loopback binds require a token, and TLS unless --allow-plaintext")
@@ -4306,6 +4433,7 @@ def main(argv=None):
     a.cett = a.cett or (ws["cett"] if os.path.isfile(ws["cett"]) else None)
     a.download_dir = a.download_dir or ws["download_dir"]
     STATE["server_bin"] = a.server or os.environ.get("NS_LLAMA_SERVER")
+    STATE["vllm_bin"] = a.vllm
     STATE["settings_path"] = os.path.expanduser(a.settings)
     STATE["chats_dir"] = os.path.expanduser(a.chats_dir)
     STATE["traces_dir"] = os.path.expanduser(a.traces_dir)

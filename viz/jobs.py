@@ -91,6 +91,20 @@ SPECS: dict[str, dict] = {
             F("lora_r", kind="int", default=16), F("epochs", kind="float", default=2),
             F("max_steps", kind="int", default=-1), F("max_length", kind="int", default=2048),
             F("gradient_checkpointing", kind="bool")]},
+    "engine_optimize": {
+        "title": "Find the fastest engine settings", "group": "Setup", "argv": [S / "engine_optimizer.py"],
+        "help": "Measure tokens/s over threads, batch, flash attention, KV types... and keep the best (docs/ENGINE.md).",
+        "fields": [
+            F("model", req=True, help="the GGUF to tune for"), F("out", req=True, help="results folder"),
+            F("trials", kind="int", default=24),
+            F("objective", choices=["gen", "prompt", "request"], default="gen",
+              help="generation speed, prompt speed, or the time of a whole request"),
+            F("prompt_tokens", kind="int", default=512), F("gen_tokens", kind="int", default=128),
+            F("kv", kind="bool", help="also try quantized KV caches"),
+            F("spec", kind="bool", help="also try draft-free speculative decoding"),
+            F("placement", kind="bool", help="also try strict CPU placement"),
+            F("ngl", kind="int", default=99), F("server", help="llama-server (default from the workspace)"),
+            F("apply", help="Studio's settings file, to use the winner (e.g. ~/.neuronscope/studio.json)")]},
     "retrain_cycle": {
         "title": "Retraining cycle", "group": "Retrain", "argv": [S / "retrain_cycle.py"],
         "help": "Measure, curate, train each arm, convert, measure on the holdout, keep or reject. Resumes.",

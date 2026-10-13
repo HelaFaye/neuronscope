@@ -94,7 +94,7 @@ ALLOW_TEXT = {"chat": "chat with the models",
               "install": "install received models into LM Studio or Ollama",
               "delete": "delete files in the incoming and models folders"}
 KNOWN_BACKENDS = (("lmstudio", "http://127.0.0.1:1234"), ("ollama", "http://127.0.0.1:11434"),
-                  ("llama-server", "http://127.0.0.1:8080"))
+                  ("llama-server", "http://127.0.0.1:8080"), ("vllm", "http://127.0.0.1:8000"))
 ROLE_LINE = "This computer is the HOST: it runs the models. Controllers send it instructions over MCP."
 
 
@@ -487,7 +487,7 @@ class Backend:
             except (ToolError, ValueError):
                 pass
         data = self.get_json("/v1/models").get("data") or []
-        return [{"id": m["id"], "loaded": True if self.kind == "llama-server" else None}
+        return [{"id": m["id"], "loaded": True if self.kind in ("llama-server", "vllm") else None}
                 for m in data if m.get("id")]
 
     def load(self, model: str, context_length: int | None = None, gpu: str | None = None,
@@ -508,8 +508,8 @@ class Backend:
                 if r.returncode != 0:
                     raise ToolError(f"lms load failed: {(r.stderr or r.stdout).strip()[-500:]}")
                 return {"loaded": model, "how": "lms load"}
-        if self.kind == "llama-server":
-            raise ToolError("llama-server serves the one model it was started with (-m); restart it to change models")
+        if self.kind in ("llama-server", "vllm"):
+            raise ToolError(f"{self.kind} serves the model it was started with; restart it to change models")
         # LM Studio without its CLI, or another OpenAI-compatible server: a one-token request
         # loads the model where just-in-time loading is on.
         self.chat({"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}, timeout=900)
@@ -1844,9 +1844,9 @@ table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .4
 <div class="card"><h2>Controllers allowed to control this host</h2><div id="ctls"></div></div>
 <div class="card"><h2>What controllers may do</h2><div id="allow"></div></div>
 <div class="card"><h2>LLM servers on this computer</h2><div id="bks"></div>
- <div style="margin-top:.5rem"><select id="bkind"><option value="openai">OpenAI-compatible</option><option value="lmstudio">LM Studio</option><option value="ollama">Ollama</option><option value="llama-server">llama-server</option></select>
+ <div style="margin-top:.5rem"><select id="bkind"><option value="openai">OpenAI-compatible</option><option value="lmstudio">LM Studio</option><option value="ollama">Ollama</option><option value="llama-server">llama-server</option><option value="vllm">vLLM</option></select>
  <input id="burl" placeholder="http://127.0.0.1:1234" size="28"> <button id="badd">Add</button></div>
- <div class="mut" style="margin-top:.3rem">LM Studio (port 1234), Ollama (11434) and llama-server (8080) are found by themselves when running.</div></div>
+ <div class="mut" style="margin-top:.3rem">LM Studio (port 1234), Ollama (11434), llama-server (8080) and vLLM (8000) are found by themselves when running.</div></div>
 <div class="card"><h2>Recent activity</h2><div id="act" class="mut">nothing yet</div></div>
 <div class="mut">Settings folder: <code id="home"></code></div>
 </main>
