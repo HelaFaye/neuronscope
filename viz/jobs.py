@@ -121,6 +121,36 @@ SPECS: dict[str, dict] = {
             F("subject", multi=True), F("allow_exec", kind="bool"),
             F("sandbox", choices=["none", "docker", "podman"], default="docker"),
             F("quant", default="Q4_K_M"), F("llama", help="llama.cpp checkout (default $NS_LLAMA)")]},
+    "concept_edit": {
+        "title": "Concept edit (subspace ablation)", "group": "Retrain", "argv": [S / "concept_edit.py"],
+        "help": "Find what separates two prompt sets and project it out of W_O/W_out, norm-preserving, with a KL "
+                "damage meter; --search optimizes it (docs/CONCEPT_EDITING.md).",
+        "fields": [
+            F("model", req=True, help="HF id or folder"), F("concept", req=True, help="prompts with the concept (A)"),
+            F("baseline", req=True, help="matched prompts without it (B)"),
+            F("neutral", help="ordinary prompts for the KL damage meter"), F("out", req=True),
+            F("method", choices=["mean", "pca"], default="mean"), F("k", kind="int", default=1),
+            F("search", kind="int", default=0, help="optimization trials (0: one edit with the values below)"),
+            F("max_kl", kind="float", default=0.0), F("kl_weight", kind="float", default=1.0),
+            F("kernel", help="max_w,pos,min_w,dist"), F("direction_layer", kind="float"),
+            F("marker", help="regex over replies: the behaviour to reduce"),
+            F("analyze", kind="bool", help="only measure where the concept lives")]},
+    "sage_train": {
+        "title": "SAGE: adapt with a protected subspace", "group": "Retrain", "argv": [S / "sage_edit.py", "train"],
+        "help": "Gated per-head activation edits for a task, kept orthogonal to a protected subspace "
+                "(e.g. the 'I don't know' direction).",
+        "fields": [
+            F("model", req=True), F("data", req=True, help="deficits output folder or JSONL"), F("out", req=True),
+            F("protect", help="directions.pt from a concept edit analysis"),
+            F("protect_concept", help="or: prompts with the behaviour to protect"),
+            F("protect_baseline", help="and matched prompts without it"),
+            F("k", kind="int", default=1), F("method", choices=["mean", "pca"], default="mean"),
+            F("epochs", kind="float", default=2), F("lr", kind="float", default=0.005),
+            F("l0", kind="float", default=0.01), F("layers")]},
+    "sage_export": {
+        "title": "SAGE: export a control vector", "group": "Retrain", "argv": [S / "sage_edit.py", "export"],
+        "help": "The additive edits as a llama.cpp control vector GGUF (approximate; see the docs).",
+        "fields": [F("edits", req=True, help="edits.pt"), F("cvector", req=True, help="output .gguf")]},
     "retrain_gate": {
         "title": "Keep or reject a retrain", "group": "Retrain", "argv": [S / "retrain_gate.py"],
         "help": "Before/after on the holdout: fixed vs broken items, hallucination, per subject; a verdict.",

@@ -94,6 +94,7 @@ def main(argv=None) -> int:
             if not (merged / "tokenizer.model").exists() and (Path(a.base) / "tokenizer.model").exists():
                 shutil.copy(Path(a.base) / "tokenizer.model", merged / "tokenizer.model")
         meta["merged"] = str(merged)
+        out.mkdir(parents=True, exist_ok=True)
         if a.gguf:
             ll = llama_dir(a.llama)
             f16 = out / "model-f16.gguf"

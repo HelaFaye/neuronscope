@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added (concept editing)
+- `scripts/concept_edit.py` (Jobs → Retrain → *Concept edit*): finds the
+  direction or PCA cone that separates two prompt sets in the residual
+  stream, with biprojection against the baseline mean.
+  - It projects that subspace out of W_O and W_out with norm-preserving
+    column rescaling, at per-layer strengths from a peak/floor/distance
+    kernel.
+  - It measures damage as KL against the original on a neutral set, plus
+    remaining separation and an optional behaviour regex.
+  - `--search` optimizes kernel and direction layer, Heretic-style (Optuna
+    TPE when installed) under a KL limit; `--analyze` only locates the
+    concept.
+- `scripts/sage_edit.py` (SAGE, Nonta & Rambhatla 2026): task adaptation
+  through gated per-head additive and multiplicative activation edits
+  (Hard-Concrete L0 gates), constrained to the orthogonal complement of a
+  protected subspace.
+  - The protected subspace can be the decline direction, so retraining
+    does not erode "I don't know".
+  - The invariant is checked in the running model after training.
+  - `chat` applies the edits; `export` writes the additive part as a
+    llama.cpp control vector, tested to load in llama-server.
+- Fixed: merge_export.py did not create its output folder for full models
+  (`finetune.py --method full`, edited models), so their GGUF conversion
+  failed.
+- docs/CONCEPT_EDITING.md.
+
 ### Added (engines)
 - Engine options (`scripts/engine_options.py`, model panel → **Engine
   options**). One table drives the form, the command line and the

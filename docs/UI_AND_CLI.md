@@ -61,6 +61,8 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | SWE-bench, LiveBench, CLIP_benchmark | **Jobs → Benchmarks** | `python scripts/benchmarks.py`, `clip_bench.py` | `start_job …` |
 | Retraining on failures (data, fine-tune, merge) | **Jobs → Retrain** | `deficits.py`, `finetune.py`, `merge_export.py` | `start_job …` |
 | A whole retraining cycle: baseline, data, one or more layer arms, holdout, verdict | **Jobs → Retrain → Retraining cycle** | `python scripts/retrain_cycle.py` | `start_job retrain_cycle` |
+| Find and remove a concept's direction from the weights (norm-preserving, KL damage meter, optimized) | **Jobs → Retrain → Concept edit** | `python scripts/concept_edit.py` ([CONCEPT_EDITING.md](CONCEPT_EDITING.md)) | `start_job concept_edit` |
+| Adapt to a task while protecting a subspace (SAGE) | **Jobs → Retrain → SAGE** | `python scripts/sage_edit.py train / chat / export` | `start_job sage_train` |
 | Keep or reject a retrained model (holdout, per subject, hallucination) | **Jobs → Retrain → Keep or reject a retrain** | `python scripts/retrain_gate.py` | `start_job retrain_gate` |
 | Compare models, item by item; does suppression help | **Jobs → Analysis** | `merge_eval.py`, `compare_models.py` | `start_job …` |
 | Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |
