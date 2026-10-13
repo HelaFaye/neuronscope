@@ -1099,28 +1099,47 @@ def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
 
 
 def _callhome_chat(host, path, payload, stream_to, hold_done):
-    """A host that calls in has no address to proxy to: chat goes as its MCP chat tool
-    and comes back whole (streamed to the client as one piece)."""
+    """A host that calls in has no address to proxy to: chat goes as its MCP chat tool.
+    Agents that stream post the reply in pieces while it is written (MCP progress), and
+    those pieces go straight on to the client; older agents answer whole, and the
+    reply is sent as one piece."""
     if path != "/v1/chat/completions":
         raise RuntimeError(f"{host} calls in to this Studio; only chat is available through it")
     args = {k: payload[k] for k in ("model", "messages", "temperature", "max_tokens", "top_p", "seed", "stop")
             if payload.get(k) is not None}
-    r = remote().call(host, "chat", args)
+    base = {"id": "callhome-" + secrets.token_hex(4), "object": "chat.completion.chunk", "model": args.get("model")}
+    sent = []
+
+    def emit(delta, finish=None):
+        stream_to.write(f"data: {json.dumps({**base, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]})}\n\n".encode())
+        stream_to.flush()
+
+    def piece(p):
+        text = p if isinstance(p, str) else str(p.get("content") or "")
+        if text:
+            emit({"content": text} if sent else {"role": "assistant", "content": text})
+            sent.append(text)
+
+    if stream_to is not None:
+        args["stream"] = True
+    r = remote().call(host, "chat", args, on_progress=piece if stream_to is not None else None)
     resp = r.get("response") or {"choices": [{"index": 0, "message": {"role": "assistant", "content": r.get("reply", "")},
                                               "finish_reason": "stop"}], "model": args.get("model")}
     if stream_to is None:
         return resp
-    text = r.get("reply", "")
-    base = {"id": resp.get("id", "callhome"), "object": "chat.completion.chunk", "model": resp.get("model")}
-    for ch in ({"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None},
-               {"index": 0, "delta": {}, "finish_reason": "stop"}):
-        stream_to.write(f"data: {json.dumps({**base, 'choices': [ch]})}\n\n".encode())
+    text, so_far = r.get("reply", ""), "".join(sent)
+    # What streamed is normally the whole reply; send whatever it lacks (all of it, from an older agent).
+    rest = text[len(so_far):] if text.startswith(so_far) else ("" if so_far else text)
+    if rest:
+        piece(rest)
+    finish = ((resp.get("choices") or [{}])[0].get("finish_reason")) or "stop"
+    emit({}, finish)
     if resp.get("usage"):
         stream_to.write(f"data: {json.dumps({**base, 'choices': [], 'usage': resp['usage']})}\n\n".encode())
     if not hold_done:
         stream_to.write(b"data: [DONE]\n\n")
     stream_to.flush()
-    return {"text": text, "tool_calls": [], "finish_reason": "stop"}
+    return {"text": text or so_far, "tool_calls": [], "finish_reason": finish}
 
 
 # ------------------------------------------------------- OpenAI-compatible API
@@ -2671,7 +2690,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"token": tok, "name": name, "controller": inv["controller"],
                                     "confirm": remote_hosts.nsr.pair_proof(code, inv["fingerprint"], "accept")})
         rec = None
-        if path in ("/api/remote/next", "/api/remote/reply"):
+        if path in ("/api/remote/next", "/api/remote/reply", "/api/remote/progress"):
             rec = self._host_token()
             if rec is None:
                 return
@@ -2680,7 +2699,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"messages": hub.next(rec["name"], float((q.get("wait") or ["25"])[0]))})
         if method == "POST" and path == "/api/remote/reply":
             req = self._read(MAX_BODY)
-            return self._json(200, {"ok": hub.reply(str(req.get("id", "")), req.get("response"))})
+            return self._json(200, {"ok": hub.reply(str(req.get("id", "")), req.get("response"), rec["name"])})
+        if method == "POST" and path == "/api/remote/progress":
+            req = self._read(MAX_BODY)
+            pieces = req.get("pieces") if isinstance(req.get("pieces"), list) else []
+            return self._json(200, hub.progress(str(req.get("id", "")), pieces[:4096], rec["name"]))
         m = re.fullmatch(r"/api/remote/file/([A-Za-z0-9_-]+)", path)
         if method == "GET" and m:
             fp = hub.ticket_path(m.group(1))
@@ -3355,7 +3378,7 @@ class Handler(BaseHTTPRequestHandler):
                 THROTTLE.fail(self.client_address[0])
                 self._json(401, {"error": "bad token"})
             return
-        if self.path in ("/api/remote/claim", "/api/remote/reply"):
+        if self.path in ("/api/remote/claim", "/api/remote/reply", "/api/remote/progress"):
             return self._remote_public("POST")
         if self.path == "/api/pair/claim":
             ip = self.client_address[0]

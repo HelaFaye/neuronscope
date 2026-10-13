@@ -171,6 +171,7 @@ class CallHomeHub:
         self.queues: dict = collections.defaultdict(collections.deque)
         self.waiting: dict = {}       # message id -> [Event, response]
         self.seen: dict = {}          # host name -> last poll time
+        self.polling: dict = collections.Counter()   # host name -> long polls open now
         self.tickets: dict = {}       # file ticket -> {path, expires, host}
 
     def invite(self, url: str, name: str, fingerprint: str, controller: str, ttl: float = 900) -> dict:
@@ -195,46 +196,102 @@ class CallHomeHub:
                     return self.invites.pop(code), code
         return None
 
-    def request(self, host: str, message: dict, timeout: float = 120) -> dict:
+    def request(self, host: str, message: dict, timeout: float = 120, on_progress=None) -> dict:
+        """Queue a message for a host and wait for its answer. With on_progress, the
+        message carries an MCP progress token; streamed pieces the host posts to
+        /api/remote/progress are handed to on_progress as they come, and timeout
+        counts from the last sign of life rather than from the start. If on_progress
+        raises (the reader went away), the host is told to stop and the error is
+        re-raised."""
         if not self.online(host):
             raise RemoteError(f"{host} is not connected: the agent there is not running, or cannot reach this "
                               "Studio")
         mid = secrets.token_hex(8)
-        ev = threading.Event()
+        w = {"ev": threading.Event(), "resp": None, "host": host, "chunks": collections.deque(), "cancel": False,
+             "touched": time.time()}
+        if on_progress is not None and isinstance(message, dict):
+            params = message.setdefault("params", {})
+            params["_meta"] = {**(params.get("_meta") or {}), "progressToken": mid}
         with self.lock:
-            self.waiting[mid] = [ev, None]
+            self.waiting[mid] = w
             self.queues[host].append({"id": mid, "message": message})
             self.lock.notify_all()
-        if not ev.wait(timeout):
+        try:
+            while not w["ev"].wait(0.05 if on_progress else timeout):
+                if on_progress is not None:
+                    self._drain(w, on_progress)
+                if time.time() - w["touched"] > timeout:
+                    raise RemoteError(f"{host} did not answer within {timeout:.0f}s")
+            if on_progress is not None:
+                self._drain(w, on_progress)
+            return w["resp"]
+        except BaseException:
             with self.lock:
-                self.waiting.pop(mid, None)
+                w["cancel"] = True
                 self.queues[host] = collections.deque(m for m in self.queues[host] if m["id"] != mid)
-            raise RemoteError(f"{host} did not answer within {timeout:.0f}s")
-        with self.lock:
-            return self.waiting.pop(mid)[1]
+            raise
+        finally:
+            # A cancelled entry lingers briefly so the host's next progress post learns to stop.
+            threading.Timer(30 if w["cancel"] else 0, lambda: self.waiting.pop(mid, None)).start()
+
+    def _drain(self, w: dict, on_progress) -> None:
+        while True:
+            with self.lock:
+                if not w["chunks"]:
+                    return
+                piece = w["chunks"].popleft()
+            on_progress(piece)
 
     def next(self, host: str, wait: float = 25) -> list:
         end = time.time() + max(0.0, min(wait, 55))
         with self.lock:
             self.seen[host] = time.time()
-            while not self.queues[host] and time.time() < end:
-                self.lock.wait(max(0.05, end - time.time()))
-            out = list(self.queues[host])
-            self.queues[host].clear()
-            self.seen[host] = time.time()
+            self.polling[host] += 1
+            try:
+                while not self.queues[host] and time.time() < end:
+                    self.lock.wait(max(0.05, end - time.time()))
+                out = list(self.queues[host])
+                self.queues[host].clear()
+            finally:
+                self.polling[host] -= 1
+                self.seen[host] = time.time()
         return out
 
-    def reply(self, mid: str, response) -> bool:
+    def last_seen(self, host: str) -> float | None:
+        """Seconds since the host was last heard from; 0 while it is waiting on a poll."""
+        if self.polling.get(host):
+            return 0.0
+        t = self.seen.get(host)
+        return None if t is None else time.time() - t
+
+    def _mine(self, mid: str, host: str | None):
+        w = self.waiting.get(mid)
+        # A host may only answer the messages that were queued for it.
+        return w if w is not None and (host is None or w["host"] == host) else None
+
+    def reply(self, mid: str, response, host: str | None = None) -> bool:
         with self.lock:
-            w = self.waiting.get(mid)
-            if w is None:
+            w = self._mine(mid, host)
+            if w is None or w["ev"].is_set():
                 return False
-            w[1] = response
-            w[0].set()
+            w["resp"] = response
+            w["ev"].set()
             return True
 
+    def progress(self, mid: str, pieces: list, host: str | None = None) -> dict:
+        """Streamed pieces of an answer still being made. -> {"ok", "cancel"}."""
+        with self.lock:
+            w = self._mine(mid, host)
+            if w is None:
+                return {"ok": False, "cancel": True}
+            self.seen[w["host"]] = w["touched"] = time.time()
+            if not w["cancel"]:
+                w["chunks"].extend(p for p in pieces if isinstance(p, (str, dict)))
+            return {"ok": True, "cancel": w["cancel"]}
+
     def online(self, host: str) -> bool:
-        return time.time() - self.seen.get(host, 0) < 70
+        ago = self.last_seen(host)
+        return ago is not None and ago < 70
 
     def ticket(self, path: str, host: str, ttl: float = 6 * 3600) -> str:
         t = secrets.token_urlsafe(24)
@@ -292,11 +349,11 @@ class Remote:
         return None
 
     # -- MCP
-    def rpc(self, rec: dict, method: str, params: dict | None = None, timeout: float = 120):
+    def rpc(self, rec: dict, method: str, params: dict | None = None, timeout: float = 120, on_progress=None):
         self.ids += 1
         msg = {"jsonrpc": "2.0", "id": self.ids, "method": method, "params": params or {}}
         if rec.get("method") == "callhome":
-            resp = self.hub.request(rec["name"], msg, timeout)
+            resp = self.hub.request(rec["name"], msg, timeout, on_progress=on_progress)
         else:
             self.tunnels.ensure(rec)
             st, resp, _ = nsr.http_json(rec["url"], "POST", "/mcp", msg, token=rec["token"],
@@ -311,9 +368,9 @@ class Remote:
             raise RemoteError(f"{rec['name']}: {resp['error'].get('message')}")
         return resp.get("result") or {}
 
-    def call(self, name: str, tool: str, args: dict | None = None, timeout: float = 900) -> dict:
+    def call(self, name: str, tool: str, args: dict | None = None, timeout: float = 900, on_progress=None) -> dict:
         rec = self.get(name)
-        res = self.rpc(rec, "tools/call", {"name": tool, "arguments": args or {}}, timeout)
+        res = self.rpc(rec, "tools/call", {"name": tool, "arguments": args or {}}, timeout, on_progress)
         if res.get("isError"):
             raise RemoteError(" ".join(c.get("text", "") for c in res.get("content") or []) or f"{tool} failed")
         return res.get("structuredContent") or {"text": " ".join(c.get("text", "") for c in res.get("content") or [])}
@@ -346,6 +403,9 @@ class Remote:
             out["ssh"] = rec["ssh"].get("target")
         if rec.get("method") == "callhome":
             out["online"] = self.hub.online(rec["name"])
+            ago = self.hub.last_seen(rec["name"])
+            out["last_seen"] = None if ago is None else round(ago)
+            out["agent_version"] = rec.get("agent_version") or ""
         return out
 
     # -- files

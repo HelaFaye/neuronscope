@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added (remote hosts)
+- Streaming chat with hosts that call in to Studio. The agent reads its
+  backend's reply as it is written and posts the new text a few times a
+  second (MCP progress token, `POST /api/remote/progress`); Studio passes
+  it straight to the chat. Closing the chat stops generation on the host.
+  Older agents still answer in one piece.
+- A host may only answer or stream the messages queued for it.
+- The Remote page shows when a calling-in host was last heard from and its
+  agent version.
+
 ### Added (visualizer)
 - Subject colours in the 3D views. From the neuron review,
   `neuron_review.subject_map()` finds which neurons go with which subject

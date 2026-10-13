@@ -83,8 +83,12 @@ Open Studio → **Remote** (the *Remote* chip in the header) → **Add a host**.
   - TestQA (`--endpoint name=http://studio:7870/v1@gpu-box:qwen3-8b`);
   - the director's worker models.
 
-  For a host that calls in, chat goes as the host's MCP `chat` tool and
-  arrives as one piece instead of streaming.
+  For a host that calls in, chat goes as the host's MCP `chat` tool with an
+  MCP progress token. The agent reads its backend's reply as it is written
+  and posts the new text to Studio a few times a second, so the reply
+  streams as it does for any other model. Closing the chat (or pressing
+  Stop) tells the host to stop at its next post, which stops generation.
+  Agents older than this answer in one piece, which still works.
 - **Per host, on the Remote page:**
   - *Host info*: OS, RAM, GPUs, LLM servers, folders, what is allowed;
   - *Models*: load and unload;
@@ -167,6 +171,7 @@ on that machine, there are two ways:
 | `POST /api/remote/call`, `/api/remote/tools` | owner | a host's tool; its tool list |
 | `POST /api/remote/send`, `/api/remote/remove` | owner | send one of Studio's models; forget a host |
 | `POST /api/remote/claim`; `GET /api/remote/next`; `POST /api/remote/reply` | a host that calls in | join with an invite; wait for messages; answer them |
+| `POST /api/remote/progress` | a host that calls in | pieces of an answer still being written; the reply says whether to stop |
 | `GET /api/remote/file/<ticket>` | a host that calls in | download a file Studio is sending (resumable) |
 
 ## When something does not work

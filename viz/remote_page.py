@@ -124,7 +124,7 @@ async function invite(){ try{ const j=await post('/api/remote/invite',{url:$('#f
  }catch(e){ $('#inv').innerHTML='<span class="err">'+esc(e.message)+'</span>'; } }
 $('#quickGo').onclick=()=>{ const v=$('#quick').value.trim(); if(!v) return; method=v.startsWith('nsr://')&&/s=https/.test(v)?'lan':'vpn'; pair({link:v}); };
 function linkCell(h){ const how={lan:'same network',vpn:'VPN',ssh:'SSH '+(h.ssh||''),tunnel:'public tunnel',callhome:'calls in'}[h.method]||h.method;
-  return `<span class="pill">${esc(how)}</span> ${h.method==='callhome'?(h.online?'<span class="on-line">● connected</span>':'<span class="off-line">● not connected</span>'):'<code>'+esc(h.url)+'</code>'}${h.pinned?` <span class="pill" title="certificate pinned at pairing">🔒 ${esc(h.short_fingerprint)}</span>`:''}`; }
+  return `<span class="pill">${esc(how)}</span> ${h.method==='callhome'?(h.online?'<span class="on-line">● connected</span>':'<span class="off-line">● not connected</span>')+(h.last_seen!=null?` <span style="color:var(--mut)" title="the host checks in at least every 25 s">seen ${h.last_seen<60?h.last_seen+' s':Math.round(h.last_seen/60)+' min'} ago</span>`:'')+(h.agent_version?` <span style="color:var(--mut)">agent ${esc(h.agent_version)}</span>`:''):'<code>'+esc(h.url)+'</code>'}${h.pinned?` <span class="pill" title="certificate pinned at pairing">🔒 ${esc(h.short_fingerprint)}</span>`:''}`; }
 function render(){ $('#hostCount').textContent=S.hosts.length; const st=S.studio;
   $('#meAddr').innerHTML=`${esc(st.url)} · ${st.network?'reachable from the network':'this computer only'}${st.tls?' · TLS':''}`;
   $('#hostList').innerHTML=S.hosts.length?S.hosts.map((h,i)=>`<div class="host ${open.has(h.name)?'open':''}" data-h="${esc(h.name)}">

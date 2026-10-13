@@ -394,6 +394,19 @@ def test_host_that_calls_in(studio_srv, tmp_path, backend):
         st, r = call(studio_srv, "/v1/chat/completions", {"model": "behind-nat:tiny-chat",
                                                          "messages": [{"role": "user", "content": "hi"}]})
         assert st == 200 and r["choices"][0]["message"]["content"]
+        # streamed: the reply comes through as the host's backend writes it
+        req = urllib.request.Request(studio_srv + "/v1/chat/completions", method="POST",
+                                     data=json.dumps({"model": "behind-nat:tiny-chat", "stream": True,
+                                                      "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            lines = [ln.decode().strip() for ln in resp if ln.strip()]
+        assert lines[-1] == "data: [DONE]"
+        chunks = [json.loads(ln[5:]) for ln in lines[:-1]]
+        text = "".join((c["choices"][0]["delta"].get("content") or "") for c in chunks if c.get("choices"))
+        assert text == "model=tiny-chat mmproj=no image=no"
+        assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
         # Studio serves a model file to it by a one-time ticket; the host fetches it
         _, s = call(studio_srv, "/api/remote")
         st, r = call(studio_srv, "/api/remote/send", {"host": "behind-nat", "path": s["local_models"][0]["path"]})
@@ -411,6 +424,57 @@ def test_host_that_calls_in(studio_srv, tmp_path, backend):
     finally:
         for t in ag.callhome.values():
             t.stop.set()
+
+
+def test_callhome_hub_streams_cancels_and_checks_hosts():
+    import threading
+    import remote_hosts
+    hub = remote_hosts.CallHomeHub()
+    hub.seen["a"] = hub.seen["b"] = time.time()
+    got, out = [], {}
+
+    def ask(on_progress):
+        try:
+            out["resp"] = hub.request("a", {"method": "tools/call", "params": {}}, timeout=5, on_progress=on_progress)
+        except Exception as e:
+            out["err"] = e
+
+    t = threading.Thread(target=ask, args=(got.append,))
+    t.start()
+    msg = hub.next("a", wait=2)[0]
+    mid = msg["id"]
+    assert msg["message"]["params"]["_meta"]["progressToken"] == mid
+    assert hub.progress(mid, ["x"], host="b") == {"ok": False, "cancel": True}   # not b's message
+    assert not hub.reply(mid, {"r": 1}, host="b")
+    assert hub.progress(mid, ["Hel", "lo"], host="a") == {"ok": True, "cancel": False}
+    time.sleep(0.2)
+    assert hub.reply(mid, {"r": 1}, host="a") and not hub.reply(mid, {"r": 2}, host="a")
+    t.join(5)
+    assert got == ["Hel", "lo"] and out["resp"] == {"r": 1}
+
+    # the reader goes away: the host learns to stop at its next progress post
+    def gone(_):
+        raise BrokenPipeError
+
+    out.clear()
+    t = threading.Thread(target=ask, args=(gone,))
+    t.start()
+    mid = hub.next("a", wait=2)[0]["id"]
+    hub.progress(mid, ["x"], host="a")
+    t.join(5)
+    assert isinstance(out["err"], BrokenPipeError)
+    assert hub.progress(mid, ["y"], host="a")["cancel"]
+
+
+def test_agent_stream_posts_pieces_and_stops_when_cancelled(backend):
+    b = nsr.Backend("llama-server", backend)
+    seen = []
+    r = b.chat_stream({"model": "tiny-chat", "messages": [{"role": "user", "content": "hi"}]}, seen.append)
+    assert "".join(seen) == r["choices"][0]["message"]["content"] == "model=tiny-chat mmproj=no image=no"
+    seen.clear()
+    r = b.chat_stream({"model": "tiny-chat", "messages": [{"role": "user", "content": "hi"}]}, seen.append,
+                      cancelled=lambda: bool(seen))
+    assert len(seen) == 1 and r["choices"][0]["finish_reason"] == "cancelled"
 
 
 def test_package_is_standalone_and_downloadable(studio_srv):

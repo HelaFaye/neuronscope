@@ -532,6 +532,40 @@ class Backend:
     def chat(self, body: dict, timeout: float = 900) -> dict:
         return self.get_json("/v1/chat/completions", timeout=timeout, method="POST", body={**body, "stream": False})
 
+    def chat_stream(self, body: dict, on_text, cancelled=lambda: False, timeout: float = 900) -> dict:
+        """Chat with the reply read as it is written; on_text gets each new piece.
+        Stops reading (which stops generation on llama.cpp, LM Studio and Ollama)
+        when cancelled() turns true. -> a response shaped like a non-streamed one."""
+        conn, r = self.request("POST", "/v1/chat/completions", {**body, "stream": True}, timeout)
+        text, finish, usage, model = [], None, None, body.get("model", "")
+        try:
+            if r.status >= 400:
+                raise ToolError(f"{self.kind} at {self.url}: HTTP {r.status}: {r.read()[:300].decode(errors='replace')}")
+            for raw in r:
+                if cancelled():
+                    finish = "cancelled"
+                    break
+                line = raw.decode(errors="replace").strip()
+                if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                    continue
+                try:
+                    ev = json.loads(line[5:])
+                except ValueError:
+                    continue
+                model = ev.get("model") or model
+                usage = ev.get("usage") or usage
+                for ch in ev.get("choices") or []:
+                    piece = (ch.get("delta") or {}).get("content") or ""
+                    if piece:
+                        text.append(piece)
+                        on_text(piece)
+                    finish = ch.get("finish_reason") or finish
+        finally:
+            conn.close()
+        return {"object": "chat.completion", "model": model, "usage": usage,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(text)},
+                             "finish_reason": finish or "stop"}]}
+
 
 # ------------------------------------------------------------------ the agent
 
@@ -736,7 +770,8 @@ class Agent:
         for k in ("temperature", "max_tokens", "top_p", "seed", "stop", "response_format"):
             if a.get(k) is not None:
                 body[k] = a[k]
-        r = b.chat(body)
+        stream = a.get("__stream")
+        r = b.chat_stream(body, stream.send, stream.cancelled) if stream is not None else b.chat(body)
         return {"reply": ((r.get("choices") or [{}])[0].get("message") or {}).get("content") or "",
                 "model": r.get("model", body["model"]), "backend": b.kind, "usage": r.get("usage"), "response": r}
 
@@ -913,12 +948,15 @@ class Agent:
                         "annotations": {"title": name.replace("_", " "), **ann}})
         return out
 
-    def call_tool(self, name: str, args: dict, who: str) -> dict:
+    def call_tool(self, name: str, args: dict, who: str, stream=None) -> dict:
         fn = getattr(self, "t_" + name, None) if any(t[0] == name for t in self.TOOLS) else None
         if fn is None:
             return {"content": [{"type": "text", "text": f"unknown tool {name}"}], "isError": True}
         try:
-            out = fn(dict(args or {}))
+            a = {k: v for k, v in dict(args or {}).items() if not k.startswith("__")}
+            if stream is not None and name == "chat":
+                a["__stream"] = stream
+            out = fn(a)
             self.note(who, name, True, json.dumps(args or {})[:120] if name != "chat" else str(args.get("model", "")))
             text = out["reply"] if name == "chat" else json.dumps(out, indent=1)
             return {"content": [{"type": "text", "text": text}], "structuredContent": out, "isError": False}
@@ -934,8 +972,10 @@ class Agent:
                 "unload_model change what is in its memory, receive_file and install_model put new models on it. "
                 "The host owner sees every call and can revoke you.")
 
-    def handle_rpc(self, msg, who: str):
-        """One JSON-RPC message -> response (None for notifications). Lists are batches."""
+    def handle_rpc(self, msg, who: str, stream_for=None):
+        """One JSON-RPC message -> response (None for notifications). Lists are batches.
+        stream_for(progress token) -> a stream (send, cancelled) for tools that can
+        report as they go, when the caller asked for progress."""
         if isinstance(msg, list):
             out = [r for r in (self.handle_rpc(m, who) for m in msg) if r is not None]
             return out or None
@@ -955,7 +995,11 @@ class Agent:
         elif method == "tools/list":
             res = {"tools": self.tool_list()}
         elif method == "tools/call":
-            res = self.call_tool(params.get("name", ""), params.get("arguments") or {}, who)
+            token = (params.get("_meta") or {}).get("progressToken")
+            stream = stream_for(token) if stream_for is not None and token is not None else None
+            res = self.call_tool(params.get("name", ""), params.get("arguments") or {}, who, stream)
+            if stream is not None:
+                stream.flush()
         elif method in ("resources/list", "prompts/list"):
             res = {method.split("/")[0]: []}
         else:
@@ -1348,7 +1392,8 @@ class CallHome(threading.Thread):
 
     def _answer(self, item):
         who = (self.entry.get("controller") or "controller") + " (calls in)"
-        resp = self.agent.handle_rpc(item.get("message"), who)
+        resp = self.agent.handle_rpc(item.get("message"), who,
+                                     lambda tok: Upstream(self, str(tok)) if tok == item.get("id") else None)
         for _ in range(3):
             try:
                 http_json(self.url, "POST", "/api/remote/reply", {"id": item["id"], "response": resp},
@@ -1356,6 +1401,38 @@ class CallHome(threading.Thread):
                 return
             except Exception:
                 time.sleep(2)
+
+
+class Upstream:
+    """Posts a reply in pieces to the controller while it is written, a few times a
+    second, and learns from the answers whether the reader has gone away."""
+
+    EVERY = 0.15
+
+    def __init__(self, home: "CallHome", mid: str):
+        self.home, self.mid = home, mid
+        self.buf, self.last, self.stop, self.off = [], 0.0, False, False
+
+    def send(self, piece: str) -> None:
+        self.buf.append(piece)
+        if time.time() - self.last >= self.EVERY:
+            self.flush()
+
+    def flush(self) -> None:
+        self.last = time.time()
+        if not self.buf or self.stop or self.off:
+            return
+        pieces, self.buf = self.buf, []
+        try:
+            st, obj, _ = http_json(self.home.url, "POST", "/api/remote/progress", {"id": self.mid, "pieces": pieces},
+                                   token=self.home.entry["token"], fingerprint=self.home.pin, timeout=30)
+            self.stop = bool(obj.get("cancel"))
+            self.off = st >= 400      # a Studio without progress: the reply goes back whole
+        except Exception:
+            pass        # the whole reply still goes back at the end
+
+    def cancelled(self) -> bool:
+        return self.stop
 
 
 # ------------------------------------------------------------------ the controller side
