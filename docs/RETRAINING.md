@@ -6,9 +6,10 @@ is targeted retraining, also called error-driven data curation or hard-negative
 mining, built on what TestQA (and the benchmark importers) already measure.
 
 ```text
-testqa.py ──► deficits.py ──► finetune.py ──► merge_export.py ──► testqa.py --only-ids holdout
- measure       curate          QLoRA/LoRA/      merge + GGUF        measure again, on items
-               (verified)      full, SFT+DPO    (or GGUF LoRA)      never trained on
+testqa.py ──► deficits.py ──► finetune.py ──► merge_export.py ──► testqa.py ──► retrain_gate.py
+ measure       curate          QLoRA/LoRA/      merge + GGUF        measure       keep, reject or
+               (verified,      full, SFT+DPO,   (or GGUF LoRA)      again         "not enough items
+               probed)         focus layers                                       to tell"
 ```
 
 ## 1. Measure
@@ -39,6 +40,82 @@ What it does:
 | **Synthetic expansion** | `--expand N`: the teacher writes N variations of each failure. Code variations must ship tests that their own solution passes in the interpreter. Reasoning and factual variations must be answered identically by a second, independent teacher call. Anything unverified is dropped |
 | **Replay buffer** | deficits are `--deficit-fraction` (default 25%) of the SFT set; the rest is anchor data: what the model already answers correctly, in its own words, plus `--general` chat data. This is the guard against catastrophic forgetting |
 | **Holdout** | half the bank (deterministic by id) is never trained on, not even through variations. `holdout_ids.json` lists it |
+
+### Probe what the model knows (`--student`)
+
+```bash
+python scripts/deficits.py --results runs/base.json --label m --cache runs/cache \
+    --student http://127.0.0.1:7870/v1@my-model --teacher http://gpu-host:1234/v1@strong-model \
+    --expand 5 --out runs/retrain
+```
+
+`--student` is the model being retrained, served. With it, two things change.
+
+**Failed facts are sorted into weakly known and unknown.**
+- Each one is sampled `--probe-samples` times (default 4) at temperature
+  0.8.
+- **Weakly known** (some sample right): the model holds the fact but does
+  not reliably say it. The gold answer is trained; this is where
+  fine-tuning on facts helps.
+- **Unknown** (no sample right): the model does not hold the fact.
+  - Training it to state the fact anyway teaches it to answer confidently
+    from nothing, and raises hallucination on unrelated questions.
+    Gekhman et al. (2024), *Does Fine-Tuning LLMs on New Knowledge
+    Encourage Hallucinations?*, measured exactly this, and found such
+    examples are learned late, mostly once the model has started to
+    overfit.
+  - So by default (`--unknown abstain`) the target becomes a decline, and
+    the DPO pair prefers the decline over the made-up answer.
+  - An unknown fact the model already declines is left alone.
+  - `--unknown skip` leaves unknown facts out.
+  - `--unknown teach` keeps the gold answer. Use it only for a full
+    fine-tune meant to add knowledge, and judge the result with the gate.
+
+**Synthetic preference pairs become honest.** The *rejected* side of a
+variation's DPO pair must be a wrong answer to that variation. So the
+student answers each variation:
+- if the student fails it, its reply is the rejected side;
+- if it already answers correctly, the variation is used for SFT only.
+
+Without `--student`, variations get no DPO pairs. Earlier versions paired
+the original item's failing reply with the variation's prompt, which taught
+preference between answers to two different questions.
+
+### The holdout stays held out
+
+Synthetic variations are written by a teacher that has seen the failed
+item, and occasionally restate a holdout question. Any variation that
+shares an eight-word run with a holdout prompt is dropped, and so is any
+whose word trigrams overlap one by 60% or more. The report counts what was
+dropped.
+
+### Focus layers from the neuron review (`--review-model`)
+
+```bash
+python scripts/deficits.py ... --review-model acme/my-model-q4_k_m --out runs/retrain
+python scripts/finetune.py --model org/my-model --data runs/retrain --layers plan --method lora --out runs/adapter
+```
+
+The neuron review ([REVIEW.md](REVIEW.md)) records each checked reply's
+activations, so it can say which layers behave differently on wrong answers
+than on right ones, per subject. `--review-model` asks it which layers do
+that most for the subjects that failed:
+- each layer's evidence is the association above the review's
+  Bonferroni-corrected floor, summed over its bins;
+- with too few observations, no layer clears the floor and none is
+  suggested.
+
+The result is written to `plan.json` as `focus_layers`. Then
+`finetune.py --layers plan` trains only those layers: adapters only there
+with LoRA, and only their weights with `--method full`. `--layers 10-17` sets
+them by hand.
+
+Fewer layers changed means less of what already works is disturbed, and
+the change goes where the difference was measured. It is a hypothesis to
+test, not a guarantee, so compare it against `--layers all` with the gate.
+The layer numbers belong to the GGUF the review recorded. They fit the
+Hugging Face checkpoint of the same model; finetune.py refuses layer
+numbers the model does not have.
 
 `plan.json` and `report.txt` give counts by category and subject, and the
 method each category calls for. The teacher can be any OpenAI-compatible
@@ -125,15 +202,34 @@ every Hugging Face layout, HF-format LLaVA included. When it cannot, the
 command exits with status 2, records `mmproj_error` in
 `neuronscope-export.json`, and points you at `--freeze-projector`.
 
-## 5. Measure again, honestly
+## 5. Measure again, honestly, and decide
 
 ```bash
 python scripts/testqa.py --endpoint before=...@my-model --endpoint after=...@my-model-retrained \
-    --only-ids runs/retrain/holdout_ids.json --allow-exec
+    --allow-exec --out runs/after.json
+python scripts/retrain_gate.py --results runs/after.json --before before --after after \
+    --holdout runs/retrain/holdout_ids.json --out runs/gate.json
 ```
 
 Only the holdout says whether retraining generalised. The trained half will
-look better whether or not anything was learned. Check the canaries and the
+look better whether or not anything was learned.
+
+`retrain_gate.py` (Jobs → Retrain → *Keep or reject a retrain*) compares
+the same items before and after. For each split and subject it reports:
+- items fixed and items broken;
+- an exact McNemar test on those changes;
+- wrong-answer and abstention rates.
+
+The verdict:
+- **keep**: the holdout improved significantly, and neither hallucination
+  nor any subject got significantly worse.
+- **reject**: any of those got significantly worse.
+- **inconclusive**: otherwise, with roughly how many holdout items it
+  would take to tell.
+
+It also flags **memorisation**: a large gain on the trained items with
+little or none on the holdout. `--strict` makes the verdict the exit status,
+for scripts that chain runs. Check the canaries and the
 per-subject table too: a model that improved on code but regressed on writing
 has traded one deficit for another. Re-run with `--publish-stats` so Studio's
 `auto` routing sees the new numbers.
@@ -144,6 +240,14 @@ has traded one deficit for another. Re-run with `--publish-stats` so Studio's
 deficit dataset with holdout and replay share, LoRA SFT plus DPO,
 merge, a Q8_0 GGUF that llama.cpp loads, and a GGUF LoRA adapter. The vision
 path runs on a tiny LLaVA: vision dataset with verified variations, LoRA SFT
-plus DPO with and without a frozen projector, merge and language GGUF. QLoRA,
-FSDP and real VLM projector conversion need GPUs or downloads and have not
-been run here.
+plus DPO with and without a frozen projector, merge and language GGUF. `tests/test_deficit_quality.py` covers:
+- knowledge probing against a fake student;
+- synthetic DPO pairs built from the student's own replies;
+- the holdout guard;
+- focus layers from a recorded review;
+- LoRA adapters landing only on the chosen layers of a tiny Llama;
+- the gate's three verdicts.
+
+QLoRA, FSDP and real VLM projector conversion need GPUs or downloads and
+have not been run here. Whether focus layers beat all layers on real models
+has not been measured yet; that is what the gate is for.

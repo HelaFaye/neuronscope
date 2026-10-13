@@ -325,6 +325,37 @@ def summary(store: ReviewStore, model: str, stat: str = "association", how: str 
             "error_rate": error_rate(rows)}
 
 
+def deficit_layers(store: ReviewStore, model: str, subjects=None, top: int = 8, **filters) -> dict:
+    """The layers where wrong answers differ most from right ones, for focusing a
+    fine-tune there (finetune.py --layers plan).
+
+    Per layer, the evidence is the association (Cohen's d, wrong minus right)
+    above the review's significance floor, summed over the layer's bins:
+    only cells that clear the Bonferroni-corrected floor count, so with few
+    observations nothing is selected rather than noise. Layers are those of
+    the model the review recorded; the Hugging Face checkpoint being trained
+    has the same layer count when it is the same architecture."""
+    rows = store.query(model, subjects=subjects or None, **filters)
+    X = store.vecs(model, rows) if rows else None
+    st = neuron_stats(X, rows, "association") if rows else neuron_stats(np.zeros((0, 1, 1)), rows, "association")
+    out = {"model": model, "subjects": list(subjects or []), "n_wrong": st["n_wrong"], "n_right": st["n_right"],
+           "floor": st["floor"], "layers": [], "evidence": [], "note": st["note"]}
+    v = st["value"]
+    if v is None or not v.size or st["note"]:
+        out["note"] = out["note"] or "no observations"
+        return out
+    mass = np.clip(v - st["floor"], 0, None).sum(axis=1)
+    cells = (v >= st["floor"]).sum(axis=1)
+    order = [int(i) for i in np.argsort(-mass) if mass[i] > 0][:max(1, top)]
+    out["layers"] = sorted(order)
+    out["evidence"] = [{"layer": i, "mass": round(float(mass[i]), 3), "cells": int(cells[i])} for i in order]
+    out["n_layers"] = int(v.shape[0])
+    if not order:
+        out["note"] = (f"no layer has bins above the significance floor ({st['floor']}) with "
+                       f"{st['n_wrong']} wrong and {st['n_right']} right answers; record more checked replies")
+    return out
+
+
 def view_payload(store: ReviewStore, model: str, stat: str = "association", how: str = "week", every: int = 0,
                  max_cells: int = 40000, **filters) -> tuple[bytes, dict]:
     """The 3D views' payload (viz/bloom.py format): one frame per time bucket,

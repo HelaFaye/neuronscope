@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Improved (retraining on deficits)
+- Knowledge probing (`deficits.py --student`). Each failed fact is
+  sampled several times:
+  - weakly known facts (some sample right) are trained with the gold
+    answer;
+  - unknown facts are trained to decline (`--unknown abstain`, the
+    default; or `skip` / `teach`);
+  - unknown facts the model already declines are left alone.
+
+  Teaching a model facts it does not know raises its hallucination rate
+  (Gekhman et al., 2024).
+- Fixed: synthetic variations' DPO pairs used the original item's failing
+  reply as the rejected answer to a different question. The rejected side
+  is now the student's own failing reply to the variation; without a
+  student, variations get SFT only.
+- Holdout guard: synthetic variations that restate a holdout question
+  (a shared 8-word run, or 60% trigram overlap) are dropped.
+- Focus layers (`deficits.py --review-model`, `finetune.py --layers plan`
+  or `--layers 10-17`): train only the layers where the neuron review found
+  wrong answers differ most from right ones on the failing subjects.
+  - LoRA: adapters on those layers only.
+  - Full: only those layers' weights.
+- `scripts/retrain_gate.py` (Jobs → Retrain → *Keep or reject a retrain*):
+  before/after on the holdout and the trained split.
+  - Per subject: fixed vs broken items with an exact McNemar test, and
+    hallucination and abstention rates.
+  - A keep / reject / inconclusive verdict, the holdout size needed to
+    tell, and a memorisation warning.
+
 ### Added (remote hosts)
 - NeuronScope Remote (`remote/`): an agent for computers that run LLMs but
   not NeuronScope. It is distributed on its own: a pip package, a zip from

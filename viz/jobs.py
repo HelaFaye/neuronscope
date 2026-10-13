@@ -69,6 +69,12 @@ SPECS: dict[str, dict] = {
             F("results", req=True, help="TestQA results JSON"), F("label"), F("cache"),
             F("teacher", help="URL@model of a stronger model"),
             F("expand", kind="int", default=0, help="verified variations per failure"),
+            F("student", help="URL@model of the model being retrained: probes which failed facts it knows "
+                              "(unknown ones are trained to decline) and answers variations for DPO"),
+            F("probe_samples", kind="int", default=4, help="samples per failed fact"),
+            F("unknown", choices=["abstain", "skip", "teach"], default="abstain",
+              help="facts the model does not know: train a decline, leave out, or teach anyway"),
+            F("review_model", help="a model in the neuron review: find the layers to focus training on"),
             F("allow_exec", kind="bool"), F("sandbox", choices=["none", "docker", "podman"], default="none"),
             F("deficit_fraction", kind="float", default=0.25),
             F("general", multi=True, help="extra anchor JSONL files"),
@@ -81,9 +87,19 @@ SPECS: dict[str, dict] = {
             F("out", req=True), F("method", choices=["qlora", "lora", "full"], default="qlora"),
             F("dpo", kind="bool"), F("vision", kind="bool"), F("freeze_projector", kind="bool"),
             F("launch", kind="int", help="GPUs (accelerate)"), F("fsdp", kind="bool"),
+            F("layers", default="all", help="all, a list like 10-17, or plan (the focus layers from the dataset)"),
             F("lora_r", kind="int", default=16), F("epochs", kind="float", default=2),
             F("max_steps", kind="int", default=-1), F("max_length", kind="int", default=2048),
             F("gradient_checkpointing", kind="bool")]},
+    "retrain_gate": {
+        "title": "Keep or reject a retrain", "group": "Retrain", "argv": [S / "retrain_gate.py"],
+        "help": "Before/after on the holdout: fixed vs broken items, hallucination, per subject; a verdict.",
+        "fields": [
+            F("results", req=True, help="TestQA results JSON with the retrained model"),
+            F("after", help="its endpoint label"), F("before", help="the original model's endpoint label"),
+            F("before_results", help="a separate results JSON for the original model"),
+            F("holdout", help="holdout_ids.json from the deficit dataset"),
+            F("alpha", kind="float", default=0.05), F("out", help="comparison JSON")]},
     "merge": {
         "title": "Merge and convert", "group": "Retrain", "argv": [S / "merge_export.py"],
         "help": "Adapter -> merged model -> (quantized) GGUF, or a GGUF LoRA.",

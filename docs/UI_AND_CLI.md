@@ -59,6 +59,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Per-model, per-subject results | Studio → Models (stats) | `python scripts/model_stats.py show` | `model_stats` |
 | SWE-bench, LiveBench, CLIP_benchmark | **Jobs → Benchmarks** | `python scripts/benchmarks.py`, `clip_bench.py` | `start_job …` |
 | Retraining on failures (data, fine-tune, merge) | **Jobs → Retrain** | `deficits.py`, `finetune.py`, `merge_export.py` | `start_job …` |
+| Keep or reject a retrained model (holdout, per subject, hallucination) | **Jobs → Retrain → Keep or reject a retrain** | `python scripts/retrain_gate.py` | `start_job retrain_gate` |
 | Compare models, item by item; does suppression help | **Jobs → Analysis** | `merge_eval.py`, `compare_models.py` | `start_job …` |
 | Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |
 | Add TestQA runs and other benchmarks to the review | **Jobs → Review** | `neuron_review.py ingest-testqa`, `ingest-items` | `start_job review_testqa`, `review_items` |

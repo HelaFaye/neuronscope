@@ -42,9 +42,32 @@ Pipeline:
    correctly, in its own words, plus any `--general` chat data. That keeps it
    from forgetting what it already does well.
 6. **Holdout:** a deterministic `--holdout-frac` of the bank (default 0.5) is
-   never trained on, not even through variations. Re-run TestQA with
-   `--only-ids holdout_ids.json` to measure whether retraining helped,
-   instead of whether the model memorised the test.
+   never trained on, not even through variations, and synthetic variations
+   that nearly copy a holdout question are dropped. Re-run TestQA with
+   `--only-ids holdout_ids.json` and judge with retrain_gate.py, to measure
+   whether retraining helped instead of whether the model memorised the test.
+
+With `--student URL@model` (the model being retrained, served):
+
+7. **What the model knows.** Each failed factual item is sampled
+   `--probe-samples` times at a raised temperature. If any sample is right,
+   the fact is *weakly known* and the gold answer is trained. If none is,
+   the fact is *unknown* to the model, and by default (`--unknown abstain`)
+   the target becomes a decline. Fine-tuning a model on facts it does not
+   know teaches it to answer confidently from nothing: it raises
+   hallucination on everything else (Gekhman et al., 2024, "Does
+   Fine-Tuning LLMs on New Knowledge Encourage Hallucinations?"). Unknown
+   facts the model already declines are left alone. `--unknown teach` keeps
+   the old behaviour for full fine-tunes meant to add knowledge.
+8. **Honest preference pairs for variations.** The "rejected" side of a
+   synthetic DPO pair is the student's own reply to that variation, and the
+   pair exists only if that reply fails the grader. Without a student,
+   variations get SFT examples but no DPO pairs: the original item's
+   failing reply answers a different question.
+
+With `--review-model ID` (a model in the neuron review): `plan.json` gets
+`focus_layers`, the layers where the model's wrong answers differ most from
+its right ones for the failing subjects, for `finetune.py --layers plan`.
 
     python scripts/testqa.py --endpoint m=http://127.0.0.1:7870/v1@my-model \\
         --allow-exec --cache runs/c --out runs/base.json
@@ -111,6 +134,62 @@ def gold_target(task: dict) -> str | None:
     if task["kind"] == "reasoning":
         return f"Answer: {task['answer']}"
     return None
+
+
+class Student:
+    """The model being retrained, for probing what it knows and getting its own
+    replies to synthetic variations."""
+
+    def __init__(self, spec: str, args):
+        _, self.url, self.model = tq.parse_endpoint("student=" + spec)
+        self.args = SimpleNamespace(temperature=0.0, max_tokens=args.teacher_max_tokens, api_key=args.api_key,
+                                    request_timeout=900)
+        self.samples, self.temperature, self.allow_exec = args.probe_samples, args.probe_temperature, args.allow_exec
+
+    def ask(self, task: dict, temperature: float = 0.0) -> str:
+        a = SimpleNamespace(**{**vars(self.args), "temperature": temperature})
+        return tq.ask(self.url, self.model, tq.message_for(task), a)
+
+    def verdict(self, task: dict) -> tuple[str, str]:
+        """-> (grader verdict, reply) for one greedy answer."""
+        reply = tq.strip_think(self.ask(task)).strip()
+        return tq.grade(task, reply, SimpleNamespace(allow_exec=self.allow_exec, exec_timeout=10.0))[0], reply
+
+    def knows(self, task: dict) -> str:
+        """weakly_known (some sample right) or unknown (none right)."""
+        a = SimpleNamespace(allow_exec=self.allow_exec, exec_timeout=10.0)
+        for _ in range(max(1, self.samples)):
+            try:
+                if tq.grade(task, tq.strip_think(self.ask(task, self.temperature)), a)[0] == "correct":
+                    return "weakly_known"
+            except Exception:
+                continue
+        return "unknown"
+
+
+def shingles(text: str, n: int = 3) -> set:
+    w = re.findall(r"[a-z0-9]+", text.lower())
+    return {" ".join(w[i:i + n]) for i in range(max(1, len(w) - n + 1))} if w else set()
+
+
+class HoldoutGuard:
+    """Drops synthetic items that nearly copy a holdout question: a shared run of
+    eight words, or word-trigram Jaccard similarity of `threshold` or more. A
+    variation of a trained item that restates a holdout item would leak the
+    holdout into training."""
+
+    def __init__(self, prompts: list[str], threshold: float = 0.6):
+        self.sets = [(shingles(p, 3), shingles(p, 8)) for p in prompts if p]
+        self.threshold = threshold
+
+    def leaks(self, prompt: str) -> bool:
+        s3, s8 = shingles(prompt, 3), shingles(prompt, 8)
+        for h3, h8 in self.sets:
+            if s8 & h8 and len(prompt.split()) >= 8:
+                return True
+            if s3 and h3 and len(s3 & h3) / len(s3 | h3) >= self.threshold:
+                return True
+        return False
 
 
 class Teacher:
@@ -291,11 +370,57 @@ def build(args) -> dict:
     tasks = {t["id"]: t for t in tq.load_tasks(args.tasks, None, None, 0)}
     cache = load_cache(args.cache, label)
     teacher = Teacher(args.teacher, args) if args.teacher else None
+    student = Student(args.student, args) if getattr(args, "student", None) else None
+    unknown_policy = getattr(args, "unknown", "abstain")
     rng = random.Random(args.seed)
+    knowledge = Counter()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     holdout = sorted(i for i in tasks if in_holdout(i, args.holdout_frac))
+    guard = HoldoutGuard([tasks[i].get("prompt", "") for i in holdout])
+
+    def leaked(new: dict) -> bool:
+        if guard.leaks(new.get("prompt", "")):
+            skipped["synthetic item too close to a holdout question"] += 1
+            return True
+        return False
+
+    def own_failure(new: dict) -> str | None:
+        """The student's own failing reply to a new item: the honest rejected side."""
+        if student is None:
+            skipped["synthetic DPO pair without --student (no reply of the model's own)"] += 1
+            return None
+        try:
+            v, reply = student.verdict(new)
+        except Exception:
+            skipped["student unreachable for a variation"] += 1
+            return None
+        if v in ("correct", "answered") or not reply:
+            skipped["variation the model already answers (SFT only)"] += 1
+            return None
+        return reply
+
+    def fact_target(task: dict, verdict: str | None) -> tuple[str | None, str | None, str | None]:
+        """For a factual item with a student: (target, how, knowledge), or target
+        None to skip it. Without a student or for other kinds: (None, None, None)
+        meaning "decide as usual"."""
+        if student is None or task["kind"] != "qa" or task.get("expect_abstain"):
+            return None, None, None
+        try:
+            k = student.knows(task)
+        except Exception:
+            return None, None, None
+        knowledge[k] += 1
+        if k == "weakly_known" or unknown_policy == "teach":
+            return None, None, k
+        if unknown_policy == "skip":
+            skipped["fact unknown to the model (--unknown skip)"] += 1
+            return "", None, k
+        if verdict == "abstained":
+            skipped["fact unknown to the model, which already declines it"] += 1
+            return "", None, k
+        return ABSTAIN_TARGET, "abstain: unknown to the model", k
     deficits, anchors, dpo, skipped = [], [], [], Counter()
     v_deficits, v_anchors, v_dpo = [], [], []
     by_cat = defaultdict(Counter)
@@ -333,24 +458,33 @@ def build(args) -> dict:
                 if not vs:
                     skipped["vision item with no synthetic family"] += 1
                 for new in vs:
+                    if leaked(new):
+                        continue
                     tgt = gold_target(new)
                     nimg = save_image(new, out)
                     v_deficits.append({"images": [nimg], "messages": [vision_user(new["prompt"]), vision_reply(tgt)],
                                        "source": "synthetic", "task": new["id"], **meta})
-                    if reply:
+                    own = own_failure(new)
+                    if own:
                         v_dpo.append({"images": [nimg], "prompt": [vision_user(new["prompt"])],
-                                      "chosen": [vision_reply(tgt)], "rejected": [vision_reply(reply)],
+                                      "chosen": [vision_reply(tgt)], "rejected": [vision_reply(own)],
                                       "source": "synthetic", "task": new["id"], **meta})
             continue
         if cat is None:
             if r["verdict"] in ("correct", "answered") and reply:
                 anchors.append({"messages": chat(tq.prompt_for(t), reply), "source": "anchor", "task": t["id"]})
             continue
-        target, how = target_for(t, teacher, args.teacher_tries, args.allow_exec)
+        target, how, known = fact_target(t, r["verdict"])
+        if target == "":
+            continue
+        if target is None:
+            target, how = target_for(t, teacher, args.teacher_tries, args.allow_exec)
         if target is None:
             skipped[how] += 1
             continue
         meta = {"source": "correction", "task": t["id"], "category": cat, "subject": t["subject"], "target": how}
+        if known:
+            meta["knowledge"] = known
         deficits.append({"messages": chat(tq.prompt_for(t), target), **meta})
         if reply:
             dpo.append({"prompt": [{"role": "user", "content": tq.prompt_for(t)}],
@@ -358,13 +492,22 @@ def build(args) -> dict:
                         "rejected": [{"role": "assistant", "content": reply}], **meta})
         if teacher and args.expand:
             for new, tgt in expand(t, args.expand, teacher, args.allow_exec, args.teacher_tries):
-                deficits.append({"messages": chat(tq.prompt_for(new), tgt), "source": "synthetic",
-                                 "task": new["id"], "category": cat, "subject": t["subject"]})
-                if reply:
+                if leaked(new):
+                    continue
+                ftgt, fhow, fknown = fact_target(new, None)
+                if ftgt == "":
+                    continue
+                syn = {"source": "synthetic", "task": new["id"], "category": cat, "subject": t["subject"]}
+                if ftgt is not None:
+                    tgt, syn["target"] = ftgt, fhow
+                if fknown:
+                    syn["knowledge"] = fknown
+                deficits.append({"messages": chat(tq.prompt_for(new), tgt), **syn})
+                own = own_failure(new)
+                if own and own.strip() != tgt.strip():
                     dpo.append({"prompt": [{"role": "user", "content": tq.prompt_for(new)}],
                                 "chosen": [{"role": "assistant", "content": tgt}],
-                                "rejected": [{"role": "assistant", "content": reply}],
-                                "source": "synthetic", "task": new["id"], "category": cat})
+                                "rejected": [{"role": "assistant", "content": own}], **syn})
 
     general = []
     for g in args.general or []:
@@ -397,7 +540,17 @@ def build(args) -> dict:
             "anchor_pool": len(pool),
             "vision": {"sft_examples": len(v_sft), "deficit_examples": len(v_deficits),
                        "replay_examples": len(v_replay), "dpo_pairs": len(v_dpo), "vision_anchors": len(v_anchors)}, "holdout_items": len(holdout), "skipped": dict(skipped),
-            "methods": {c: {"method": CATEGORY_METHOD[c][0], "why": CATEGORY_METHOD[c][1]} for c in by_cat}}
+            "methods": {c: {"method": CATEGORY_METHOD[c][0], "why": CATEGORY_METHOD[c][1]} for c in by_cat},
+            "knowledge": dict(knowledge), "unknown_policy": unknown_policy if student else None,
+            "student": getattr(args, "student", None)}
+    if getattr(args, "review_model", None):
+        import neuron_review as nr
+        subjects = sorted({s for v in by_cat.values() for s in v})
+        try:
+            plan["focus_layers"] = nr.deficit_layers(nr.ReviewStore(getattr(args, "review_dir", None)),
+                                                     args.review_model, subjects, getattr(args, "focus_top", 8))
+        except Exception as e:
+            plan["focus_layers"] = {"layers": [], "note": f"{type(e).__name__}: {e}"}
     (out / "plan.json").write_text(json.dumps(plan, indent=2))
     lines = [f"Retraining set for {label}", ""]
     for c, v in by_cat.items():
@@ -409,6 +562,18 @@ def build(args) -> dict:
         lines += [f"vision SFT: {len(v_sft)} examples ({len(v_deficits)} deficit, {len(v_replay)} replay), "
                   f"vision DPO: {len(v_dpo)} pairs -> finetune.py --vision"]
     lines += [f"holdout: {len(holdout)} bank items never trained on"]
+    if knowledge:
+        lines += [f"factual failures probed ({student.samples} samples each): "
+                  f"{knowledge['weakly_known']} weakly known (gold answer trained), {knowledge['unknown']} unknown "
+                  + {"abstain": "(trained to decline)", "skip": "(left out)",
+                     "teach": "(gold answer trained anyway: --unknown teach)"}[unknown_policy]]
+    elif by_cat.get("factual_gap") and not student:
+        lines += ["note: factual failures were trained with gold answers without checking whether the model knows "
+                  "them; teaching unknown facts raises hallucination. Pass --student to probe them."]
+    fl = plan.get("focus_layers")
+    if fl:
+        lines += [f"focus layers (neuron review of {args.review_model}): "
+                  + (", ".join(str(x) for x in fl["layers"]) if fl["layers"] else "none: " + fl.get("note", ""))]
     if skipped:
         lines += ["skipped: " + "; ".join(f"{k}: {v}" for k, v in skipped.items())]
     if deficits and not pool:
@@ -431,6 +596,15 @@ def main(argv=None) -> int:
     p.add_argument("--teacher-max-tokens", type=int, default=2048)
     p.add_argument("--api-key", default="")
     p.add_argument("--expand", type=int, default=0, help="verified synthetic variations per failed item")
+    p.add_argument("--student", help="URL[@model] of the model being retrained (served): probes which failed facts "
+                   "it knows, and answers variations for honest DPO pairs")
+    p.add_argument("--probe-samples", type=int, default=4, help="samples per failed fact when probing (default 4)")
+    p.add_argument("--probe-temperature", type=float, default=0.8)
+    p.add_argument("--unknown", choices=["abstain", "skip", "teach"], default="abstain",
+                   help="facts the model does not know: train a decline (default), leave out, or teach the answer")
+    p.add_argument("--review-model", help="a model in the neuron review: write focus_layers into plan.json")
+    p.add_argument("--review-dir", help="neuron review folder (default $NS_REVIEW_DIR or ~/.neuronscope/review)")
+    p.add_argument("--focus-top", type=int, default=8, help="how many focus layers (default 8)")
     p.add_argument("--allow-exec", action="store_true", help="run code to verify code targets and variations")
     p.add_argument("--sandbox", choices=["none", "docker", "podman"], default="none",
                    help="run that code in a locked-down container (see testqa.py --sandbox)")
