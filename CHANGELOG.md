@@ -8,6 +8,11 @@
   second (MCP progress token, `POST /api/remote/progress`); Studio passes
   it straight to the chat. Closing the chat stops generation on the host.
   Older agents still answer in one piece.
+- 3D checks of a host's models. Studio traces the reply itself when it has
+  the identical GGUF (matched by SHA-256), else the host runs NeuronScope's
+  tracer with the classifier Studio sends and returns the trace. New agent
+  tools `model_file` and `trace_reply` (the host can switch the latter
+  off); `hscore.py --trace-out` saves a trace as .npz.
 - A host may only answer or stream the messages queued for it.
 - The Remote page shows when a calling-in host was last heard from and its
   agent version.

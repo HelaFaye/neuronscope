@@ -1358,31 +1358,90 @@ def trace_reply(model, messages, text, threshold=0.5, source="chat-check"):
                          "or point Settings -> Workspaces at an existing build")
     msgs = [m for m in messages if m.get("role") != "system"] or messages
     r = _scorer(model, clf).trace(msgs, text)
+    return save_trace(model["name"], model["id"], msgs, text, r, threshold, source)
+
+
+def save_trace(model_name, model_id, msgs, text, r, threshold=0.5, source="chat-check", extra=None):
+    """Save a tracer result (HScorer.trace or one sent by a host) as a trace session
+    for the 3D view, and record its mean activation in the neuron review."""
     frames = r["frames"]
     T, L, N = frames.shape
     tid = time.strftime("%Y%m%d-%H%M%S-") + hashlib.sha1(text.encode()).hexdigest()[:8]
+    import numpy as np
     from records import Recorder
     with Recorder(os.path.join(STATE["traces_dir"], tid),
-                  {"model": model["name"], "n_layers": L, "n_neurons": N, "kind": "trace",
-                   "stride": r["stride"], "source": "studio"}, resume=False) as rec:
+                  {"model": model_name, "n_layers": L, "n_neurons": N, "kind": "trace",
+                   "stride": r["stride"], "source": "studio", **(extra or {})}, resume=False) as rec:
         rec.add("reply", agg=frames.reshape(-1, N), tokens=r["tokens"], scores=r["scores"],
                 kind="trace", n_frames=T, n_layers=L, pieces=r["pieces"], stride=1,
                 question=(_last_user_text({"messages": msgs}) or "")[:500], verdict=None,
-                h_cells=r["h_cells"], col_weight=r["col_weight"].tolist())
+                h_cells=r["h_cells"], col_weight=np.asarray(r["col_weight"]).tolist())
     prob = [round(float(p), 4) for p in r["prob"]]
     review = None
     try:
         q = _last_user_text({"messages": msgs}) or ""
-        oid = review_store().record(model["id"], frames.mean(axis=0), source=source, kind="observed",
+        oid = review_store().record(model_id, frames.mean(axis=0), source=source, kind="observed",
                                     subjects=_review_subjects(q), risk=float(sum(prob) / len(prob)),
                                     item=tid)
-        review = {"model": model["id"], "id": oid}
+        review = {"model": model_id, "id": oid}
     except Exception as e:
         print(f"[studio] review record failed: {e}", file=sys.stderr)
     return {"id": tid, "pieces": r["pieces"], "prob": prob,
             "flagged": [i for i, p in enumerate(prob) if p >= threshold], "threshold": threshold,
             "max": max(prob), "mean": round(sum(prob) / len(prob), 4),
-            "url": f"viz/{tid}/", "review": review}
+            "url": f"viz/{tid}/", "review": review, **(extra or {})}
+
+
+def _local_twin(size, sha):
+    """A local model whose file is byte-for-byte the given one (same size, then same SHA-256)."""
+    import score_cards
+    for m in scan_models():
+        try:
+            if m.get("format", "gguf") == "gguf" and os.path.getsize(m["path"]) == size \
+                    and score_cards.sha256_file(m["path"]) == sha:
+                return m
+        except OSError:
+            continue
+    return None
+
+
+def _remote_classifier(host_model_id, twin, file_name):
+    """The classifier for a host's model: set for that id, else the twin's, else a local model
+    with the same file name's."""
+    st = load_settings()
+    for key in (_key("remote:" + host_model_id), _key(twin["path"]) if twin else None):
+        if key and st.get(key, {}).get("classifier"):
+            return st[key]["classifier"]
+    for m in scan_models():
+        if os.path.basename(m["path"]) == file_name and st.get(_key(m["path"]), {}).get("classifier"):
+            return st[_key(m["path"])]["classifier"]
+    return None
+
+
+def trace_remote(model_id, messages, text, threshold=0.5):
+    """Check a reply from a remote host's model. With the same file here, Studio traces it
+    itself; otherwise the host runs NeuronScope's tracer and sends the trace back."""
+    host, _, rid = model_id.partition(LINK_SEP)
+    rec = remote().get(host)
+    info = remote().call(host, "model_file", {"model": rid}, timeout=1800)
+    twin = _local_twin(info["size"], info["sha256"])
+    extra = {"host": host, "host_model": rid}
+    if twin is not None and STATE["cett"] and load_settings().get(_key(twin["path"]), {}).get("classifier"):
+        out = trace_reply(twin, messages, text, threshold, source="host-check")
+        return {**out, **extra, "traced_on": "this computer (same file)"}
+    clf = _remote_classifier(model_id, twin, info["file"])
+    if not clf:
+        raise ValueError(f"{model_id} has no classifier: set one for this host model (Models, its settings), or for "
+                         f"a local copy of {info['file']}")
+    import base64
+    import hscore
+    msgs = [m for m in messages if m.get("role") != "system"] or messages
+    with open(clf, "rb") as f:
+        args = {"model": rid, "messages": msgs, "text": text, "classifier": base64.b64encode(f.read()).decode()}
+    r = remote().call(rec["name"], "trace_reply", args, timeout=1800)
+    tr = hscore.load_trace(base64.b64decode(r["trace"]))
+    return save_trace(model_id, model_id, msgs, text, tr, threshold, "host-check",
+                      {**extra, "traced_on": host})
 
 
 def trace_subjects(path):
@@ -2780,6 +2839,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/api/remote/discover":
                 return self._json(200, {"hosts": remote_hosts.discover(float(req.get("seconds") or 3))})
+            if self.path == "/api/remote/classifier":
+                host, model, clf = str(req.get("host", "")), str(req.get("model", "")), str(req.get("classifier") or "")
+                r.get(host)
+                if clf and not os.path.isfile(os.path.expanduser(clf)):
+                    return self._json(400, {"error": f"no such file: {clf}"})
+                allset = load_settings()
+                key = _key("remote:" + host + LINK_SEP + model)
+                allset.setdefault(key, {})["classifier"] = os.path.expanduser(clf) if clf else None
+                save_settings(allset)
+                return self._json(200, {"ok": True})
             if self.path == "/api/remote/pair":
                 method = req.get("method") or "lan"
                 address, code, fp = str(req.get("address", "")).strip(), str(req.get("code", "")), ""
@@ -3534,12 +3603,23 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/trace":
                 req = self._read(MAX_BODY)
                 ref = req.get("model")
-                model = find_model(ref) if ref and ref != "auto" else PROC["model"]
-                if model is None:
-                    return self._json(404, {"error": "checks run on local models only"})
                 text = str(req.get("text") or "")
                 if not text.strip():
                     return self._json(400, {"error": "nothing to check"})
+                if ref and LINK_SEP in ref and ref.partition(LINK_SEP)[0] not in [h["name"] for h in remote().hosts()] \
+                        and link_target(ref) is not None:
+                    return self._json(400, {"error": "checks of a linked Studio's models run in that Studio"})
+                if ref and LINK_SEP in ref and link_target(ref) is not None:
+                    try:
+                        return self._json(200, trace_remote(ref, req.get("messages") or [], text,
+                                                            float(req.get("threshold", 0.5))))
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                    except Exception as e:
+                        return self._json(502, {"error": f"{type(e).__name__}: {e}"})
+                model = find_model(ref) if ref and ref != "auto" else PROC["model"]
+                if model is None:
+                    return self._json(404, {"error": "no such model"})
                 try:
                     return self._json(200, trace_reply(model, req.get("messages") or [], text,
                                                        float(req.get("threshold", 0.5))))
@@ -4339,6 +4419,7 @@ function showRisk(el,c){
   const verdict=n?`<b class="bad">${n} of ${T} tokens flagged</b>`:`<b class="okc">no tokens flagged</b>`;
   el.innerHTML=`<div class="sum">risk: ${verdict} · peak ${(c.max*100).toFixed(0)}% · mean ${(c.mean*100).toFixed(0)}% `+
     `(flag at ${(c.threshold*100).toFixed(0)}%) · <a href="${esc(c.url)}" target="_blank" rel="noopener">open 3D view ↗</a>`+
+    (c.traced_on?` · <span title="where the activations were computed">traced on ${esc(c.traced_on)}</span>`:'')+
     ` · <a href="#" data-a="tog">${n?'hide':'show'} tokens</a>`+
     (c.review?` · <span class="lbl">was it right? <a href="#" data-v="correct">right</a> / <a href="#" data-v="wrong">wrong</a>${c.label?` <b>(${esc(c.label==='correct'?'right':c.label)})</b>`:''}</span>`:'')+
     `</div><div class="rt"${n?'':' hidden'}></div>`;
@@ -4361,7 +4442,7 @@ async function checkReply(d){
   try{ const r=await post('/api/trace',{model:m.model||$('#modelPick').value||undefined,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)});
     c=await r.json(); if(!r.ok) c={error:c.error||r.statusText,links:c.links}; }catch(e){ c={error:String(e)}; }
   showRisk(el,c);
-  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url,review:c.review}; await persist(); }
+  if(!c.error){ m.check={id:c.id,pieces:c.pieces,prob:c.prob,flagged:c.flagged,threshold:c.threshold,max:c.max,mean:c.mean,url:c.url,review:c.review,traced_on:c.traced_on}; await persist(); }
 }
 try{ $('#autoCheck').checked=localStorage.getItem('ns_autocheck')==='1'; }catch{}
 $('#autoCheck').onchange=()=>{ try{ localStorage.setItem('ns_autocheck',$('#autoCheck').checked?'1':'0'); }catch{} };

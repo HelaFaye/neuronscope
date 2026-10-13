@@ -87,8 +87,9 @@ PAIR_TTL = 600
 MAX_ATTEMPTS = 5
 MAX_JSON = 32 * 1024 * 1024    # chat requests can carry images
 MAX_CHUNK = 64 * 1024 * 1024
-ALLOW_DEFAULT = {"chat": True, "load": True, "receive": True, "install": True, "delete": False}
+ALLOW_DEFAULT = {"chat": True, "load": True, "receive": True, "install": True, "delete": False, "trace": True}
 ALLOW_TEXT = {"chat": "chat with the models",
+              "trace": "check replies with NeuronScope's tracer (runs a model file once more, for a 3D view)",
               "load": "load and unload models",
               "receive": "send files to this computer (into the incoming folder)",
               "install": "install received models into LM Studio or Ollama",
@@ -739,7 +740,8 @@ class Agent:
                 "cpus": os.cpu_count(), "ram_gb": _ram_gb(), "gpus": _gpus(),
                 "backends": [b.describe() for b in self.backends(refresh=True)],
                 "incoming_dir": str(inc), "incoming_free_gb": round(free / 2**30, 1),
-                "models_dir": str(mdir) if mdir else None, "allowed": self.cfg["allow"], "link": self.link["mode"]}
+                "models_dir": str(mdir) if mdir else None, "allowed": self.cfg["allow"], "link": self.link["mode"],
+                "tracer": self.tracer()}
 
     def t_list_backends(self, a):
         out = []
@@ -774,6 +776,99 @@ class Agent:
         r = b.chat_stream(body, stream.send, stream.cancelled) if stream is not None else b.chat(body)
         return {"reply": ((r.get("choices") or [{}])[0].get("message") or {}).get("content") or "",
                 "model": r.get("model", body["model"]), "backend": b.kind, "usage": r.get("usage"), "response": r}
+
+    # -- model files and the tracer
+    def _gguf_candidates(self):
+        for root in (self.models_dir(), self.incoming()):
+            if root and root.is_dir():
+                for f in root.rglob("*.gguf"):
+                    if "mmproj" not in f.name.lower():
+                        yield root, f
+
+    def find_gguf(self, model: str, backend: str = "") -> Path:
+        """The GGUF file behind a model id: configured, asked of the server, or found by name."""
+        if (self.cfg.get("model_files") or {}).get(model):
+            return Path(self.cfg["model_files"][model]).expanduser()
+        try:
+            b = self.backend_for(model, backend)
+        except ToolError:
+            b = None
+        if b is not None and b.kind == "ollama":
+            try:
+                mf = b.get_json("/api/show", method="POST", body={"model": model}).get("modelfile") or ""
+                m = re.search(r"^FROM\s+(\S+)", mf, re.M)
+                if m and Path(m.group(1)).is_file():
+                    return Path(m.group(1))
+            except (ToolError, OSError, ValueError):
+                pass
+        if b is not None and b.kind == "llama-server":
+            try:
+                mp = b.get_json("/props").get("model_path")
+                if mp and Path(mp).is_file():
+                    return Path(mp)
+            except (ToolError, OSError, ValueError):
+                pass
+        want = model.lower().split("@")[0].strip("/")
+        best = None
+        for root, f in self._gguf_candidates():
+            rel = f.relative_to(root).as_posix().lower()
+            keys = {f.stem.lower(), f.parent.name.lower(), "/".join(rel.split("/")[:-1]), rel}
+            if want in keys or any(k.endswith("/" + want) for k in keys):
+                if best is None or f.stat().st_size > best.stat().st_size:
+                    best = f
+        if best is None:
+            raise ToolError(f"cannot find the GGUF file for {model} on this host; the host owner can name it in "
+                            "config.json under model_files")
+        return best
+
+    def sha256(self, f: Path) -> str:
+        st = f.stat()
+        cache = self.store.read("hashes.json", {})
+        hit = cache.get(str(f))
+        if hit and hit[0] == st.st_size and hit[1] == st.st_mtime:
+            return hit[2]
+        h = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 22), b""):
+                h.update(chunk)
+        cache[str(f)] = [st.st_size, st.st_mtime, h.hexdigest()]
+        self.store.write("hashes.json", cache)
+        return h.hexdigest()
+
+    def t_model_file(self, a):
+        f = self.find_gguf(a["model"], a.get("backend", ""))
+        return {"model": a["model"], "file": f.name, "size": f.stat().st_size, "sha256": self.sha256(f)}
+
+    def tracer(self) -> dict:
+        """NeuronScope's tracer on this host: its scripts folder and llama-cett-dump, if present."""
+        t = dict(self.cfg.get("tracer") or {})
+        root = Path(t.get("neuronscope") or Path(__file__).resolve().parents[2]).expanduser()
+        cett = t.get("cett") or os.environ.get("NS_CETT") or shutil.which("llama-cett-dump") or ""
+        ok = (root / "scripts" / "hscore.py").is_file() and bool(cett) and Path(cett).is_file()
+        return {"available": ok, "neuronscope": str(root), "cett": cett, "python": t.get("python") or sys.executable}
+
+    def t_trace_reply(self, a):
+        self.need("trace")
+        tr = self.tracer()
+        if not tr["available"]:
+            raise ToolError("this host has no NeuronScope tracer: install NeuronScope here and build llama.cpp with "
+                            "cett-dump, then set tracer in config.json (neuronscope folder, cett binary)")
+        f = self.find_gguf(a["model"], a.get("backend", ""))
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="ns-trace-") as work:
+            w = Path(work)
+            (w / "clf.npz").write_bytes(base64.b64decode(a["classifier"]))
+            (w / "msgs.json").write_text(json.dumps(a.get("messages") or []), encoding="utf-8")
+            (w / "reply.txt").write_text(a["text"], encoding="utf-8")
+            cmd = [tr["python"], str(Path(tr["neuronscope"]) / "scripts" / "hscore.py"), "--binary", tr["cett"],
+                   "--gguf", str(f), "--classifier", str(w / "clf.npz"), "--messages", str(w / "msgs.json"),
+                   "--response-file", str(w / "reply.txt"), "--trace-out", str(w / "trace.npz"),
+                   "--ngl", str(int(a.get("ngl", 99)))]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            if r.returncode != 0:
+                raise ToolError(f"the tracer failed: {(r.stderr or r.stdout).strip()[-500:]}")
+            data = (w / "trace.npz").read_bytes()
+        return {"model": a["model"], "file": f.name, "trace": base64.b64encode(data).decode(), "bytes": len(data)}
 
     def t_load_model(self, a):
         self.need("load")
@@ -911,6 +1006,16 @@ class Agent:
          {"model": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}},
           "temperature": {"type": "number"}, "max_tokens": {"type": "integer"}, "top_p": {"type": "number"},
           "seed": {"type": "integer"}, "backend": {"type": "string"}}, {"readOnlyHint": True}, ["messages"]),
+        ("model_file", "Where a model's GGUF file is on this host, its size and SHA-256 (for finding the same "
+         "file elsewhere).", {"model": {"type": "string"}, "backend": {"type": "string"}}, {"readOnlyHint": True},
+         ["model"]),
+        ("trace_reply", "Run a reply through the model's GGUF with NeuronScope's tracer and an H-Neuron classifier; "
+         "returns the per-token activation trace (.npz, base64) for a 3D view. Needs NeuronScope and "
+         "llama-cett-dump on this host.",
+         {"model": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}},
+          "text": {"type": "string"}, "classifier": {"type": "string", "description": "the classifier .npz, base64"},
+          "ngl": {"type": "integer"}, "backend": {"type": "string"}},
+         {"readOnlyHint": True}, ["model", "text", "classifier"]),
         ("load_model", "Load a model (LM Studio through its lms command, Ollama by keep_alive).",
          {"model": {"type": "string"}, "backend": {"type": "string"}, "context_length": {"type": "integer"},
           "gpu": {"type": "string", "description": "LM Studio: max, off, or 0..1"},
@@ -957,8 +1062,10 @@ class Agent:
             if stream is not None and name == "chat":
                 a["__stream"] = stream
             out = fn(a)
-            self.note(who, name, True, json.dumps(args or {})[:120] if name != "chat" else str(args.get("model", "")))
-            text = out["reply"] if name == "chat" else json.dumps(out, indent=1)
+            self.note(who, name, True, str(args.get("model", "")) if name in ("chat", "trace_reply")
+                      else json.dumps(args or {})[:120])
+            text = (out["reply"] if name == "chat" else f"trace of {out['bytes']} bytes" if name == "trace_reply"
+                    else json.dumps(out, indent=1))
             return {"content": [{"type": "text", "text": text}], "structuredContent": out, "isError": False}
         except (ToolError, KeyError, OSError, ValueError, subprocess.SubprocessError) as e:
             msg = f"missing argument {e}" if isinstance(e, KeyError) else str(e)

@@ -178,16 +178,48 @@ def main(argv=None) -> int:
     p.add_argument("--binary", default=os.environ.get("NS_CETT"))
     p.add_argument("--gguf", default=os.environ.get("NS_GGUF"))
     p.add_argument("--classifier", required=True)
-    p.add_argument("--prompt", required=True)
-    p.add_argument("--response", required=True)
+    p.add_argument("--prompt", help="the question (or --messages)")
+    p.add_argument("--messages", help="a JSON file with the chat messages before the reply")
+    p.add_argument("--response", help="the reply (or --response-file)")
+    p.add_argument("--response-file")
     p.add_argument("--ngl", type=int, default=99)
     p.add_argument("--batch", type=int, default=4096)
+    p.add_argument("--trace-out", help="score token by token and save the trace (.npz) for a 3D view "
+                                       "elsewhere, e.g. Studio on another computer")
     a = p.parse_args(argv)
     if not a.binary or not a.gguf:
         raise SystemExit("need --binary and --gguf (or source env.sh)")
+    msgs = (json.load(open(a.messages, encoding="utf-8")) if a.messages
+            else [{"role": "user", "content": a.prompt or ""}])
+    response = open(a.response_file, encoding="utf-8").read() if a.response_file else a.response
+    if response is None:
+        raise SystemExit("need --response or --response-file")
     s = HScorer(a.binary, a.gguf, a.classifier, a.ngl, a.batch)
-    print(json.dumps(s.score([{"role": "user", "content": a.prompt}], a.response), indent=2))
+    if a.trace_out:
+        save_trace(a.trace_out, s.trace(msgs, response))
+        print(json.dumps({"trace": a.trace_out}))
+        return 0
+    print(json.dumps(s.score(msgs, response), indent=2))
     return 0
+
+
+def save_trace(path: str, r: dict) -> None:
+    """A trace() result as a compact .npz (frames in float16)."""
+    with open(path, "wb") as f:
+        np.savez_compressed(f, frames=r["frames"].astype(np.float16), scores=r["scores"], prob=r["prob"],
+                            tokens=np.asarray(r["tokens"], dtype=np.int64), col_weight=np.asarray(r["col_weight"]),
+                            meta=np.frombuffer(json.dumps({"pieces": r["pieces"], "stride": r["stride"],
+                                                           "h_cells": r["h_cells"], "n_layers": r["n_layers"]}
+                                                          ).encode(), dtype=np.uint8))
+
+
+def load_trace(data) -> dict:
+    """The inverse of save_trace, from a path or bytes."""
+    import io
+    blob = np.load(io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data, allow_pickle=False)
+    meta = json.loads(bytes(blob["meta"]).decode())
+    return {"frames": blob["frames"].astype(np.float32), "scores": blob["scores"], "prob": blob["prob"],
+            "tokens": [int(t) for t in blob["tokens"]], "col_weight": blob["col_weight"], **meta}
 
 
 if __name__ == "__main__":

@@ -490,3 +490,83 @@ def test_package_is_standalone_and_downloadable(studio_srv):
     assert {"neuronscope-remote/neuronscope_remote/agent.py", "neuronscope-remote/pyproject.toml",
             "neuronscope-remote/README.md", "neuronscope-remote/NeuronScope Remote.bat"} <= names
     assert not any("__pycache__" in n for n in names)
+
+
+FAKE_TRACER = '''
+import argparse, sys
+import numpy as np
+sys.path.insert(0, {scripts!r})
+import hscore
+p = argparse.ArgumentParser()
+for f in ("--binary", "--gguf", "--classifier", "--messages", "--response-file", "--trace-out", "--ngl"):
+    p.add_argument(f)
+a = p.parse_args()
+text = open(a.response_file, encoding="utf-8").read()
+n = len(text)
+hscore.save_trace(a.trace_out, {{"frames": np.ones((n, 3, 4), np.float32), "scores": np.linspace(-3, 3, n),
+                  "prob": 1 / (1 + np.exp(-np.linspace(-3, 3, n))), "tokens": [ord(c) for c in text],
+                  "col_weight": np.ones(4), "pieces": list(text), "stride": 1, "h_cells": [[1, 1]], "n_layers": 3}})
+'''
+
+
+def test_check_a_hosts_reply_here_or_on_the_host(studio_srv, tmp_path, backend):
+    import shutil
+    import studio
+    from test_studio import CODER, _fake_scorer
+    st, inv = call(studio_srv, "/api/remote/invite", {"name": "rig"})
+    ag = nsr.Agent(tmp_path / "host")
+    ag.cfg.update(detect=False, backends=[{"kind": "llama-server", "url": backend}], name="rig")
+    rt = nsr.Runtime(ag)
+    rt.start_callhome(nsr.claim_invite(ag, inv["invite"]))
+    sc = _fake_scorer(tmp_path)
+    m = studio.find_model(CODER)
+    studio.STATE.update(cett=sc.binary, traces_dir=str(tmp_path / "traces"))
+    studio._SCORERS[(m["path"], str(tmp_path / "clf.npz"))] = sc
+    try:
+        for _ in range(100):
+            if call(studio_srv, "/api/remote")[1]["hosts"][0].get("online"):
+                break
+            time.sleep(0.05)
+        ask = {"model": "rig:tiny-chat", "text": "abcdef", "messages": [{"role": "user", "content": "hi"}]}
+        # 1. the host has the very file Studio has: Studio traces it itself, with that model's classifier
+        same = tmp_path / "host-models" / "tiny-chat.gguf"
+        same.parent.mkdir()
+        shutil.copy(m["path"], same)
+        ag.cfg["model_files"] = {"tiny-chat": str(same)}
+        st, r = call(studio_srv, "/api/trace", ask)
+        assert st == 400 and "classifier" in r["error"]
+        cfg = studio.load_settings()
+        cfg.setdefault(studio._key(m["path"]), {})["classifier"] = str(tmp_path / "clf.npz")
+        studio.save_settings(cfg)
+        st, r = call(studio_srv, "/api/trace", ask)
+        assert st == 200, r
+        assert r["traced_on"] == "this computer (same file)" and r["host"] == "rig" and r["pieces"] == list("abcdef")
+        # 2. a different file: the host runs its tracer, with the classifier Studio sends
+        other = same.with_name("tiny-chat-other.gguf")
+        other.write_bytes(b"GGUF" + b"\1" * 64)
+        ag.cfg["model_files"] = {"tiny-chat": str(other)}
+        st, r = call(studio_srv, "/api/trace", ask)
+        assert st == 400 and "classifier" in r["error"]           # no twin and none set for the host model
+        st, r = call(studio_srv, "/api/remote/classifier", {"host": "rig", "model": "tiny-chat",
+                                                             "classifier": str(tmp_path / "clf.npz")})
+        assert st == 200
+        st, r = call(studio_srv, "/api/trace", ask)
+        assert st == 502 and "no NeuronScope tracer" in r["error"]
+        fake = tmp_path / "ns" / "scripts" / "hscore.py"
+        fake.parent.mkdir(parents=True)
+        fake.write_text(FAKE_TRACER.format(scripts=str(ROOT / "scripts")))
+        ag.cfg["tracer"] = {"neuronscope": str(tmp_path / "ns"), "cett": sc.binary}
+        st, r = call(studio_srv, "/api/trace", ask)
+        assert st == 200, r
+        assert r["traced_on"] == "rig" and r["pieces"] == list("abcdef") and len(r["prob"]) == 6
+        code, meta = call(studio_srv, f"/viz/{r['id']}/api/meta")
+        assert code == 200 and meta["labels"] == list("abcdef")
+        # the host owner can switch it off
+        ag.cfg["allow"]["trace"] = False
+        st, r = call(studio_srv, "/api/trace", ask)
+        assert st == 502 and "does not allow" in r["error"]
+    finally:
+        studio._SCORERS.clear()
+        studio.STATE.update(cett=None)
+        for t in ag.callhome.values():
+            t.stop.set()

@@ -124,6 +124,49 @@ The host's tools are:
 - `receive_file` and `transfers`
 - `install_model`
 - `delete_file`: off unless the host's owner allows it
+- `model_file`: where a model's GGUF is on the host, its size and SHA-256
+- `trace_reply`: run a reply through NeuronScope's tracer on the host
+
+## Checking a host model's replies in 3D
+
+*Check* under a reply (or *auto-check*) works for a host's models too, and
+the result opens in the same 3D view. The activations have to be computed
+where a copy of the model file is, by running the reply through it once
+more with `llama-cett-dump`. LM Studio and Ollama cannot report them. Studio
+picks the place:
+
+1. **On this computer, when it has the same file.** Studio asks the host
+   for the model's GGUF size and SHA-256 and looks for an identical file
+   among its own models. A model you sent with *Send model* always
+   matches. The local copy's classifier is used, and the host does nothing
+   but report the hash.
+2. **On the host, otherwise.** Studio sends the reply and the classifier;
+   the host runs NeuronScope's tracer and sends back the per-token trace
+   (a few MB). The host needs:
+   - NeuronScope installed (the agent finds it when it runs from a
+     NeuronScope folder; otherwise set `tracer.neuronscope` in the agent's
+     `config.json`);
+   - `llama-cett-dump` built there (Setup → Build llama.cpp on that machine,
+     then set `tracer.cett`, or put it on `PATH`, or set `NS_CETT`);
+   - *check replies with NeuronScope's tracer* allowed in the host's
+     console (on by default).
+
+   *Host info* says whether the host's tracer is ready.
+
+Which classifier: the one set for the host model (Remote → the host →
+*Models* → *Classifier…*), else that of the identical local file, else that
+of a local model with the same file name. A classifier belongs to one model
+(its layer and neuron counts); a fine-tune of the same architecture needs
+its own.
+
+The agent finds a model's file by asking Ollama (`/api/show`) or
+llama-server (`/props`), then by name under the models and incoming
+folders. When a name is ambiguous, the host's owner can name the file in
+`config.json` under `model_files`, e.g.
+`"model_files": {"qwen2.5-7b-instruct": "D:/models/qwen2.5-7b-instruct-q4_k_m.gguf"}`.
+
+The reply's text, the question and the trace are stored in Studio, as for
+local models. The host keeps nothing.
 
 ## Scoring tuning candidates on a host
 
@@ -172,6 +215,7 @@ on that machine, there are two ways:
 | `POST /api/remote/send`, `/api/remote/remove` | owner | send one of Studio's models; forget a host |
 | `POST /api/remote/claim`; `GET /api/remote/next`; `POST /api/remote/reply` | a host that calls in | join with an invite; wait for messages; answer them |
 | `POST /api/remote/progress` | a host that calls in | pieces of an answer still being written; the reply says whether to stop |
+| `POST /api/remote/classifier` | owner | the classifier for a host model's 3D checks (`host`, `model`, `classifier` path) |
 | `GET /api/remote/file/<ticket>` | a host that calls in | download a file Studio is sending (resumable) |
 
 ## When something does not work
