@@ -320,6 +320,13 @@ def train(a) -> int:
                 prm.requires_grad_(False)
     trainer = SFTTrainer(model=model, args=sft_args, train_dataset=train_ds,
                          processing_class=tok, peft_config=peft_cfg)
+    kept = len(trainer.train_dataset)
+    if kept == 0:
+        raise SystemExit(f"all {len(train_ds)} SFT examples were dropped: with --max-length {a.max_length} the "
+                         "prompt fills the window and no reply token is left to learn from. Raise --max-length.")
+    if kept < len(train_ds):
+        print(f"note: {len(train_ds) - kept} of {len(train_ds)} examples had no reply left within --max-length "
+              f"{a.max_length} and were dropped")
     trainer.train()
     model = trainer.model
     sft_dir = out if not a.dpo else out / "sft"

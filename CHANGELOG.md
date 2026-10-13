@@ -3,6 +3,19 @@
 ## Unreleased
 
 ### Improved (retraining on deficits)
+- `scripts/retrain_cycle.py` (Jobs → Retrain → *Retraining cycle*): one
+  command from baseline to verdict. It serves the base GGUF with
+  llama-server, measures, builds the dataset with the base model probed as
+  the student, then trains, converts and serves each arm, and asks each
+  exactly the baseline's holdout items. It gates each arm and recommends
+  one or none.
+  - Arms are layer choices (`all`, `plan`, `10-17`), so `--arms all,plan`
+    tests focus layers against all layers on the same data.
+  - It resumes after interruption (`--redo STEP`).
+  - It stops with a reason when the baseline is mostly errors or the
+    dataset is too small.
+- finetune.py says when `--max-length` cut every reply off, instead of
+  failing inside the trainer.
 - Knowledge probing (`deficits.py --student`). Each failed fact is
   sampled several times:
   - weakly known facts (some sample right) are trained with the gold

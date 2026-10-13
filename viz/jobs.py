@@ -91,6 +91,22 @@ SPECS: dict[str, dict] = {
             F("lora_r", kind="int", default=16), F("epochs", kind="float", default=2),
             F("max_steps", kind="int", default=-1), F("max_length", kind="int", default=2048),
             F("gradient_checkpointing", kind="bool")]},
+    "retrain_cycle": {
+        "title": "Retraining cycle", "group": "Retrain", "argv": [S / "retrain_cycle.py"],
+        "help": "Measure, curate, train each arm, convert, measure on the holdout, keep or reject. Resumes.",
+        "fields": [
+            F("out", req=True, help="the cycle's folder (an existing one resumes)"),
+            F("base_model", req=True, help="HF id or path of the base weights"),
+            F("base_gguf", help="the base model as GGUF, served here for a like-for-like baseline"),
+            F("base_endpoint", help="or: URL@model where the base model is already served"),
+            F("teacher", help="URL@model of a stronger model"),
+            F("arms", default="all", help="layer choices to compare: all, plan, 10-17 (comma list)"),
+            F("review_model", help="neuron review model, for the plan arm"),
+            F("method", choices=["qlora", "lora", "full"], default="lora"), F("dpo", kind="bool"),
+            F("expand", kind="int", default=0), F("per_subject", kind="int", help="TestQA items per subject"),
+            F("subject", multi=True), F("allow_exec", kind="bool"),
+            F("sandbox", choices=["none", "docker", "podman"], default="docker"),
+            F("quant", default="Q4_K_M"), F("llama", help="llama.cpp checkout (default $NS_LLAMA)")]},
     "retrain_gate": {
         "title": "Keep or reject a retrain", "group": "Retrain", "argv": [S / "retrain_gate.py"],
         "help": "Before/after on the holdout: fixed vs broken items, hallucination, per subject; a verdict.",
