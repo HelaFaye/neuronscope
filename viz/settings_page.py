@@ -42,7 +42,7 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 </style>
 <header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
+<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><a href="#plugins">Plugins</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
 
 <section class="card" id="appearance"><h2>Appearance</h2>
 <div class="note">A theme colours Studio's pages, its charts (the model radar) and the 3D views of activations and hallucination risk. Your choice is kept in this browser; <b>Make default</b> sets it for browsers that have not chosen one, and for the Godot client's 3D view.</div>
@@ -74,6 +74,10 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 <select id="tann" style="width:auto"><option value="{}">no annotations</option><option value='{"readOnlyHint":true}'>read-only</option><option value='{"readOnlyHint":false,"destructiveHint":false}'>writes</option><option value='{"readOnlyHint":false,"destructiveHint":true}'>destructive</option><option value='{"readOnlyHint":true,"openWorldHint":true}'>read-only, open world</option></select><button id="ttest">Test</button></div>
 <div id="tout" class="note"></div>
 <h3>Connected tools</h3><div id="tlist" class="note"></div></section>
+<section class="card" id="plugins"><h2>Plugins</h2>
+<div class="note">A plugin is a folder with a <code>plugin.json</code>. It can add jobs, checks under chat replies, a page of its own and MCP tools. <b>Plugins run code on this computer</b>, so none is used until you turn it on. If a plugin's files change after that, it turns itself off until you look at it again. See docs/PLUGINS.md to write one.</div>
+<div id="plDirs" class="note"></div><table id="plList"></table><div id="plMsg" class="note"></div></section>
+
 <section class="card" id="sharing"><h2>Sharing results</h2>
 <div class="note"><b>Off unless you turn it on.</b> When on, TestQA results can be sent to a scoreboard you name, so models can be compared across machines and setups. NeuronScope runs no scoreboard of its own; anyone can host <code>scripts/scoreboard_server.py</code>.</div>
 <details open style="margin:.5rem 0"><summary><b>What is sent, and what it is for</b></summary>
@@ -246,6 +250,15 @@ async function shAct(kind){ const [results,label]=($('#shRes').value||'|').split
   const j=await r.json(); $('#shOut').textContent=r.ok?JSON.stringify(j,null,1):'error: '+j.error; if(kind==='submit') shLoad(); }
 $('#shPrev').onclick=()=>shAct('preview'); $('#shSend').onclick=()=>shAct('submit');
 shLoad();
+async function plLoad(){ let r; try{ r=await api('/api/plugins'); }catch(e){ $('#plList').innerHTML=`<tr><td class="err">${esc(e.message)}</td></tr>`; return; }
+  $('#plDirs').innerHTML='Looked in: '+r.dirs.map(d=>'<code>'+esc(d)+'</code>').join(', ');
+  const st={on:'<span style="color:var(--ok)">on</span>',off:'off',changed:'<span class="err">changed since you turned it on: off</span>',broken:'<span class="err">broken</span>'};
+  $('#plList').innerHTML=r.plugins.length?'<tr><th>plugin</th><th>adds</th><th>status</th><th></th></tr>'+r.plugins.map(p=>{ const a=p.adds||{}, adds=[...(a.jobs||[]).map(x=>'job: '+x),...(a.checks||[]).map(x=>'check: '+x),a.page?'a page':'',a.mcp?'MCP tools':''].filter(Boolean);
+    return `<tr><td><b>${esc(p.name)}</b> ${p.version?'<span class="note">'+esc(p.version)+'</span>':''}<div class="note">${esc(p.description||p.error||'')}</div><div class="note"><code>${esc(p.folder)}</code></div></td><td class="note">${adds.map(esc).join('<br>')}</td><td>${st[p.status]||esc(p.status)}</td><td>${p.status==='broken'?'':`<button data-pl="${esc(p.name)}" data-on="${p.status==='on'?0:1}">${p.status==='on'?'Turn off':(p.status==='changed'?'Review and turn on':'Turn on')}</button>`}${p.status==='on'&&a.page?` <a href="/plugins/${encodeURIComponent(p.name)}/">open page</a>`:''}</td></tr>`; }).join(''):'<tr><td class="note">No plugins found. Put plugin folders in the first folder above.</td></tr>';
+  document.querySelectorAll('[data-pl]').forEach(b=>b.onclick=async()=>{ const on=b.dataset.on==='1';
+    if(on&&!confirm('Turn on '+b.dataset.pl+'? It runs code on this computer with your permissions. Turn it on only if you trust where it came from.')) return;
+    try{ await api('/api/plugins/enable',{name:b.dataset.pl,on}); msg('#plMsg',on?'On. Its jobs are under Jobs → Plugins.':'Off.'); }catch(e){ msg('#plMsg',esc(e.message),true); } plLoad(); }); }
+plLoad();
 </script>
 """
 

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added (plugins)
+- A plugin framework (`viz/plugins.py`, docs/PLUGINS.md). A plugin is a
+  folder with a `plugin.json` that adds jobs, checks under chat replies, a
+  page and MCP tools. None runs until the owner turns it on in Settings →
+  Plugins; a SHA-256 of its files is recorded then, and any change turns it
+  off again. Scripts run as separate processes.
+- Example plugin `plugins/claim-spotter`: marks the numbers, dates and
+  quotations in a reply as claims to verify, and collects them from saved
+  chats into a CSV.
+- docs/CONNECT.md: *MCP, step by step*, for the three MCP pieces (Studio as
+  tools for an agent app, another computer's LLMs through the Remote
+  bridge, tools in Studio's chat).
+
 ### Added (remote hosts)
 - Streaming chat with hosts that call in to Studio. The agent reads its
   backend's reply as it is written and posts the new text a few times a

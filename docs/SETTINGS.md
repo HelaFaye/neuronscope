@@ -141,3 +141,11 @@ Studio → Models → a model shows a radar, in the theme's chart colours, of:
 
 **Compare with (2P)** overlays another model. The bars under it are the
 average over the axes, in tenths.
+
+## Plugins
+
+Lists the plugins found in `~/.neuronscope/plugins/` and the repository's
+`plugins/`, with what each adds (jobs, reply checks, a page, MCP tools).
+Plugins run code, so each stays off until you turn it on. If its files
+change later, it switches itself off until you turn it on again.
+[PLUGINS.md](PLUGINS.md) explains how to write one.

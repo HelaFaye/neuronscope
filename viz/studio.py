@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import http.cookies
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -896,10 +897,27 @@ def tool_rules():
     return tr.Rules(STATE.get("tool_rules_path"))
 
 
+def plugins():
+    """Studio's plugin manager (viz/plugins.py): the plugins folder in Studio's home, and the
+    repository's plugins/ examples. None of them runs until the owner turns it on."""
+    pm = STATE.get("plugins")
+    if pm is None:
+        import plugins as ns_plugins
+        home = os.path.dirname(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        dirs = STATE.get("plugin_dirs") or [os.path.join(home, "plugins"), os.path.join(repo, "plugins")]
+        pm = STATE["plugins"] = ns_plugins.Plugins(dirs, os.path.join(home, "plugins.json"))
+    return pm
+
+
+ns_jobs.EXTRA = lambda: plugins().job_specs()
+
+
 def mcp_hub():
     hub = STATE.get("mcp")
-    if hub is None and STATE.get("mcp_config"):
-        hub = STATE["mcp"] = ns_mcp.MCPHub(STATE["mcp_config"])
+    if hub is None and (STATE.get("mcp_config") or plugins().mcp_servers()):
+        hub = STATE["mcp"] = ns_mcp.MCPHub(STATE.get("mcp_config"))
+        hub.extra = lambda: plugins().mcp_servers()
         hub.connect()
     return hub
 
@@ -2304,6 +2322,52 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _plugins_get(self):
+        import plugins as ns_plugins
+        pm = plugins()
+        if self.path == "/api/plugins":
+            return self._json(200, {"plugins": pm.summary(), "checks": pm.checks(),
+                                    "dirs": [str(d) for d in pm.dirs]})
+        m = re.fullmatch(r"/plugins/([a-z0-9][a-z0-9_-]{0,39})/(.*)", self.path.split("?")[0])
+        if not m:
+            return self._json(404, {"error": "not found"})
+        try:
+            f = pm.page_file(m.group(1), urllib.parse.unquote(m.group(2)))
+        except ns_plugins.PluginError as e:
+            return self._json(404, {"error": str(e)})
+        if f is None:
+            return self._json(404, {"error": "not found"})
+        body = f.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(f.name)[0] or "application/octet-stream")
+        # A plugin page may talk to Studio's API (same origin) but loads nothing from elsewhere.
+        self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' data: blob:")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _plugins_post(self):
+        import plugins as ns_plugins
+        pm = plugins()
+        req = self._read(MAX_BODY)
+        try:
+            if self.path == "/api/plugins/enable":
+                if not self._owner_only():
+                    return
+                p = pm.set_enabled(str(req.get("name", "")), bool(req.get("on")))
+                if STATE.get("mcp") is not None:
+                    threading.Thread(target=STATE["mcp"].connect, daemon=True).start()
+                elif p["manifest"].get("mcp"):
+                    threading.Thread(target=mcp_hub, daemon=True).start()
+                return self._json(200, {"name": p["name"], "status": p["status"]})
+            if self.path == "/api/plugins/check":
+                payload = {"model": req.get("model"), "messages": req.get("messages") or [],
+                           "text": str(req.get("text") or "")}
+                return self._json(200, pm.run_check(str(req.get("plugin", "")), str(req.get("check", "")), payload))
+        except ns_plugins.PluginError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
     def _owner_only(self):
         """Pairing, device management and links are for the owner, not for paired devices."""
         if self._role != "owner":
@@ -3318,6 +3382,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._requirements()
         if self.path in ("/settings", "/api/workspaces", "/api/settings", "/api/settings/sharing"):
             return self._settings()
+        if self.path == "/api/plugins" or self.path.startswith("/plugins/"):
+            return self._plugins_get()
         if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
             return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
@@ -3482,6 +3548,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path.startswith("/api/remote/"):
                 return self._remote_post()
+            if self.path.startswith("/api/plugins/"):
+                return self._plugins_post()
             if self.path in ("/api/pair/start", "/api/devices/revoke", "/api/devices/update", "/api/links/add",
                              "/api/links/remove"):
                 return self._pairing_post()
@@ -3988,6 +4056,8 @@ details.think summary{cursor:pointer}
 .risk{font-size:12px;margin-top:.35rem}.risk:empty{display:none}
 .risk .sum{color:var(--mut);margin-bottom:.25rem}.risk .sum b{color:var(--fg)}
 .risk .rt{white-space:pre-wrap;word-wrap:break-word;line-height:1.7;font-size:13px}
+.pchk{font-size:12px;margin-top:.35rem}.pchk:empty{display:none}.pchk .sum{color:var(--mut);margin-bottom:.25rem}.pchk .sum b{color:var(--fg)}.pchk .sum b.bad{color:var(--no)}
+.pchk .rt{white-space:pre-wrap;word-wrap:break-word;line-height:1.7;font-size:13px;color:var(--fg)}.pchk mark{background:color-mix(in srgb,var(--acc) 30%,transparent);color:inherit;border-radius:3px;padding:0 1px}
 .risk .rt span{border-radius:2px}.risk .rt .fl{text-decoration:underline 2px var(--no);text-underline-offset:3px}
 .imgs{display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0}.imgs img{max-height:120px;max-width:200px;border-radius:6px;border:1px solid var(--line)}
 form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5rem;background:var(--panel);align-items:flex-end;flex-wrap:wrap}
@@ -4374,7 +4444,7 @@ function bubble(role,content,extra={}){
   const d=document.createElement('div'); d.className='msg';
   d.innerHTML=`<div class="who">${role==='user'?'you':'assistant'}<span class="acts"></span></div>`+
     (extra.think!==undefined?`<details class="think"><summary>reasoning</summary><div></div></details>`:'')+
-    `<div class="imgs"></div><div class="tools"></div><div class="body"></div><div class="src"></div><div class="stats"></div><div class="risk"></div>`;
+    `<div class="imgs"></div><div class="tools"></div><div class="body"></div><div class="src"></div><div class="stats"></div><div class="risk"></div><div class="pchk"></div>`;
   d.querySelector('.imgs').innerHTML=imagesOf(content).map(u=>`<img src="${esc(u)}" alt="attached image">`).join('');
   d.querySelector('.body').innerHTML=render(textOf(content));
   if(extra.think) d.querySelector('.think div').textContent=extra.think;
@@ -4386,7 +4456,9 @@ function bubble(role,content,extra={}){
     a.querySelector('[data-a=copy]').onclick=()=>navigator.clipboard.writeText(d.querySelector('.body').textContent);
     a.querySelector('[data-a=regen]').onclick=regenerate;
     a.querySelector('[data-a=check]').onclick=()=>checkReply(d);
-    if(extra.check) showRisk(d.querySelector('.risk'),extra.check); }
+    if(PLUGIN_CHECKS.length){ const b=document.createElement('button'); b.textContent='plugins'; b.title='run the checks from your plugins: '+PLUGIN_CHECKS.map(c=>c.title).join(', '); b.onclick=()=>pluginChecks(d,false); a.appendChild(b); }
+    if(extra.check) showRisk(d.querySelector('.risk'),extra.check);
+    if(extra.plugin_checks) showPluginChecks(d,extra.plugin_checks); }
   $('#log').appendChild(d); $('#log').scrollTop=1e9;
   return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats'), src:d.querySelector('.src'), tools:d.querySelector('.tools')};
 }
@@ -4410,7 +4482,7 @@ function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details>
 function renderChat(){
   $('#log').innerHTML='';
   if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from the Models tab, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
-  for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check}); b.root._msg=m; }
+  for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check,plugin_checks:m.plugin_checks}); b.root._msg=m; }
 }
 // ---------- per-reply check: token risk from the activation classifier
 function showRisk(el,c){
@@ -4434,6 +4506,20 @@ function showRisk(el,c){
     return `<span class="${r>=c.threshold?'fl':''}" title="risk ${(r*100).toFixed(0)}%" style="background:color-mix(in srgb,var(--no) ${Math.round(a*(r>=c.threshold?50:30))}%,transparent)">${esc(p)}</span>`; }).join('');
   el.querySelector('[data-a=tog]').onclick=e=>{ e.preventDefault(); const rt=el.querySelector('.rt'); rt.hidden=!rt.hidden; e.target.textContent=(rt.hidden?'show':'hide')+' tokens'; };
 }
+// ---------- plugin checks (Settings -> Plugins)
+let PLUGIN_CHECKS=[];
+fetch('/api/plugins').then(r=>r.ok?r.json():{checks:[]}).then(j=>{ PLUGIN_CHECKS=j.checks||[]; }).catch(()=>{});
+function showPluginChecks(d,res){ const el=d.querySelector('.pchk');
+  el.innerHTML=res.map((c,i)=>`<div class="sum">${esc(c.title)}: ${c.error?'<span class="bad">'+esc(c.error)+'</span>':`<b class="${c.flag?'bad':''}">${esc(c.label)}</b>${c.note?' · '+esc(c.note):''}${c.spans&&c.spans.length?` · <a href="#" data-pc="${i}">show</a><div class="rt" hidden></div>`:''}`}</div>`).join('');
+  el.querySelectorAll('[data-pc]').forEach(a=>a.onclick=e=>{ e.preventDefault(); const c=res[+a.dataset.pc], box=a.nextElementSibling, text=d._msg?textOf(d._msg.content):d.querySelector('.body').textContent;
+    if(box.hidden&&!box.innerHTML){ let h='',i=0; for(const [x,y,n] of c.spans){ if(x<i) continue; h+=esc(text.slice(i,x))+`<mark title="${esc(n)}">${esc(text.slice(x,y))}</mark>`; i=y; } box.innerHTML=h+esc(text.slice(i)); }
+    box.hidden=!box.hidden; a.textContent=box.hidden?'show':'hide'; }); }
+async function pluginChecks(d,autoOnly){
+  const m=d._msg; if(!m) return; const list=PLUGIN_CHECKS.filter(c=>!autoOnly||c.auto); if(!list.length) return;
+  const idx=chat.messages.indexOf(m), el=d.querySelector('.pchk'); el.innerHTML='<div class="sum">running plugin checks…</div>';
+  const body={model:m.model,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)};
+  const res=await Promise.all(list.map(async c=>{ try{ const r=await post('/api/plugins/check',{...body,plugin:c.plugin,check:c.name}); const j=await r.json(); return r.ok?j:{title:c.title,error:j.error}; }catch(e){ return {title:c.title,error:String(e)}; } }));
+  showPluginChecks(d,res); m.plugin_checks=res.filter(x=>!x.error); await persist(); }
 async function checkReply(d){
   const m=d._msg; if(!m) return;
   const idx=chat.messages.indexOf(m), el=d.querySelector('.risk');
@@ -4514,6 +4600,7 @@ async function stream(){
   status(); refresh();
   busy=false; $('#send').textContent='Send';
   if(msg&&acc&&$('#autoCheck').checked) checkReply(out.root);
+  if(msg&&acc) pluginChecks(out.root,true);
 }
 $('#export').onclick=()=>{
   const md=`# ${chat.title}\n\n`+chat.messages.map(m=>`**${m.role}**\n\n${textOf(m.content)}${imagesOf(m.content).length?`\n\n_[${imagesOf(m.content).length} image(s)]_`:''}\n`).join('\n');

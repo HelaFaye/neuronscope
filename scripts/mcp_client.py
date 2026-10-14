@@ -116,13 +116,16 @@ class MCPHub:
         self.conns: dict[str, _Conn] = {}
         self.specs: dict[str, dict] = {}
         self.lock = threading.Lock()
+        self.extra = None     # callable -> more servers (Studio: from enabled plugins)
 
     # ------------------------------------------------------------ config
     def load(self) -> dict:
-        if not self.config_path.exists():
-            return {}
-        cfg = json.loads(self.config_path.read_text())
-        servers = cfg.get("mcpServers", cfg if isinstance(cfg, dict) else {})
+        servers = {}
+        if self.config_path.exists():
+            cfg = json.loads(self.config_path.read_text())
+            servers = dict(cfg.get("mcpServers", cfg if isinstance(cfg, dict) else {}))
+        if self.extra:
+            servers.update(self.extra())
         out = {}
         for name, spec in servers.items():
             if not isinstance(spec, dict) or not (spec.get("command") or spec.get("url")):

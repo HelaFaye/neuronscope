@@ -480,12 +480,18 @@ SPECS.update({
 })
 
 SAFE = re.compile(r"^[^\x00-\x1f]*$")
+EXTRA = None      # callable -> more specs (Studio: job kinds from enabled plugins)
+
+
+def all_specs() -> dict:
+    return {**SPECS, **(EXTRA() if EXTRA else {})}
 
 
 def build_argv(kind: str, values: dict) -> list[str]:
-    if kind not in SPECS:
+    specs = all_specs()
+    if kind not in specs:
         raise ValueError(f"unknown job kind {kind!r}")
-    spec = SPECS[kind]
+    spec = specs[kind]
     argv = [*(spec.get("interp") or [sys.executable]), *[str(x) for x in spec["argv"]]]
     for f in spec["fields"]:
         v = values.get(f["name"], f["default"])
@@ -561,7 +567,7 @@ class JobRunner:
                                     start_new_session=True)
             log.close()
             self.procs[jid] = proc
-            meta = {"id": jid, "kind": kind, "title": SPECS[kind]["title"], "values": values, "argv": argv[1:],
+            meta = {"id": jid, "kind": kind, "title": all_specs()[kind]["title"], "values": values, "argv": argv[1:],
                     "status": "running", "pid": proc.pid, "started": time.time(), "ended": None, "returncode": None}
             self._write(meta)
         threading.Thread(target=self._wait, args=(jid, proc), daemon=True).start()
@@ -625,7 +631,7 @@ class JobRunner:
 def public_specs() -> dict:
     return {k: {"title": v["title"], "group": v["group"], "help": v["help"],
                 "fields": [{x: f[x] for x in ("name", "kind", "required", "default", "help", "choices", "multi")}
-                           for f in v["fields"]]} for k, v in SPECS.items()}
+                           for f in v["fields"]]} for k, v in all_specs().items()}
 
 
 PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

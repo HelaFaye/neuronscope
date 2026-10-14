@@ -15,6 +15,54 @@ The quickest way in is Studio's **Connect** page (`/connect`, link in the
 header). It shows every setting below for the address you opened Studio
 with, with copy buttons.
 
+## MCP, step by step
+
+NeuronScope has three MCP pieces. Pick by what should control what:
+
+| you want | the MCP piece | set up |
+|---|---|---|
+| an agent app (Cline, Claude Desktop, Cursor…) to use NeuronScope: route models, check replies, run jobs | Studio's MCP **server** | A below |
+| an agent app to use the LLMs on another computer (LM Studio, Ollama, llama.cpp there) | the Remote agent's MCP **bridge** | B below |
+| Studio's chat to call tools (files, search, your plugins…) | Studio's MCP **client** | C below |
+
+**A. Studio as tools for an agent app**
+1. Start Studio and open **Connect** (header). Copy the entry for your app.
+2. Paste it into the app's MCP settings (Cline: *MCP Servers → Configure*;
+   Claude Desktop: *Settings → Developer → Edit Config*). For Cline,
+   `python scripts/ns_connect.py cline --write` does this for you.
+3. Restart the app's MCP servers. `studio_status` should answer.
+   - Nothing to install: the HTTP entry needs only Studio running; the stdio
+     entry runs `scripts/ns_mcp.py`, which uses the standard library only.
+   - With a Studio token, the entry carries it; keep that file private.
+
+**B. Another computer's LLMs for an agent app**
+1. On the computer with the models (the *host*), run NeuronScope Remote
+   (Studio → Remote → *Download NeuronScope Remote*, or copy `remote/`).
+   Python 3.9+, nothing else.
+2. On the computer with the agent app (the *controller*), pair it once:
+   `python -m neuronscope_remote add-host nsr://…` with the pairing link the
+   host's console shows. Run it in the folder that holds
+   `neuronscope_remote` (NeuronScope's `remote/`, or the unpacked Remote zip).
+3. Add to the app's MCP settings:
+   ```json
+   {"mcpServers": {"gpu-box": {"command": "python",
+                               "args": ["-m", "neuronscope_remote", "bridge", "gpu-box"],
+                               "env": {"PYTHONPATH": "/folder/that/holds/neuronscope_remote"}}}}
+   ```
+   The app then has the host's tools: `list_models`, `chat`, `load_model`…
+   ([REMOTE.md](REMOTE.md) lists them). The host's owner sees each call and
+   can revoke the controller.
+   - For an app on the host itself: `"args": ["-m", "neuronscope_remote", "stdio"]`.
+
+**C. Tools in Studio's chat**
+1. Install the MCP client library once: Setup → Requirements (`mcp`), or
+   `pip install mcp`.
+2. Write `~/.neuronscope/mcp.json` in the format LM Studio and Claude
+   Desktop use ([STUDIO.md](STUDIO.md#tools-mcp) has an example), or turn on
+   a plugin that brings an MCP server (Settings → Plugins).
+3. In the chat, tick **tools**. Each call asks first unless its tool is
+   auto-approved (Settings → Tool approval).
+
 ## Cline
 
 **Models.** In Cline's settings choose *API Provider → OpenAI Compatible*:
