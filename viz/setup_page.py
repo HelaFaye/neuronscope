@@ -42,7 +42,7 @@ details.feat{border-bottom:1px solid var(--line);padding:.35rem 0}details.feat s
 <main>
 <section class="card" id="status-card"><h2>Status</h2><div id="status" class="note">…</div><div id="next"></div></section>
 
-<section class="card" id="paths"><h2>Paths and behaviour</h2><div class="note">Folders are saved to the running workspace; keep several layouts under <a href="/settings#workspaces">Settings → Workspaces</a>.</div>
+<section class="card" id="paths"><h2>Settings</h2><div class="note">Folders are saved to the running workspace; keep several layouts under <a href="/settings#workspaces">Settings → Workspaces</a>.</div>
 <div class="note">Saved to <code id="cfgpath"></code>. Most changes apply at once; the rest after a restart.</div>
 <form id="form"></form>
 <div class="row" style="margin-top:.8rem"><button class="pri" id="save">Save</button><button id="restart">Restart Studio</button><span id="saved"></span></div>
@@ -92,23 +92,28 @@ function renderStatus(s){
   else nx='Ready. <a href="/">Open Studio</a> to chat, <a href="/jobs">Jobs</a> to evaluate and train, <a href="/connect">Connect</a> to use these models from Cline.';
   $('#next').innerHTML=`<div class="next">${nx}</div>`;
 }
+function fieldHTML(s,k,f){
+    const v=f.value; let inp;
+    if(f.kind==='bool') return `<div><label style="margin-top:1.4rem"><input type="checkbox" data-k="${k}" ${v?'checked':''}>${esc(f.help)}${f.live?'':' <span class="note">(after restart)</span>'}</label><div class="err" data-err="${k}"></div></div>`;
+    const val=f.kind==='dirs'?(v||[]).join('\n'):(v??'');
+    const ph={duration:'e.g. 5m',durations:'e.g. 1h,8h,1d',url:'http://host:port/v1@model',path:'a file (created when needed)',readfile:'a file'}[f.kind]||'';
+    const el=f.kind==='dirs'?`<textarea data-k="${k}" placeholder="one folder per line">${esc(val)}</textarea>`:`<input data-k="${k}" value="${esc(val)}" placeholder="${ph}" ${['int','float'].includes(f.kind)?'inputmode="decimal"':''}>`;
+    const sug=s.found[k]&&s.found[k]!==v?`<button type="button" data-use="${k}" style="margin-top:.25rem">Use ${esc(s.found[k])}</button>`:'';
+    return `<div><label>${esc(k.replace(/_/g,' '))}<span class="note">${esc(f.help)}${f.live?'':' (after restart)'}</span></label>${el}${sug}<div class="err" data-err="${k}"></div></div>`; }
 function renderForm(s){
   $('#cfgpath').textContent=s.config_path;
-  $('#form').innerHTML='<div class="grid">'+Object.entries(s.fields).map(([k,f])=>{
-    const v=f.value; let inp;
-    if(f.kind==='bool') inp=`<label style="margin-top:1.4rem"><input type="checkbox" data-k="${k}" ${v?'checked':''}>${esc(f.help)}${f.live?'':' <span class="note">(after restart)</span>'}</label>`;
-    else{ const val=f.kind==='dirs'?(v||[]).join('\n'):(v??'');
-      const el=f.kind==='dirs'?`<textarea data-k="${k}" placeholder="one folder per line">${esc(val)}</textarea>`:`<input data-k="${k}" value="${esc(val)}" ${['int','float'].includes(f.kind)?'inputmode="decimal"':''}>`;
-      const sug=s.found[k]&&s.found[k]!==v?`<button type="button" data-use="${k}" style="margin-top:.25rem">Use ${esc(s.found[k])}</button>`:'';
-      inp=`<label>${esc(k.replace(/_/g,' '))}<span class="note">${esc(f.help)}${f.live?'':' (after restart)'}</span></label>${el}${sug}<div class="err" data-err="${k}"></div>`; }
-    return `<div>${inp}</div>`}).join('')+'</div>';
+  const groups={}; for(const [k,f] of Object.entries(s.fields)) (groups[f.group||'Other']??=[]).push([k,f]);
+  const block=(g,xs)=>`<h3 style="margin:1rem 0 .2rem">${esc(g)}</h3><div class="grid">${xs.map(([k,f])=>fieldHTML(s,k,f)).join('')}</div>`;
+  const basic=Object.entries(groups).filter(([g,xs])=>!xs[0][1].advanced), adv=Object.entries(groups).filter(([g,xs])=>xs[0][1].advanced);
+  $('#form').innerHTML=basic.map(([g,xs])=>block(g,xs)).join('')+
+    (adv.length?`<details style="margin-top:1rem" ${location.hash==='#advanced'?'open':''}><summary><b>Advanced</b> <span class="note">${adv.map(([g])=>esc(g)).join(', ')}. These apply after a restart; an address Studio would refuse to start with is refused here first.</span></summary>${adv.map(([g,xs])=>block(g,xs)).join('')}</details>`:'');
   document.querySelectorAll('[data-use]').forEach(b=>b.onclick=()=>{document.querySelector(`[data-k=${b.dataset.use}]`).value=s.found[b.dataset.use]});
 }
 async function load(){ S=await api('api/setup'); renderStatus(S); renderForm(S); }
 $('#save').onclick=async()=>{
   const values={}; document.querySelectorAll('[data-k]').forEach(e=>{const k=e.dataset.k, f=S.fields[k];
     values[k]=f.kind==='bool'?e.checked:f.kind==='dirs'?e.value.split('\n').map(x=>x.trim()).filter(Boolean):e.value.trim();
-    if(['int','float'].includes(f.kind)){ if(values[k]==='') delete values[k]; else if(!isNaN(+values[k])) values[k]=+values[k]; } if(['file','dir'].includes(f.kind)&&values[k]==='') values[k]=null;
+    if(['int','float'].includes(f.kind)&&values[k]!==''&&!isNaN(+values[k])) values[k]=+values[k]; if(f.kind!=='dirs'&&values[k]==='') values[k]=null;
     // Only what changed: unchanged fields stay out of the config file (and keep following the defaults).
     const was=f.kind==='dirs'?(f.value||[]):f.value; if(k in values && JSON.stringify(values[k]??null)===JSON.stringify(was??null)) delete values[k];});
   if(!Object.keys(values).length){ $('#saved').innerHTML='<span class="note">nothing changed</span>'; return; }

@@ -1720,22 +1720,51 @@ def _director():
 # Settings the Setup page may change, with their type and whether they apply
 # without a restart. Network exposure (host, token, TLS, remote jobs) is never
 # editable from the web: those stay in the config file and on the command line.
+# key: (kind, applies without a restart, help, group). Kinds: dirs, file (an executable), readfile (a file
+# that must exist), path (may not exist yet), dir, int, float, bool, str, duration, durations, url.
 SETUP_FIELDS = {
-    "models_dir": ("dirs", True, "Folders searched for .gguf models"),
-    "server": ("file", True, "llama-server binary"),
-    "cett": ("file", True, "llama-cett-dump binary (activation checks, the GGUF pipeline)"),
-    "download_dir": ("dir", True, "Where model downloads go (default: the first models folder)"),
-    "idle_ttl": ("int", True, "Unload the chat model after this many idle seconds (0 = never)"),
-    "no_jit": ("bool", True, "Never load or swap models for API requests"),
-    "min_graded": ("int", True, "Graded results a model needs before auto routing considers it"),
-    "hallucination_cost": ("float", True, "How much a wrong answer costs against a right one, for routing"),
-    "max_workers": ("int", True, "Worker models the director may run at once"),
-    "worker_idle": ("int", True, "Stop an idle worker model after this many seconds"),
-    "score_every": ("int", True, "Score one live reply in N with the activation classifier"),
-    "score_ngl": ("int", True, "GPU layers for activation scoring (0 keeps it off the GPU)"),
-    "max_jobs": ("int", False, "Jobs that may run at once"),
-    "rag_embed_gguf": ("file", False, "Embedding GGUF for document search"),
+    "models_dir": ("dirs", True, "Folders searched for .gguf models", "Models and engines"),
+    "server": ("file", True, "llama-server binary", "Models and engines"),
+    "vllm": ("str", True, "The vLLM command, for models served with the vLLM engine", "Models and engines"),
+    "download_dir": ("dir", True, "Where model downloads go (default: the first models folder)", "Models and engines"),
+    "backend_port": ("int", False, "Local port for llama-server or vLLM", "Models and engines"),
+    "idle_ttl": ("int", True, "Unload the chat model after this many idle seconds (0 = never)", "Models and engines"),
+    "no_jit": ("bool", True, "Never load or swap models for API requests", "Models and engines"),
+    "min_graded": ("int", True, "Graded results a model needs before auto routing considers it", "Routing"),
+    "hallucination_cost": ("float", True, "How much a wrong answer costs against a right one, for routing", "Routing"),
+    "stats_window": ("int", False, "Most recent observations per kind that count in a model's record", "Routing"),
+    "cett": ("file", True, "llama-cett-dump binary (activation checks, the GGUF pipeline)", "Activation checks"),
+    "score_every": ("int", True, "Score one live reply in N with the activation classifier", "Activation checks"),
+    "score_ngl": ("int", True, "GPU layers for activation scoring (0 keeps it off the GPU)", "Activation checks"),
+    "max_workers": ("int", True, "Worker models the director may run at once", "Workers and jobs"),
+    "worker_idle": ("int", True, "Stop an idle worker model after this many seconds", "Workers and jobs"),
+    "hardware": ("path", False, "Accelerator settings for worker models (Setup → Hardware writes it)", "Workers and jobs"),
+    "max_jobs": ("int", False, "Jobs that may run at once", "Workers and jobs"),
+    "no_jobs": ("bool", False, "Turn the Jobs page off entirely", "Workers and jobs"),
+    "allow_remote_jobs": ("bool", False, "Allow jobs when Studio listens on the network (jobs train models and can "
+                          "run model-written code)", "Workers and jobs"),
+    "rag_embed_gguf": ("readfile", False, "Embedding GGUF for document search", "Documents and tools"),
+    "rag_embed": ("url", False, "Or an OpenAI-compatible embeddings endpoint: URL, optionally @model",
+                  "Documents and tools"),
+    "rag_embed_ngl": ("int", False, "GPU layers for the embedding model", "Documents and tools"),
+    "mcp_config": ("path", False, "MCP servers for chat tools (mcp.json)", "Documents and tools"),
+    "host": ("str", False, "Address Studio listens on: 127.0.0.1 is this computer only; 0.0.0.0 or a LAN/VPN address "
+             "needs a token, and TLS or plaintext allowed", "Network and security"),
+    "port": ("int", False, "Studio's port", "Network and security"),
+    "token_file": ("readfile", False, "File with Studio's access token (ns_security.py token makes one)",
+                   "Network and security"),
+    "tls_cert": ("readfile", False, "TLS certificate (PEM); with the key, Studio serves HTTPS", "Network and security"),
+    "tls_key": ("readfile", False, "TLS private key (PEM)", "Network and security"),
+    "allow_plaintext": ("bool", False, "Allow HTTP without TLS on the network (only behind a VPN or a TLS proxy)",
+                        "Network and security"),
+    "pair_code_ttl": ("duration", False, "How long a pairing link can be claimed (e.g. 90s, 5m, 1h)", "Pairing"),
+    "pair_durations": ("durations", False, "Temporary-access durations offered when pairing", "Pairing"),
+    "pair_max": ("duration", False, "Longest temporary access a pairing may grant", "Pairing"),
+    "pair_default": ("str", False, "What a pairing grants unless chosen otherwise: persistent, or a duration",
+                     "Pairing"),
+    "no_persistent_pairing": ("bool", False, "Only grant temporary access: every paired device expires", "Pairing"),
 }
+ADVANCED_GROUPS = ("Network and security", "Pairing")
 
 
 def _ws_path():
@@ -1893,7 +1922,10 @@ def save_studio_config(values):
             d = json.load(f)
     except (OSError, ValueError):
         d = {}
-    d.setdefault("studio", {}).update(values)
+    st = d.setdefault("studio", {})
+    st.update(values)
+    for k in [k for k, v in values.items() if v is None and k in SETUP_FIELDS]:
+        st.pop(k)          # cleared: back to the flag's default
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
@@ -1915,12 +1947,32 @@ def clean_setup(values):
                 bad = [x for x in v if not os.path.isdir(x)]
                 if bad:
                     raise ValueError(f"not a folder: {', '.join(bad)}")
-            elif kind in ("file", "dir"):
+            elif kind in ("file", "dir", "readfile", "path"):
                 v = os.path.expanduser(str(v or "").strip()) or None
-                if v and kind == "file" and not (os.path.isfile(v) and (k == "rag_embed_gguf" or os.access(v, os.X_OK))):
-                    raise ValueError("not an executable file" if k != "rag_embed_gguf" else "no such file")
+                if v and kind == "file" and not (os.path.isfile(v) and os.access(v, os.X_OK)):
+                    raise ValueError("not an executable file")
+                if v and kind == "readfile" and not os.path.isfile(v):
+                    raise ValueError("no such file")
                 if v and kind == "dir" and not os.path.isdir(v):
                     raise ValueError("not a folder")
+            elif kind in ("str", "url"):
+                v = str(v or "").strip() or None
+                if v and (len(v) > 500 or not re.fullmatch(r"[^\x00-\x1f]*", v)):
+                    raise ValueError("too long, or has control characters")
+                if v and kind == "url" and not re.match(r"https?://", v):
+                    raise ValueError("must start with http:// or https://")
+                if v and k == "pair_default" and v != "persistent":
+                    ns_pairing.parse_duration(v)
+            elif kind == "duration":
+                v = str(v or "").strip() or None
+                if v:
+                    ns_pairing.parse_duration(v)
+            elif kind == "durations":
+                v = ",".join(x.strip() for x in str(v or "").split(",") if x.strip()) or None
+                for x in (v or "").split(",") if v else []:
+                    ns_pairing.parse_duration(x)
+            elif kind in ("int", "float") and v in (None, ""):
+                v = None
             elif kind == "int":
                 v = int(v)
                 if v < 0:
@@ -1932,13 +1984,33 @@ def clean_setup(values):
             out[k] = v
         except (TypeError, ValueError) as e:
             errs[k] = str(e) or "invalid"
+    net = {"host", "token_file", "tls_cert", "tls_key", "allow_plaintext"}
+    if not (net & set(errs)) and net & set(out):
+        # A listen address Studio would refuse at startup is refused now, before it can lock you out.
+        eff = {**setup_effective(), **out}
+        tok = STATE.get("token") or ""
+        if eff.get("token_file"):
+            try:
+                tok = open(eff["token_file"]).read().strip()
+            except OSError:
+                tok = ""
+        try:
+            sec.check_bind(eff.get("host") or "127.0.0.1", tok, tls=bool(eff.get("tls_cert") and eff.get("tls_key")),
+                           allow_plaintext=bool(eff.get("allow_plaintext")))
+        except sec.SecurityConfigError as e:
+            errs["host"] = " ".join(str(e).split())
+    if not errs and out.get("port") is not None and not 1 <= out["port"] <= 65535:
+        errs["port"] = "must be 1-65535"
     return out, errs
 
 
 def apply_setup(values):
     """Apply what can change without a restart; -> keys that need one."""
     later = []
+    setup_effective()          # loads the flags' defaults
     for k, v in values.items():
+        if v is None and SETUP_FIELDS[k][0] in ("int", "float", "bool"):
+            v = SETUP_DEFAULTS.get(k)       # cleared: back to the default
         if k == "models_dir":
             STATE["models_dirs"] = v or STATE["models_dirs"]
         elif k == "server":
@@ -1962,19 +2034,35 @@ def apply_setup(values):
             STATE["worker_idle"] = max(30, v)
         elif k in ("score_every", "score_ngl"):
             STATE[k] = v
+        elif k == "vllm":
+            STATE["vllm_bin"] = v or "vllm"
         else:
             later.append(k)
     return later
 
 
-def setup_state():
+def setup_effective():
+    """What each Setup field is now: running values where Studio keeps them, else the saved
+    setting, else the flag's default."""
     cfg = load_studio_config()
-    eff = {"models_dir": STATE["models_dirs"], "server": STATE["server_bin"], "cett": STATE["cett"],
-           "download_dir": STATE["download_dir"], "idle_ttl": STATE["idle_ttl"], "no_jit": not STATE["jit"],
-           "min_graded": STATE["min_graded"], "hallucination_cost": STATE["halluc_cost"],
-           "max_workers": STATE["max_workers"], "worker_idle": STATE["worker_idle"],
-           "score_every": STATE["score_every"], "score_ngl": STATE["score_ngl"],
-           "max_jobs": cfg.get("max_jobs"), "rag_embed_gguf": STATE.get("rag_embed_gguf")}
+    if not SETUP_DEFAULTS:
+        p = build_parser()
+        SETUP_DEFAULTS.update({k: p.get_default(k) for k in SETUP_FIELDS})
+    eff = {**SETUP_DEFAULTS, **{k: v for k, v in cfg.items() if k in SETUP_FIELDS}}
+    eff.update({"models_dir": STATE["models_dirs"], "server": STATE["server_bin"], "cett": STATE["cett"],
+                "download_dir": STATE["download_dir"], "idle_ttl": STATE["idle_ttl"], "no_jit": not STATE["jit"],
+                "min_graded": STATE["min_graded"], "hallucination_cost": STATE["halluc_cost"],
+                "max_workers": STATE["max_workers"], "worker_idle": STATE["worker_idle"],
+                "score_every": STATE["score_every"], "score_ngl": STATE["score_ngl"],
+                "rag_embed_gguf": STATE.get("rag_embed_gguf"), "vllm": STATE.get("vllm_bin")})
+    return eff
+
+
+SETUP_DEFAULTS = {}     # the flags' defaults, read from build_parser() once
+
+
+def setup_state():
+    eff = setup_effective()
     # Binaries a llama.cpp build would have produced, to offer when nothing is set.
     found = {}
     for root in [os.path.expanduser("~/llama.cpp"), os.environ.get("NS_LLAMA") or ""]:
@@ -1982,7 +2070,8 @@ def setup_state():
             pth = os.path.join(root, "build", "bin", name)
             if root and os.path.isfile(pth):
                 found.setdefault(key, pth)
-    return {"fields": {k: {"kind": v[0], "live": v[1], "help": v[2], "value": eff.get(k)}
+    return {"fields": {k: {"kind": v[0], "live": v[1], "help": v[2], "group": v[3], "value": eff.get(k),
+                           "advanced": v[3] in ADVANCED_GROUPS}
                        for k, v in SETUP_FIELDS.items()},
             "config_path": os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"),
             "found": found, "models": len(scan_models()),
@@ -4723,7 +4812,7 @@ body:JSON.stringify({token:document.getElementById('t').value})});
 if(r.ok) location.reload(); else document.getElementById('e').textContent='Incorrect token.';};
 </script>"""
 
-def main(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(description="NeuronScope Studio: model manager, chat and OpenAI-compatible server")
     p.add_argument("--models-dir", action="append", default=[],
                    help="repeatable; searched recursively for .gguf")
@@ -4795,6 +4884,11 @@ def main(argv=None):
                    help="settings file (\"studio\" section); the Setup page writes it, and flags override it")
     p.add_argument("--workspace", help="which workspace's folders to use (Settings -> Workspaces; "
                                        "default: the active one)")
+    return p
+
+
+def main(argv=None):
+    p = build_parser()
     pre, _ = p.parse_known_args(argv)
     STATE["config_path"] = pre.config
     os.environ["NS_CONFIG"] = os.path.expanduser(pre.config)

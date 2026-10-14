@@ -20,7 +20,8 @@ machine; [CLIENTS.md](CLIENTS.md) compares the three.
 | feature | in the UI | command line | MCP tool |
 |---|---|---|---|
 | Start Studio and open it | app menu → NeuronScope | `./neuronscope`, `python scripts/launch.py` | — |
-| Models folder, llama-server, cett-dump, unloading, routing thresholds, worker limits | **Setup** | `~/.neuronscope/config.json`, or Studio's flags | — |
+| Models folder, llama-server, vLLM, cett-dump, unloading, routing thresholds, workers and jobs, document search, MCP config | **Setup → Settings** | `~/.neuronscope/config.json`, or Studio's flags | — |
+| Listen address, port, token, TLS, pairing limits | **Setup → Settings → Advanced** (refuses an address Studio could not start on) | `--host`, `--port`, `--token-file`, `--tls-cert/--tls-key`, `--pair-*` | — |
 | Build llama.cpp with cett-dump | **Setup → Build**, or Jobs → Setup | `scripts/build_llama_tools.sh --backend vulkan` | `start_job build_llama` |
 | Health check (packages, GPUs, build, model, pipeline) | **Setup → Health check** | `python scripts/doctor.py` | `doctor` |
 | Hardware for worker models (ROCm, Vulkan, CUDA, Metal, CPU) | **Setup → Hardware** | `~/.neuronscope/hardware.json`, `python scripts/accelerators.py` | `devices` |

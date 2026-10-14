@@ -1126,6 +1126,31 @@ def test_setup_settings_validate_apply_and_persist(studio_srv, tmp_path):
     cfg = json.loads((tmp_path / "config.json").read_text())["studio"]
     assert cfg == {"idle_ttl": 600, "max_workers": 3, "max_jobs": 4}
     studio.STATE["idle_ttl"] = 0
+    # Every flag worth a setting is here, grouped; network and pairing are advanced.
+    _, s = call(studio_srv, "/api/setup")
+    assert {"host", "port", "tls_cert", "pair_max", "rag_embed", "mcp_config", "no_jobs", "vllm"} <= set(s["fields"])
+    assert s["fields"]["host"]["group"] == "Network and security" and s["fields"]["host"]["advanced"]
+    assert not s["fields"]["idle_ttl"]["advanced"]
+    # A network address is accepted only with what Studio needs to start on it.
+    code, r = call(studio_srv, "/api/setup", {"values": {"host": "0.0.0.0", "allow_plaintext": True}})
+    assert code == 400 and "token" in r["fields"]["host"]
+    tok = tmp_path / "studio.token"
+    tok.write_text("x" * 48)
+    code, r = call(studio_srv, "/api/setup", {"values": {"host": "0.0.0.0", "token_file": str(tok)}})
+    assert code == 400 and "plaintext" in r["fields"]["host"]
+    code, r = call(studio_srv, "/api/setup", {"values": {"host": "0.0.0.0", "token_file": str(tok),
+                                                         "allow_plaintext": True}})
+    assert code == 200 and set(r["restart_needed"]) == {"host", "token_file", "allow_plaintext"}
+    code, r = call(studio_srv, "/api/setup", {"values": {"pair_max": "soon", "pair_durations": "1h,8h,1d",
+                                                         "rag_embed": "ftp://x", "port": 70000}})
+    assert code == 400 and set(r["fields"]) == {"pair_max", "rag_embed"}
+    code, r = call(studio_srv, "/api/setup", {"values": {"port": 70000}})
+    assert code == 400 and "port" in r["fields"]
+    code, r = call(studio_srv, "/api/setup", {"values": {"pair_max": "30d", "vllm": "/opt/vllm/bin/vllm"}})
+    assert code == 200 and studio.STATE["vllm_bin"] == "/opt/vllm/bin/vllm"
+    cfg = json.loads((tmp_path / "config.json").read_text())["studio"]
+    assert cfg["host"] == "0.0.0.0" and cfg["pair_max"] == "30d" and cfg["token_file"] == str(tok)
+    studio.STATE["vllm_bin"] = "vllm"
 
 
 def test_config_file_supplies_studio_defaults(tmp_path, monkeypatch):

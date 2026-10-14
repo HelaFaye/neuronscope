@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed (Setup)
+- Setup → Settings now holds every Studio flag worth a setting, in groups:
+  models and engines (vLLM command, backend port), routing (stats
+  window), activation checks, workers and jobs (hardware file, turning
+  jobs off, jobs on the network), documents and tools (embedding
+  endpoint and GPU layers, mcp.json). Network, security and pairing are
+  under *Advanced*.
+  - A listen address Studio would refuse at startup (no token, or HTTP
+    without TLS and without plaintext allowed) is refused when saving, so
+    the setting cannot lock you out.
+  - Clearing a field returns it to the flag's default.
+  - Folders stay under Settings → Workspaces.
+
 ### Added (plugins)
 - A plugin framework (`viz/plugins.py`, docs/PLUGINS.md). A plugin is a
   folder with a `plugin.json` that adds jobs, checks under chat replies, a
