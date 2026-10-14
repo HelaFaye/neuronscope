@@ -3950,6 +3950,10 @@ class Handler(BaseHTTPRequestHandler):
                            "max_tokens": preset.get("max_tokens", 2048),
                            "stream": True,
                            "stream_options": {"include_usage": True}}
+                if req.get("confidence"):
+                    # Per-token top-5 probabilities from the engine (llama-server, vLLM), for the
+                    # confidence strip under the reply. They cost little and change nothing sampled.
+                    payload.update(logprobs=True, top_logprobs=5)
                 if preset.get("json_schema"):
                     try:
                         schema = json.loads(preset["json_schema"])
@@ -4274,6 +4278,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
     <span title="retrieve passages from a document collection for each message">docs</span><select id="ragPick"><option value="">none</option></select>
     <label id="toolsBox" style="display:none;margin:0" title="let the model call MCP tools (each call asks first)"><input type="checkbox" id="toolsOn"> tools</label>
     <label style="margin:0" title="after each reply, score every token with the model's hallucination classifier (needs studio --cett and a classifier in the model's settings)"><input type="checkbox" id="autoCheck"> check replies</label>
+    <label style="margin:0" title="ask the engine for each token's top-5 probabilities and mark where the model was unsure (llama-server and vLLM; costs almost nothing)"><input type="checkbox" id="confOn"> confidence</label>
     <span>suppression α</span>
     <input type="range" id="alpha" min="0" max="1" step="0.05" value="1" disabled>
     <span id="av">1.00</span>
@@ -4547,7 +4552,8 @@ function bubble(role,content,extra={}){
     a.querySelector('[data-a=check]').onclick=()=>checkReply(d);
     if(PLUGIN_CHECKS.length){ const b=document.createElement('button'); b.textContent='plugins'; b.title='run the checks from your plugins: '+PLUGIN_CHECKS.map(c=>c.title).join(', '); b.onclick=()=>pluginChecks(d,false); a.appendChild(b); }
     if(extra.check) showRisk(d.querySelector('.risk'),extra.check);
-    if(extra.plugin_checks) showPluginChecks(d,extra.plugin_checks); }
+    if(extra.plugin_checks) showPluginChecks(d,extra.plugin_checks);
+    if(extra.confidence) showConfidence(d,extra.confidence); }
   $('#log').appendChild(d); $('#log').scrollTop=1e9;
   return {root:d, think:d.querySelector('.think div'), thinkBox:d.querySelector('.think'), body:d.querySelector('.body'), stats:d.querySelector('.stats'), src:d.querySelector('.src'), tools:d.querySelector('.tools')};
 }
@@ -4571,7 +4577,7 @@ function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details>
 function renderChat(){
   $('#log').innerHTML='';
   if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from the Models tab, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
-  for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check,plugin_checks:m.plugin_checks}); b.root._msg=m; }
+  for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check,plugin_checks:m.plugin_checks,confidence:m.confidence}); b.root._msg=m; }
 }
 // ---------- per-reply check: token risk from the activation classifier
 function showRisk(el,c){
@@ -4609,6 +4615,25 @@ async function pluginChecks(d,autoOnly){
   const body={model:m.model,messages:chat.messages.slice(0,idx).map(x=>({role:x.role,content:textOf(x.content)})),text:textOf(m.content)};
   const res=await Promise.all(list.map(async c=>{ try{ const r=await post('/api/plugins/check',{...body,plugin:c.plugin,check:c.name}); const j=await r.json(); return r.ok?j:{title:c.title,error:j.error}; }catch(e){ return {title:c.title,error:String(e)}; } }));
   showPluginChecks(d,res); m.plugin_checks=res.filter(x=>!x.error); await persist(); }
+// ---------- confidence from the engine's top-5 probabilities per token
+// u = entropy of the top 5 plus the rest, over log(6): 0 = certain, 1 = spread evenly.
+// A token is uncertain when u >= CONF_U or the chosen token had p < CONF_P.
+const CONF_U=0.55, CONF_P=0.35;
+function confidenceOf(lp){
+  const pieces=[], u=[], p=[];
+  for(const t of lp){ const tops=(t.top_logprobs||[]).map(x=>Math.exp(x.logprob)).filter(x=>isFinite(x));
+    let sum=0,h=0; for(const q of tops){ sum+=q; if(q>0) h-=q*Math.log(q); }
+    const rest=Math.max(0,1-sum); if(rest>1e-9) h-=rest*Math.log(rest);
+    pieces.push(t.token??''); u.push(+(h/Math.log(6)).toFixed(3)); p.push(+Math.exp(t.logprob??0).toFixed(3)); }
+  const flagged=u.map((x,i)=>x>=CONF_U||p[i]<CONF_P?i:-1).filter(i=>i>=0);
+  return {pieces,u,p,flagged,mean:+(u.reduce((a,b)=>a+b,0)/Math.max(1,u.length)).toFixed(3)}; }
+function showConfidence(d,c){ let el=d.querySelector('.conf'); if(!el){ el=document.createElement('div'); el.className='conf risk'; d.querySelector('.risk').before(el); }
+  const n=c.flagged.length, T=c.u.length, low=Math.min(...c.p);
+  el.innerHTML=`<div class="sum">confidence: ${n?`<b class="bad">${n} of ${T} tokens uncertain</b>`:'<b class="okc">no uncertain tokens</b>'} · mean spread ${(c.mean*100).toFixed(0)}% · lowest chosen-token p ${(low*100).toFixed(0)}% · <a href="#" data-a="ctog">${n?'show':'show'} tokens</a></div><div class="rt" hidden></div>`;
+  const set=new Set(c.flagged);
+  el.querySelector('[data-a=ctog]').onclick=e=>{ e.preventDefault(); const rt=el.querySelector('.rt');
+    if(!rt.innerHTML) rt.innerHTML=c.pieces.map((t,i)=>`<span class="${set.has(i)?'fl':''}" title="spread ${(c.u[i]*100).toFixed(0)}% · p ${(c.p[i]*100).toFixed(0)}%" style="background:color-mix(in srgb,var(--warn,#a8701c) ${Math.round(Math.min(1,c.u[i]/CONF_U)*(set.has(i)?45:20))}%,transparent)">${esc(t)}</span>`).join('');
+    rt.hidden=!rt.hidden; e.target.textContent=(rt.hidden?'show':'hide')+' tokens'; }; }
 async function checkReply(d){
   const m=d._msg; if(!m) return;
   const idx=chat.messages.indexOf(m), el=d.querySelector('.risk');
@@ -4621,6 +4646,8 @@ async function checkReply(d){
 }
 try{ $('#autoCheck').checked=localStorage.getItem('ns_autocheck')==='1'; }catch{}
 $('#autoCheck').onchange=()=>{ try{ localStorage.setItem('ns_autocheck',$('#autoCheck').checked?'1':'0'); }catch{} };
+try{ $('#confOn').checked=localStorage.getItem('ns_conf')!=='0'; }catch{ $('#confOn').checked=true; }
+$('#confOn').onchange=()=>{ try{ localStorage.setItem('ns_conf',$('#confOn').checked?'1':'0'); }catch{} };
 
 // ---------- images
 $('#attach').onclick=()=>$('#file').click();
@@ -4644,11 +4671,12 @@ $('#f').onsubmit=async e=>{
 async function regenerate(){ if(busy) return; while(chat.messages.length && chat.messages.at(-1).role==='assistant') chat.messages.pop(); renderChat(); await stream(); }
 async function stream(){
   busy=true; $('#send').textContent='Stop'; ctrl=new AbortController();
-  const out=bubble('assistant','',{think:''}); let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[], servedBy=null;
+  const out=bubble('assistant','',{think:''}); const lp=[]; let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[], servedBy=null;
   try{
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
-        rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined})});
+        rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined,
+        confidence:$('#confOn').checked||undefined})});
     if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} e=typeof e==='string'?e:(e.message||JSON.stringify(e)); out.body.innerHTML='error: '+linkify(esc(e)); throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
       if(rt) servedBy=rt.model;
@@ -4672,6 +4700,7 @@ async function stream(){
         if((delta.reasoning_content||delta.content) && !tFirst) tFirst=performance.now();
         if(delta.reasoning_content){ think+=delta.reasoning_content; out.think.textContent=think; }
         if(delta.content){ acc+=delta.content; out.body.innerHTML=render(acc); }
+        for(const t of j.choices?.[0]?.logprobs?.content||[]) lp.push(t);
         $('#log').scrollTop=1e9;
       }
     }
@@ -4684,7 +4713,8 @@ async function stream(){
   const fullStats=[routeNote,stats].filter(Boolean).join(' · ');
   out.stats.textContent=fullStats;
   let msg=null;
-  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined};
+  const conf=lp.length?confidenceOf(lp):null; if(conf) showConfidence(out.root,conf);
+  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined,confidence:conf||undefined};
     chat.messages.push(msg); out.root._msg=msg; await persist(); }
   status(); refresh();
   busy=false; $('#send').textContent='Send';

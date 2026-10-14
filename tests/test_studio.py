@@ -1213,3 +1213,12 @@ def test_launcher_starts_studio_and_opens_setup_first(tmp_path):
         assert "already running" in out
     finally:
         subprocess.run(launch[:2] + ["--stop"], env=env, timeout=30)
+
+
+def test_chat_asks_for_token_probabilities_only_when_asked(studio_srv):
+    msgs = [{"role": "user", "content": "hi"}]
+    ev = sse_chat(studio_srv, {"model": CODER, "messages": msgs, "confidence": True})
+    lps = [t for e in ev if e.get("choices") for t in (e["choices"][0].get("logprobs") or {}).get("content", [])]
+    assert len(lps) == 2 and len(lps[1]["top_logprobs"]) == 5
+    ev = sse_chat(studio_srv, {"model": CODER, "messages": msgs})
+    assert not any(e.get("choices") and e["choices"][0].get("logprobs") for e in ev)

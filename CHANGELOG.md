@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added (confidence signals)
+- Confidence strip in the chat (*confidence*, on by default). Studio asks
+  llama-server or vLLM for each token's top-5 probabilities and shows where
+  the model was unsure: spread (entropy of the top 5 plus the rest, over
+  log 6) and the chosen token's probability. It is saved with the chat.
+- `scripts/logit_lens.py` (Jobs → *Logit lens over a reply*). For Hugging
+  Face models: each layer's guess for every token of a reply, its spread,
+  the settle layer and the top-k decay layer. Tokens that settle late with
+  a spread-out final layer are marked. Writes JSON and a heatmap page.
+- docs/CONFIDENCE.md: the three signals side by side (confidence strip,
+  logit lens, H-Neuron check), and what it would take to tell dishonesty
+  from a confident mistake.
+
 ### Changed (Setup)
 - Setup → Settings now holds every Studio flag worth a setting, in groups:
   models and engines (vLLM command, backend port), routing (stats

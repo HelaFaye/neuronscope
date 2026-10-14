@@ -66,6 +66,8 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Adapt to a task while protecting a subspace (SAGE) | **Jobs → Retrain → SAGE** | `python scripts/sage_edit.py train / chat / export` | `start_job sage_train` |
 | Share results with a scoreboard (opt-in; what is sent is listed and previewed) | **Settings → Sharing results** | `python scripts/score_cards.py`, `scripts/scoreboard_server.py` ([SHARING.md](SHARING.md)) | — |
 | Plugins: turn on, open their pages; their jobs and reply checks | **Settings → Plugins**, Jobs → *Plugins*, *plugins* under a reply | a plugin's own scripts ([PLUGINS.md](PLUGINS.md)) | — |
+| How sure the model was, per token | chat: tick **confidence** | — | — |
+| Logit lens over a reply (Hugging Face models) | Jobs → **Logit lens over a reply** | `python scripts/logit_lens.py` ([CONFIDENCE.md](CONFIDENCE.md)) | `start_job logit_lens` |
 | Keep or reject a retrained model (holdout, per subject, hallucination) | **Jobs → Retrain → Keep or reject a retrain** | `python scripts/retrain_gate.py` | `start_job retrain_gate` |
 | Compare models, item by item; does suppression help | **Jobs → Analysis** | `merge_eval.py`, `compare_models.py` | `start_job …` |
 | Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |

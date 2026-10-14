@@ -2,6 +2,7 @@
 """Stand-in for llama-server in tests: same CLI shape, same HTTP surface."""
 import argparse
 import json
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 p = argparse.ArgumentParser()
@@ -74,8 +75,15 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            for piece in [text[:10], text[10:]]:
-                self.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': piece}}]})}\n\n".encode())
+            for n, piece in enumerate([text[:10], text[10:]]):
+                ch = {"delta": {"content": piece}}
+                if body.get("logprobs"):
+                    # first piece certain, second spread over five candidates
+                    tops = ([{"token": piece, "logprob": -0.01}] if n == 0 else
+                            [{"token": piece, "logprob": math.log(0.2)}] * 5)
+                    ch["logprobs"] = {"content": [{"token": piece, "logprob": tops[0]["logprob"],
+                                                   "top_logprobs": tops[:body.get("top_logprobs", 5)]}]}
+                self.wfile.write(f"data: {json.dumps({'choices': [ch]})}\n\n".encode())
             final = {"choices": [{"delta": {}, "finish_reason": "stop"}],
                      "timings": {"predicted_n": 7, "predicted_per_second": 42.0}}
             self.wfile.write(f"data: {json.dumps(final)}\n\ndata: [DONE]\n\n".encode())

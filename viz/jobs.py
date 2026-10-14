@@ -121,6 +121,18 @@ SPECS: dict[str, dict] = {
             F("subject", multi=True), F("allow_exec", kind="bool"),
             F("sandbox", choices=["none", "docker", "podman"], default="docker"),
             F("quant", default="Q4_K_M"), F("llama", help="llama.cpp checkout (default $NS_LLAMA)")]},
+    "logit_lens": {
+        "title": "Logit lens over a reply", "group": "Evaluate", "argv": [S / "logit_lens.py"],
+        "help": "What every layer would say next for each token of a reply, how spread out it is, and where the "
+                "answer settles; late settling with a spread-out final layer is marked (docs/CONFIDENCE.md).",
+        "fields": [
+            F("model", req=True, help="HF id or folder"), F("prompt", help="the question"),
+            F("messages", help="or a JSON file with the chat before the reply"),
+            F("reply", help="the reply to look into"), F("reply_file", help="or a file with it"),
+            F("generate", kind="int", default=0, help="or let the model write one of up to N tokens"),
+            F("late", kind="float", default=0.75), F("spread", kind="float", default=0.55),
+            F("out", req=True, help="result JSON"), F("html", help="heatmap page to write"),
+            F("dtype", choices=["auto", "float32", "bfloat16", "float16"], default="auto")]},
     "concept_edit": {
         "title": "Concept edit (subspace ablation)", "group": "Retrain", "argv": [S / "concept_edit.py"],
         "help": "Find what separates two prompt sets and project it out of W_O/W_out, norm-preserving, with a KL "
