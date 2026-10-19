@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added (roles and help)
+- docs/ROLES.md: every connection with its controller and the side that
+  does the work, every default port and whether it speaks MCP, and who may
+  do what.
+- The Connect page shows who controls whom.
+- Studio's MCP instructions and `studio_status` name the computer the tools
+  act on.
+- `/help/<page>` renders NeuronScope's docs inside Studio.
+
 ### Added (work distribution)
 - Workers page (`/workers`): monitor and control where project tasks run.
   - Workers are this computer's models, endpoints you run yourself (any

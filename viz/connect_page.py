@@ -20,13 +20,25 @@ code,pre{font:12.5px ui-monospace,monospace;background:var(--code);border-radius
 code{padding:.05rem .3rem}pre{padding:.7rem;overflow:auto;margin:.3rem 0;white-space:pre}
 .cp{font:500 12px ui-sans-serif,system-ui;padding:.2rem .55rem;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:5px;cursor:pointer;margin-left:.4rem}
 button.pri{font:500 13px ui-sans-serif,system-ui;padding:.4rem .8rem;border:1px solid var(--acc);background:var(--acc);color:var(--accfg);border-radius:6px;cursor:pointer}
-ol{margin:.3rem 0 .3rem 1.2rem;padding:0}li{margin:.2rem 0}
+ol{margin:.3rem 0 .3rem 1.2rem;padding:0}
+.roles{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:.6rem;align-items:center}
+.role{border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;background:var(--bg)}.role.me{border:2px solid var(--acc)}
+.arrow{font-size:20px;color:var(--mut)}
+@media(max-width:800px){.roles{grid-template-columns:1fr}.arrow{justify-self:center;transform:rotate(90deg)}}li{margin:.2rem 0}
 .tok{background:color-mix(in srgb,var(--ok) 15%,transparent);border:1px solid var(--ok);border-radius:6px;padding:.6rem;margin-top:.5rem;word-break:break-all}
 </style>
 <header><h1>Studio · Connect</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<section class="card"><h2>What connects to what</h2>
-<div class="note">Studio offers two things to other apps. Set up either or both:</div>
+<section class="card"><h2>Who controls whom</h2>
+<div class="roles"><div class="role"><b>Your agent app: CONTROLLER</b><div class="note">Cline, Claude Desktop, Cursor, a script. It decides what to ask, and calls Studio (as the MCP client, or through the OpenAI API).</div></div>
+<div class="arrow">→</div>
+<div class="role me"><b>This Studio (<span id="me"></span>): does the work</b><div class="note">The tools run here and the models answer from here. Studio is the MCP <i>server</i> for your app, on port <span class="port"></span>: <code>/mcp</code> for tools, <code>/v1</code> for chat.</div></div>
+<div class="arrow">→</div>
+<div class="role"><b>Optional: workers and hosts</b><div class="note">Studio can pass project tasks on to models on other computers (<a href="/workers">Workers</a>, <a href="/remote">Remote</a>). For those, Studio is the controller.</div></div></div>
+<div class="note" style="margin-top:.4rem">An LLM server's port (llama-server 8080, LM Studio 1234, Ollama 11434) is a chat API, not MCP. MCP lives at Studio's <code>/mcp</code> and on NeuronScope Remote hosts. <a href="/help/ROLES">Roles and ports</a>.</div></section>
+
+<section class="card"><h2>What Studio offers your app</h2>
+<div class="note">Set up either or both:</div>
 <ol>
 <li><b>Your local models as the app's AI</b>, through Studio's OpenAI-compatible API. In Cline this is the <i>API Provider</i>.</li>
 <li><b>NeuronScope's harness and lab as tools</b>, through MCP: the agent can list and route models, check a reply for hallucination risk, run TestQA and retraining jobs, and plan and review projects. Tools that only read are pre-approved; anything that starts work asks first.</li>
@@ -49,6 +61,8 @@ ol{margin:.3rem 0 .3rem 1.2rem;padding:0}li{margin:.2rem 0}
 </main>
 <script>
 const $=s=>document.querySelector(s);
+fetch('/api/status').then(r=>r.json()).then(j=>{ document.getElementById('me').textContent=j.computer||location.hostname; }).catch(()=>{ document.getElementById('me').textContent=location.hostname; });
+document.querySelectorAll('.port').forEach(e=>e.textContent=location.port||(location.protocol==='https:'?'443':'80'));
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function copyBtn(text){const b=document.createElement('button');b.className='cp';b.textContent='copy';b.onclick=async()=>{try{await navigator.clipboard.writeText(text);b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)}catch{}};return b}
 function table(el,obj){el.innerHTML='';for(const [k,v] of Object.entries(obj)){const tr=document.createElement('tr');tr.innerHTML=`<td>${esc(k)}</td><td><code>${esc(v)}</code></td>`;tr.lastChild.appendChild(copyBtn(String(v)));el.appendChild(tr)}}

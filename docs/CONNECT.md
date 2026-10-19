@@ -15,6 +15,8 @@ The quickest way in is Studio's **Connect** page (`/connect`, link in the
 header). It shows every setting below for the address you opened Studio
 with, with copy buttons.
 
+Which computer controls and which does the work, and which port is which: [ROLES.md](ROLES.md).
+
 ## MCP, step by step
 
 NeuronScope has three MCP pieces. Pick by what should control what:

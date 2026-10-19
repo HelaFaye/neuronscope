@@ -26,6 +26,8 @@ Which page to use:
 | NeuronScope Studio | **Link** (Studio to Studio pairing, [SECURITY.md](SECURITY.md)) |
 | nothing yet; you want to copy GGUFs to it as they are made | the transfer watcher (`scripts/ns_transfer.py`), or Remote's *Send model* once the agent runs there |
 
+Which computer controls and which does the work, for every connection and port: [ROLES.md](ROLES.md).
+
 ## Adding a host
 
 Open Studio → **Remote** (the *Remote* chip in the header) → **Add a host**.

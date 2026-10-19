@@ -39,7 +39,9 @@ INSTRUCTIONS = (
     "Start with studio_status and list_models. Model ids from list_models go in every 'model' argument. "
     "Jobs and projects run on the user's machine and can take hours; start them only when asked, then "
     "poll job_status or get_project. Results of check_reply are a risk signal (classifier AUROC ~0.7), "
-    "not a verdict.")
+    "not a verdict. Roles: you, the MCP client, are the CONTROLLER. This server is NeuronScope Studio, and every "
+    "tool acts on the computer Studio runs on (studio_status names it), not on the computer you run on. Studio "
+    "may in turn send project tasks to worker models on other computers (its Workers page).")
 
 
 class ToolError(Exception):
@@ -323,7 +325,7 @@ def handle(msg, studio: Studio):
             res = {"protocolVersion": want if want in PROTOCOLS else PROTOCOLS[0],
                    "capabilities": {"tools": {"listChanged": False}},
                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                   "instructions": INSTRUCTIONS}
+                   "instructions": INSTRUCTIONS + f" This Studio: {studio.base}."}
         elif method == "ping":
             res = {}
         elif method == "tools/list":

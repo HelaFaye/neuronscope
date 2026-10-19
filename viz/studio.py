@@ -3731,6 +3731,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._settings()
         if self.path == "/api/plugins" or self.path.startswith("/plugins/"):
             return self._plugins_get()
+        if self.path.startswith("/help"):
+            import help_page
+            name = self.path.split("?")[0].split("#")[0][len("/help"):].strip("/") or "GETTING_STARTED"
+            body = help_page.page(name)
+            if body is None:
+                return self._json(404, {"error": f"no help page {name!r}"})
+            body = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path in ("/projects", "/workers", "/api/workers", "/api/workers/overview") \
                 or self.path.startswith("/api/projects"):
             return self._projects_get()
@@ -3822,6 +3835,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(502, {"error": f"hub unreachable: {e}"})
         if self.path == "/api/status":
             return self._json(200, {
+                "computer": socket.gethostname(),
+                "roles": "this Studio runs the tools and models; whoever calls its API or MCP is the controller",
                 "running": server_running(),
                 "model": PROC["model"]["name"] if PROC["model"] else None,
                 "path": PROC["model"]["path"] if PROC["model"] else None,

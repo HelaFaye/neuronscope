@@ -22,6 +22,8 @@ put it on a VPN or a LAN you trust. llama-server can require a key
 through NeuronScope Remote adds pairing, TLS, the host owner's permissions
 and its thermal guard.
 
+All the roles and ports in one place: [ROLES.md](ROLES.md).
+
 ## What the page shows
 
 - **Tiles**: tasks running and waiting, done and failed since Studio
