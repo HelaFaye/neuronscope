@@ -40,7 +40,7 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 .th{border:1px solid var(--line);border-radius:8px;padding:.5rem;cursor:pointer}.th.on{outline:2px solid var(--acc)}
 .th .sw{display:flex;height:34px;border-radius:5px;overflow:hidden;margin:.35rem 0}.th .sw span{flex:1}
 </style>
-<header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
+<header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><a href="#plugins">Plugins</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
 

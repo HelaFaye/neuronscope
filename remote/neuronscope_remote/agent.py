@@ -610,6 +610,177 @@ def _gpus() -> list:
     return rows
 
 
+def _num(v):
+    try:
+        return float(str(v).strip().split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _nvidia_telemetry() -> list:
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return []
+    q = "index,name,temperature.gpu,memory.used,memory.total,utilization.gpu,power.draw"
+    try:
+        out = subprocess.run([exe, f"--query-gpu={q}", "--format=csv,noheader,nounits"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows = []
+    for line in out.strip().splitlines():
+        p = [x.strip() for x in line.split(",")]
+        if len(p) >= 7:
+            rows.append({"id": f"nvidia:{p[0]}", "name": p[1], "vendor": "nvidia", "temp_c": _num(p[2]),
+                         "junction_c": None, "mem_c": None, "vram_used_mb": _num(p[3]), "vram_total_mb": _num(p[4]),
+                         "util": _num(p[5]), "power_w": _num(p[6]), "source": "nvidia-smi"})
+    return rows
+
+
+def _amdgpu_sysfs() -> list:
+    """amdgpu's own sensors under /sys (Linux): edge, junction and memory temperatures and VRAM use.
+    Needs no ROCm tools."""
+    rows = []
+    for dev in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+        try:
+            if (dev / "vendor").read_text().strip() != "0x1002":
+                continue
+        except OSError:
+            continue
+        r = {"id": f"amd:{dev.parent.name}", "name": "AMD GPU", "vendor": "amd", "temp_c": None, "junction_c": None,
+             "mem_c": None, "vram_used_mb": None, "vram_total_mb": None, "util": None, "power_w": None,
+             "source": "sysfs"}
+        for hw in dev.glob("hwmon/hwmon*"):
+            for lab in hw.glob("temp*_label"):
+                try:
+                    name = lab.read_text().strip().lower()
+                    val = int((hw / lab.name.replace("_label", "_input")).read_text()) / 1000
+                except (OSError, ValueError):
+                    continue
+                key = {"edge": "temp_c", "junction": "junction_c", "mem": "mem_c"}.get(name)
+                if key:
+                    r[key] = val
+            for pw in ("power1_average", "power1_input"):
+                try:
+                    r["power_w"] = int((hw / pw).read_text()) / 1e6
+                    break
+                except (OSError, ValueError):
+                    pass
+        for key, f in (("vram_used_mb", "mem_info_vram_used"), ("vram_total_mb", "mem_info_vram_total"),
+                       ("util", "gpu_busy_percent")):
+            try:
+                v = int((dev / f).read_text())
+                r[key] = v / 2**20 if key.startswith("vram") else v
+            except (OSError, ValueError):
+                pass
+        try:
+            r["name"] = (dev / "product_name").read_text().strip() or r["name"]
+        except OSError:
+            pass
+        rows.append(r)
+    return rows
+
+
+def _rocm_smi() -> list:
+    exe = shutil.which("rocm-smi")
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([exe, "--showtemp", "--showmeminfo", "vram", "--showuse", "--showproductname", "--json"],
+                             capture_output=True, text=True, timeout=15).stdout
+        data = json.loads(out or "{}")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    rows = []
+    for card, d in data.items():
+        if not card.startswith("card") or not isinstance(d, dict):
+            continue
+        r = {"id": f"amd:{card}", "name": d.get("Card Series") or d.get("Card series") or "AMD GPU", "vendor": "amd",
+             "temp_c": None, "junction_c": None, "mem_c": None, "vram_used_mb": None, "vram_total_mb": None,
+             "util": None, "power_w": None, "source": "rocm-smi"}
+        for k, v in d.items():
+            kl = k.lower()
+            if "temperature" in kl:
+                key = "junction_c" if "junction" in kl else "mem_c" if "memory" in kl else "temp_c" if "edge" in kl \
+                    else None
+                if key:
+                    r[key] = _num(v)
+            elif "vram total used" in kl:
+                r["vram_used_mb"] = (_num(v) or 0) / 2**20
+            elif "vram total memory" in kl:
+                r["vram_total_mb"] = (_num(v) or 0) / 2**20
+            elif "gpu use" in kl:
+                r["util"] = _num(v)
+        rows.append(r)
+    return rows
+
+
+def gpu_telemetry() -> list:
+    """Temperatures, memory and load of this computer's GPUs, from nvidia-smi, rocm-smi or
+    Linux's amdgpu sensors. A value that cannot be read is None, never a guess."""
+    rows = _nvidia_telemetry()
+    amd = _rocm_smi() or (_amdgpu_sysfs() if sys.platform.startswith("linux") else [])
+    return rows + amd
+
+
+def hottest(row: dict) -> float | None:
+    vals = [row.get(k) for k in ("junction_c", "temp_c", "mem_c") if row.get(k) is not None]
+    return max(vals) if vals else None
+
+
+class ThermalGuard(threading.Thread):
+    """Watches the GPUs. Above the limit, the host refuses new chats and traces and unloads
+    what its LLM servers can unload; below the limit minus the margin it resumes. GPUs
+    throttle themselves near their own maximum; this guard is an earlier, gentler stop."""
+
+    def __init__(self, agent: "Agent", read=gpu_telemetry, every: float = 2.0):
+        super().__init__(daemon=True)
+        self.agent, self.read, self.every = agent, read, every
+        self.stop = threading.Event()
+        self.tripped = None           # {"gpu", "temp", "at"} while too hot
+        self.last = []
+
+    def cfg(self) -> dict:
+        t = self.agent.cfg.get("thermal") or {}
+        return {"enabled": bool(t.get("enabled", False)), "limit_c": float(t.get("limit_c", 95.0)),
+                "margin_c": float(t.get("margin_c", 10.0)), "unload": bool(t.get("unload", True))}
+
+    def check(self) -> None:
+        c = self.cfg()
+        self.last = self.read()
+        if not c["enabled"]:
+            self.tripped = None
+            return
+        hot = [(r, hottest(r)) for r in self.last if hottest(r) is not None]
+        worst = max(hot, key=lambda x: x[1]) if hot else None
+        if self.tripped is None and worst and worst[1] >= c["limit_c"]:
+            self.tripped = {"gpu": worst[0]["name"], "temp": worst[1], "at": time.time(), "limit": c["limit_c"]}
+            self.agent.note("thermal guard", f"too hot: {worst[0]['name']} at {worst[1]:.0f}°C", False,
+                            "new chats and traces refused until it cools")
+            if c["unload"]:
+                self.unload_all()
+        elif self.tripped is not None and (not worst or worst[1] <= c["limit_c"] - c["margin_c"]):
+            self.agent.note("thermal guard", "cooled down", True, f"{worst[1]:.0f}°C" if worst else "")
+            self.tripped = None
+
+    def unload_all(self) -> None:
+        for b in self.agent.backends():
+            try:
+                for m in b.models():
+                    if m.get("loaded"):
+                        b.unload(m["id"])
+            except Exception:
+                pass                  # llama-server and vLLM cannot unload; they stay up but get no work
+
+    def run(self):
+        while not self.stop.is_set():
+            try:
+                self.check()
+            except Exception as e:
+                self.last = [{"error": f"{type(e).__name__}: {e}"}]
+            self.stop.wait(self.every)
+
+
 def local_addresses() -> list[dict]:
     """This computer's addresses, labelled with what they probably are."""
     seen = []
@@ -656,6 +827,7 @@ class Agent:
         self.link = {"mode": "stdio", "urls": []}
         self._backends = (0.0, [])
         self.callhome: dict = {}         # url -> CallHome thread
+        self.guard = None                # ThermalGuard, started by the runtime
         cfg = self.store.read("config.json", {})
         self.cfg = {"name": socket.gethostname()[:40] or "host", "mode": "", "port": DEFAULT_PORT, "bind": "",
                     "backends": [], "detect": True, "models_dir": "", "incoming_dir": "", **cfg}
@@ -763,8 +935,21 @@ class Agent:
                 rows.append({"backend": b.kind, "error": f"{type(e).__name__}: {e}"[:200]})
         return {"models": rows}
 
+    def too_hot(self) -> None:
+        g = self.guard
+        if g is not None and g.tripped:
+            t = g.tripped
+            raise ToolError(f"this host is too hot ({t['gpu']} at {t['temp']:.0f}°C, limit {t['limit']:.0f}°C): "
+                            "it takes no new work until it cools down")
+
+    def t_telemetry(self, a):
+        g = self.guard
+        rows = g.last if g is not None and g.last else gpu_telemetry()
+        return {"gpus": rows, "thermal": {**(g.cfg() if g else {}), "tripped": g.tripped if g else None}}
+
     def t_chat(self, a):
         self.need("chat")
+        self.too_hot()
         if not a.get("messages"):
             raise ToolError("messages are needed: [{\"role\": \"user\", \"content\": \"...\"}]")
         b = self.backend_for(a.get("model", ""), a.get("backend", ""))
@@ -849,6 +1034,7 @@ class Agent:
 
     def t_trace_reply(self, a):
         self.need("trace")
+        self.too_hot()
         tr = self.tracer()
         if not tr["available"]:
             raise ToolError("this host has no NeuronScope tracer: install NeuronScope here and build llama.cpp with "
@@ -1006,6 +1192,8 @@ class Agent:
          {"model": {"type": "string"}, "messages": {"type": "array", "items": {"type": "object"}},
           "temperature": {"type": "number"}, "max_tokens": {"type": "integer"}, "top_p": {"type": "number"},
           "seed": {"type": "integer"}, "backend": {"type": "string"}}, {"readOnlyHint": True}, ["messages"]),
+        ("telemetry", "GPU temperatures (edge, junction, memory), memory use, load and power on this host, and "
+         "whether its thermal guard has paused work.", {}, {"readOnlyHint": True}),
         ("model_file", "Where a model's GGUF file is on this host, its size and SHA-256 (for finding the same "
          "file elsewhere).", {"model": {"type": "string"}, "backend": {"type": "string"}}, {"readOnlyHint": True},
          ["model"]),
@@ -1125,6 +1313,7 @@ class Agent:
                              for c in self.callhome.values()],
                 "addresses": local_addresses(), "activity": list(self.activity)[:50],
                 "transfers": list(self.transfers.values())[-20:], "home": str(self.store.home),
+                "telemetry": self.t_telemetry({}),
                 "incoming_dir": str(self.incoming()), "models_dir": str(self.models_dir() or "")}
 
     def pair_link(self, code: str) -> str:
@@ -1406,6 +1595,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     if k in ALLOW_DEFAULT:
                         ag.cfg["allow"][k] = bool(v)
                 ag.save_config()
+            elif self.path == "/api/thermal":
+                t = dict(ag.cfg.get("thermal") or {})
+                for k in ("enabled", "unload"):
+                    if k in req:
+                        t[k] = bool(req[k])
+                for k, lo, hi in (("limit_c", 50, 110), ("margin_c", 2, 30)):
+                    if k in req:
+                        t[k] = min(hi, max(lo, float(req[k])))
+                ag.cfg["thermal"] = t
+                ag.save_config()
+                ag.note("host owner", "thermal guard settings", True, json.dumps(t))
             elif self.path == "/api/name":
                 ag.cfg["name"] = re.sub(r"[^\w .-]+", "", str(req.get("name", "")))[:40] or ag.cfg["name"]
                 ag.save_config()
@@ -1832,6 +2032,8 @@ def serve(a) -> int:
         ag.cfg.update(mode=mode, bind=a.bind or (ag.cfg.get("bind") if not a.mode else ""))
         ag.save_config()
     rt = Runtime(ag)
+    ag.guard = ThermalGuard(ag)
+    ag.guard.start()
     try:
         urls = rt.listen(mode, a.bind or ag.cfg.get("bind", ""), a.port or ag.cfg.get("port") or DEFAULT_PORT,
                          tls=a.tls, allow_plaintext=a.allow_plaintext,
@@ -2027,6 +2229,10 @@ table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .4
 <div class="card" id="pairCard"><h2>2. Pair a controller</h2><div id="pair"></div></div>
 <div class="card"><h2>Controllers allowed to control this host</h2><div id="ctls"></div></div>
 <div class="card"><h2>What controllers may do</h2><div id="allow"></div></div>
+<div class="card"><h2>GPUs and thermal guard</h2><div id="gpus" class="mut"></div>
+<label style="display:block;margin-top:.4rem"><input type="checkbox" id="thOn"> Stop taking work when a GPU reaches <input id="thLim" type="number" min="50" max="110" style="width:4.5em"> °C (the hottest sensor: junction, edge or memory), and resume <input id="thMar" type="number" min="2" max="30" style="width:3.5em"> °C below</label>
+<label style="display:block"><input type="checkbox" id="thUnl"> Unload models when it trips (LM Studio and Ollama; llama-server and vLLM stay up but get no work)</label>
+<div class="mut">GPUs slow themselves down near their own limit; this is an earlier stop you choose. Values that cannot be read show as ?, and never trip it.</div></div>
 <div class="card"><h2>LLM servers on this computer</h2><div id="bks"></div>
  <div style="margin-top:.5rem"><select id="bkind"><option value="openai">OpenAI-compatible</option><option value="lmstudio">LM Studio</option><option value="ollama">Ollama</option><option value="llama-server">llama-server</option><option value="vllm">vLLM</option></select>
  <input id="burl" placeholder="http://127.0.0.1:1234" size="28"> <button id="badd">Add</button></div>
@@ -2077,6 +2283,10 @@ function render(){ const s=S; $('#hname').textContent='“'+s.name+'”'; $('#ho
   $('#ctlCount').textContent=s.controllers.length+' paired';
   $('#ctls').innerHTML=s.controllers.length?'<table><tr><th>controller</th><th>paired</th><th>last seen</th><th></th></tr>'+s.controllers.map(c=>`<tr><td>${esc(c.name)} <span class="mut">via ${esc(c.via)}</span></td><td>${when(c.created)}</td><td>${when(c.last_seen)}</td><td><button data-rv="${esc(c.id)}">Revoke</button></td></tr>`).join('')+'</table>':'<span class="mut">None yet.</span>';
   document.querySelectorAll('[data-rv]').forEach(b=>b.onclick=async()=>{ if(confirm('Revoke this controller? It loses access at once.')){ S=await api('/api/controllers/revoke',{id:b.dataset.rv}); render(); } });
+  const T=s.telemetry||{gpus:[],thermal:{}}, th=T.thermal||{}, f=v=>v==null?'?':Math.round(v);
+  $('#gpus').innerHTML=(th.tripped?`<div class="bad" style="color:#c0392b"><b>Paused: ${esc(th.tripped.gpu)} reached ${f(th.tripped.temp)}°C</b></div>`:'')+(T.gpus.length?T.gpus.map(g=>g.error?esc(g.error):`<div><b>${esc(g.name)}</b> · edge ${f(g.temp_c)}°C · junction ${f(g.junction_c)}°C · memory ${f(g.mem_c)}°C · VRAM ${g.vram_used_mb==null?'?':(g.vram_used_mb/1024).toFixed(1)}/${g.vram_total_mb==null?'?':(g.vram_total_mb/1024).toFixed(1)} GB · load ${f(g.util)}%${g.power_w!=null?' · '+f(g.power_w)+' W':''} <span class="mut">(${esc(g.source)})</span></div>`).join(''):'No GPU sensors found (nvidia-smi, rocm-smi or Linux amdgpu sensors).');
+  if(document.activeElement?.id?.startsWith('th')!==true){ $('#thOn').checked=!!th.enabled; $('#thLim').value=th.limit_c??95; $('#thMar').value=th.margin_c??10; $('#thUnl').checked=th.unload!==false; }
+  ['thOn','thLim','thMar','thUnl'].forEach(id=>$('#'+id).onchange=async()=>{ S=await api('/api/thermal',{enabled:$('#thOn').checked,limit_c:+$('#thLim').value,margin_c:+$('#thMar').value,unload:$('#thUnl').checked}); render(); });
   $('#allow').innerHTML=Object.keys(s.allow).map(k=>`<label style="display:block"><input type="checkbox" data-al="${k}" ${s.allow[k]?'checked':''}> ${esc(s.allow_text[k])}</label>`).join('');
   document.querySelectorAll('[data-al]').forEach(c=>c.onchange=async()=>{ S=await api('/api/allow',{allow:{[c.dataset.al]:c.checked}}); render(); });
   $('#bks').innerHTML=s.backends.length?'<table>'+s.backends.map(b=>`<tr><td>${esc(b.kind)}</td><td><code>${esc(b.url)}</code></td><td class="ok">running</td><td>${b.source==='configured'?`<button data-rb="${esc(b.url)}">Remove</button>`:''}</td></tr>`).join('')+'</table>':'<span class="err">No LLM server found. Start LM Studio\'s server (Developer → Start server), Ollama, or llama-server.</span>';

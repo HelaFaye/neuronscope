@@ -124,8 +124,22 @@ The host's tools are:
 - `receive_file` and `transfers`
 - `install_model`
 - `delete_file`: off unless the host's owner allows it
+- `telemetry`: GPU temperatures (edge, junction, memory), VRAM, load and
+  power, and whether the thermal guard has paused the host
 - `model_file`: where a model's GGUF is on the host, its size and SHA-256
 - `trace_reply`: run a reply through NeuronScope's tracer on the host
+
+## Thermal guard
+
+The host's console has *GPUs and thermal guard*:
+- it shows each GPU's temperatures, VRAM, load and power, read from
+  nvidia-smi, rocm-smi, or Linux's own amdgpu sensors (no extra tools
+  needed). A value that can't be read shows as ?, and never trips the guard;
+- turn the guard on and set a limit (the hottest of junction, edge and
+  memory). Above it, the host refuses new chats and traces and unloads what
+  LM Studio and Ollama can unload. llama-server and vLLM stay up but get no
+  work. It resumes a chosen margin below the limit;
+- Studio's Workers page shows the host as *too hot*, and its tasks wait.
 
 ## Checking a host model's replies in 3D
 

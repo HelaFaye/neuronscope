@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added (work distribution)
+- Workers page (`/workers`): monitor and control where project tasks run.
+  - Workers are this computer's models, endpoints you run yourself (any
+    OpenAI-compatible server, here or elsewhere), and remote hosts and
+    linked Studios.
+  - Pause, drain, per-worker parallel limits, the subjects each takes, a
+    timed test, and stopping a local model.
+  - Routing by subject: up to three workers in order.
+  - The queue shows why each task waits; a task can be moved to another
+    worker.
+  - GPU temperatures, VRAM, load and power for this computer and each
+    remote host, plus an activity log.
+  - The director dispatches to all three kinds of worker. An endpoint that
+    stops answering is marked down at once, so its tasks wait instead of
+    failing. docs/WORKERS.md.
+- NeuronScope Remote: GPU telemetry (nvidia-smi, rocm-smi, or Linux amdgpu
+  sensors, without guessing) as the `telemetry` tool, and a thermal guard.
+  Off until the host's owner turns it on; above a chosen limit the host
+  takes no new work and unloads what it can, and it resumes once cooler.
+
 ### Added (confidence signals)
 - Confidence strip in the chat (*confidence*, on by default). Studio asks
   llama-server or vLLM for each token's top-5 probabilities and shows where

@@ -1685,11 +1685,15 @@ class ContextTooLong(RuntimeError):
 POOL = WorkerPool()
 
 
-def worker_chat(url, alias, messages, max_tokens=4096, timeout=1800):
+def worker_chat(url, alias, messages, max_tokens=4096, timeout=1800, token=None, usage=None):
+    """One chat with a worker's OpenAI-compatible server -> the reply text. With usage (a dict),
+    the server's token counts are copied into it."""
     body = json.dumps({"model": alias, "messages": messages, "max_tokens": max_tokens,
                        "temperature": 0.3, "stream": False}).encode()
-    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=body,
-                                 headers={"Content-Type": "application/json"}, method="POST")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             d = json.loads(r.read())
@@ -1702,6 +1706,8 @@ def worker_chat(url, alias, messages, max_tokens=4096, timeout=1800):
         if isinstance(msg, dict) and msg.get("type") == "exceed_context_size_error":
             raise ContextTooLong(f"{text} (pick a model with a longer context, or shorten the task's inputs)")
         raise RuntimeError(f"HTTP {e.code}: {text or e.reason}")
+    if usage is not None:
+        usage.update(d.get("usage") or {})
     return d["choices"][0]["message"].get("content") or ""
 
 
@@ -1713,6 +1719,170 @@ DIRECTOR = {"store": None, "running": set(), "lock": threading.Lock(), "notes": 
 def _director():
     import director
     return director
+
+
+# ------------------------------------------------------------ workers: where tasks run
+
+def workers_registry():
+    reg = STATE.get("workers_reg")
+    if reg is None:
+        import worker_registry
+        home = os.path.dirname(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+        reg = STATE["workers_reg"] = worker_registry.Registry(os.path.join(home, "workers.json"))
+    return reg
+
+
+TELEMETRY = {"lock": threading.Lock(), "want": 0.0, "local": [], "hosts": {}, "t": 0.0, "thread": None,
+             "health": {}}
+
+
+def _endpoint_health(ep):
+    try:
+        req = urllib.request.Request(ep["url"].rstrip("/") + "/models",
+                                     headers={"Authorization": f"Bearer {ep['token']}"} if ep.get("token") else {})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            ids = [m.get("id") for m in json.loads(r.read()).get("data", [])]
+        return {"ok": True, "models": ids[:20]}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+
+
+def _telemetry_loop():
+    """While someone watches the Workers page: this computer's GPUs, each remote host's,
+    and whether each endpoint answers, every few seconds."""
+    import remote_hosts
+    while True:
+        if time.time() - TELEMETRY["want"] > 30:
+            time.sleep(1)
+            continue
+        local = remote_hosts.nsr.gpu_telemetry()
+        hosts = {}
+        for h in remote().hosts():
+            try:
+                hosts[h["name"]] = remote().call(h["name"], "telemetry", timeout=8)
+            except Exception as e:
+                hosts[h["name"]] = {"error": str(e)[:200]}
+        health = {"ep:" + ep["name"]: _endpoint_health(ep) for ep in workers_registry().endpoints()}
+        with TELEMETRY["lock"]:
+            TELEMETRY.update(local=local, hosts=hosts, health=health, t=time.time())
+        time.sleep(4)
+
+
+def telemetry_snapshot():
+    TELEMETRY["want"] = time.time()
+    if TELEMETRY["thread"] is None:
+        TELEMETRY["thread"] = threading.Thread(target=_telemetry_loop, daemon=True)
+        TELEMETRY["thread"].start()
+    with TELEMETRY["lock"]:
+        return {k: TELEMETRY[k] for k in ("local", "hosts", "health", "t")}
+
+
+def worker_kind(wid):
+    if wid.startswith("ep:"):
+        return "endpoint"
+    if LINK_SEP in wid and wid.partition(LINK_SEP)[0] in {x["name"] for x in load_links()}:
+        return "remote"
+    return "local"
+
+
+def all_workers():
+    """Every place a task can run, with its controls, live counters and status."""
+    reg = workers_registry()
+    tel = telemetry_snapshot()
+    pool = {w["model"]: w for w in POOL.list()}
+    rows = []
+    for m in scan_models():
+        w = pool.get(m["id"])
+        rows.append({"id": m["id"], "kind": "local", "name": m["id"], "size": m["size"],
+                     "where": w["where"] if w else "this computer (starts when a task needs it)",
+                     "status": ("loading" if w["loading"] else "running") if w else "stopped",
+                     "port": w["port"] if w else None})
+    for ep in reg.endpoints():
+        h = tel["health"].get("ep:" + ep["name"])
+        rows.append({"id": "ep:" + ep["name"], "kind": "endpoint", "name": ep["name"], "where": ep["url"],
+                     "model": ep.get("model") or "", "note": ep.get("note", ""), "has_token": bool(ep.get("token")),
+                     "status": "checking" if h is None else ("up" if h["ok"] else "down"),
+                     "error": None if h is None or h["ok"] else h["error"],
+                     "served": (h or {}).get("models")})
+    for m in link_models():
+        host = m.get("link")
+        ht = tel["hosts"].get(host) or {}
+        th = (ht.get("thermal") or {}) if isinstance(ht, dict) else {}
+        rows.append({"id": m["id"], "kind": "remote", "name": m.get("remote_id"), "host": host,
+                     "where": f"{host} ({'NeuronScope Remote' if m.get('owned_by', '').startswith('remote:') else 'linked Studio'})",
+                     "status": "too hot" if th.get("tripped") else ("loaded" if m.get("loaded") else "available"),
+                     "backend": m.get("backend")})
+    for r in rows:
+        r.update(control=reg.control(r["id"]), stats=reg.summary(r["id"]), limit=reg.limit(r["id"]))
+    return rows
+
+
+def work_queue():
+    """Tasks of approved, running and paused projects that are not finished: who has them and
+    why they wait."""
+    store = DIRECTOR["store"]
+    if store is None:
+        return []
+    dr, reg, out = _director(), workers_registry(), []
+    for row in store.list():
+        if row["status"] not in ("running", "paused", "approved"):
+            continue
+        try:
+            plan = store.load(row["id"])
+        except Exception:
+            continue
+        ready = {t["id"] for t in dr.ready_tasks(plan)}
+        for t in plan["tasks"]:
+            if t["status"] not in ("todo", "rework", "running"):
+                continue
+            wid = (t.get("assignee") or {}).get("model") or ""
+            c = reg.control(wid) if wid else {}
+            if t["status"] == "running":
+                why = "running"
+            elif plan["status"] != "running":
+                why = f"project {plan['status']}"
+            elif (t.get("not_before") or 0) > time.time():
+                why = f"retry in {int(t['not_before'] - time.time()) + 1}s (the last attempt failed)"
+            elif t["id"] not in ready:
+                why = "waiting for other tasks"
+            elif c.get("paused"):
+                why = "worker paused"
+            elif c.get("draining"):
+                why = "worker draining"
+            elif not worker_alive(wid):
+                why = "worker down or too hot"
+            elif not reg.has_slot(wid):
+                why = "worker busy"
+            else:
+                why = "next"
+            out.append({"project": plan["id"], "project_title": plan["title"], "task": t["id"], "title": t["title"],
+                        "labels": t.get("labels") or [], "status": t["status"], "worker": wid,
+                        "reason": (t.get("assignee") or {}).get("reason"), "why": why})
+    return out
+
+
+def worker_alive(wid):
+    if wid.startswith("ep:"):
+        h = TELEMETRY["health"].get(wid)
+        return h is None or h["ok"]
+    if worker_kind(wid) == "remote":
+        th = ((TELEMETRY["hosts"].get(wid.partition(LINK_SEP)[0]) or {}).get("thermal") or {})
+        return not th.get("tripped")
+    return True
+
+
+def chat_off_machine(wid, msgs, usage):
+    """A task's chat on an endpoint or a remote model -> reply text."""
+    if wid.startswith("ep:"):
+        ep = workers_registry().endpoint(wid)
+        if ep is None:
+            raise RuntimeError(f"no endpoint {wid[3:]!r} (Workers page)")
+        return worker_chat(ep["url"], ep.get("model") or "default", msgs, token=ep.get("token"), usage=usage)
+    up, rid = link_target(wid)
+    r = proxy("/v1/chat/completions", {"model": rid, "messages": msgs, "max_tokens": 4096,
+                                       "temperature": 0.3, "stream": False}, upstream=up)
+    usage.update(r.get("usage") or {})
+    return ((r.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
 
 
 # ------------------------------------------------------------ studio settings
@@ -2142,12 +2312,25 @@ def assign_candidates():
 
 
 def assign_fn_for(plan):
+    """Routes first (Workers page: per subject, the workers to try), then the director's own
+    choice among the workers that take the task's subjects and are not paused."""
     dr = _director()
+    reg = workers_registry()
     cands, sums = assign_candidates()
+    cands = cands + [{"id": "ep:" + ep["name"], "size": 0, "fits": True, "context": None}
+                     for ep in reg.endpoints()]
 
     def fn(t):
-        return dr.assign(t, cands, sums, plan["policy"], STATE["min_graded"], STATE["min_subject"],
-                         STATE["halluc_cost"])
+        labels = t.get("labels") or []
+        r = reg.route(labels, worker_alive)
+        if r:
+            reg.event(r["model"], "assigned", f"{t.get('id')}: {r['reason']}")
+            return r
+        ok = [c for c in cands if reg.takes(c["id"], labels) and not reg.control(c["id"])["paused"]]
+        out = dr.assign(t, ok, sums, plan["policy"], STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
+        if out.get("model"):
+            reg.event(out["model"], "assigned", f"{t.get('id')}: {out['reason']}")
+        return out
     return fn
 
 
@@ -2161,10 +2344,14 @@ def next_model_fn(t):
                      exclude=tuple(x for x in tried if x))
 
 
-def run_task(pid, tid):
-    """One attempt at one task, on its assigned worker. Runs in a thread."""
+def run_task(pid, tid, wid=None, t0=None):
+    """One attempt at one task, on its assigned worker. Runs in a thread. The director
+    counted the task against worker wid at t0 (Workers page); every way out uncounts it."""
     dr = _director()
     store = DIRECTOR["store"]
+    reg, usage, label = workers_registry(), {}, f"{pid}/{tid}"
+    if t0 is None and wid:
+        t0 = reg.begin(wid, label)
     text = err = check = None
     fatal = False
     try:
@@ -2174,16 +2361,20 @@ def run_task(pid, tid):
             msgs = dr.worker_messages(plan, t)
             mid = (t.get("assignee") or {}).get("model")
             policy = dict(plan["policy"])
-        model = find_model(mid)
-        if model is None:
-            raise RuntimeError(f"assigned model {mid!r} is not in the models directories")
-        w = POOL.acquire(model, policy.get("devices"), policy.get("device_settings"))
-        try:
-            alias = load_settings().get(_key(model["path"]), {}).get("served_name") or model["id"]
-            text = worker_chat(w["url"], alias, msgs)
-        finally:
-            POOL.release(w)
-        if policy.get("check") and STATE["cett"] and text:
+        model = None
+        if worker_kind(mid) == "local":
+            model = find_model(mid)
+            if model is None:
+                raise RuntimeError(f"assigned model {mid!r} is not in the models directories")
+            w = POOL.acquire(model, policy.get("devices"), policy.get("device_settings"))
+            try:
+                alias = load_settings().get(_key(model["path"]), {}).get("served_name") or model["id"]
+                text = worker_chat(w["url"], alias, msgs, usage=usage)
+            finally:
+                POOL.release(w)
+        else:
+            text = chat_off_machine(mid, msgs, usage)
+        if policy.get("check") and STATE["cett"] and text and model is not None:
             try:
                 r = trace_reply(model, msgs, text, source="project")
                 check = {"id": r["id"], "url": r["url"], "max": r["max"], "mean": r["mean"],
@@ -2197,6 +2388,12 @@ def run_task(pid, tid):
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
     finally:
+        if wid:
+            reg.end(wid, t0, label, err, usage.get("completion_tokens") or 0)
+            if err and wid.startswith("ep:") and re.search(r"URLError|ConnectionRefused|timed out|Errno", err):
+                # Down now, not at the next health check: its other tasks wait instead of failing too.
+                with TELEMETRY["lock"]:
+                    TELEMETRY["health"][wid] = {"ok": False, "error": err[:200]}
         with store.lock(pid):
             plan = store.load(pid)
             t = dr.task(plan, tid)
@@ -2228,15 +2425,22 @@ def director_loop():
                         mine = sum(1 for p, _ in DIRECTOR["running"] if p == pid)
                     slots = plan["policy"]["max_parallel"] - mine
                     started = []
-                    for t in dr.ready_tasks(plan)[:max(0, slots)]:
+                    reg = workers_registry()
+                    for t in dr.ready_tasks(plan):
+                        if len(started) >= max(0, slots):
+                            break
+                        wid = (t.get("assignee") or {}).get("model") or ""
+                        # A paused, draining, full or overheated worker holds its tasks back.
+                        if wid and not (reg.has_slot(wid) and worker_alive(wid)):
+                            continue
                         dr.start_attempt(plan, t)
-                        started.append(t["id"])
+                        started.append((t["id"], wid, reg.begin(wid, f"{pid}/{t['id']}") if wid else None))
                     if started:
                         store.save(plan)
-                for tid in started:
+                for tid, wid, t0 in started:
                     with DIRECTOR["lock"]:
                         DIRECTOR["running"].add((pid, tid))
-                    threading.Thread(target=run_task, args=(pid, tid), daemon=True).start()
+                    threading.Thread(target=run_task, args=(pid, tid, wid, t0), daemon=True).start()
         except Exception as e:
             print(f"[studio] director: {e}", file=sys.stderr)
 
@@ -2655,6 +2859,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/workers":
+            import workers_page
+            body = workers_page.PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/api/workers/overview":
+            reg = workers_registry()
+            return self._json(200, {"workers": all_workers(), "routes": reg.load()["routes"],
+                                    "subjects": dr.sc.SUBJECTS, "events": list(reg.events)[-80:][::-1],
+                                    "telemetry": telemetry_snapshot(), "queue": work_queue(),
+                                    "max_workers": STATE["max_workers"]})
         if self.path == "/api/workers":
             return self._json(200, {"workers": POOL.list(), "max_workers": STATE["max_workers"],
                                     "devices": [{k: d.get(k) for k in ("id", "backend", "name", "vendor", "memory_total",
@@ -2703,6 +2922,45 @@ class Handler(BaseHTTPRequestHandler):
             m = find_model(req.get("model")) if req.get("model") else None
             POOL.stop(m["path"] if m else None)
             return self._json(200, {"workers": POOL.list()})
+        if self.path.startswith("/api/workers/"):
+            import worker_registry
+            reg, req = workers_registry(), self._read()
+            try:
+                if self.path == "/api/workers/endpoint":
+                    if req.get("remove"):
+                        reg.remove_endpoint(str(req["remove"]))
+                        return self._json(200, {"ok": True})
+                    return self._json(200, reg.put_endpoint(req))
+                if self.path == "/api/workers/control":
+                    wid = str(req.get("id", ""))
+                    if not wid:
+                        raise worker_registry.RegistryError("which worker?")
+                    out = reg.set_control(wid, paused=req.get("paused"), draining=req.get("draining"),
+                                          max_parallel=req.get("max_parallel"), takes=req.get("takes"))
+                    if req.get("stop") and worker_kind(wid) == "local":
+                        m = find_model(wid)
+                        if m:
+                            POOL.stop(m["path"])
+                            reg.event(wid, "stopped", "by the owner")
+                    return self._json(200, out)
+                if self.path == "/api/workers/routes":
+                    return self._json(200, {"routes": reg.set_routes(req.get("routes") or {}, dr.sc.SUBJECTS)})
+                if self.path == "/api/workers/test":
+                    wid = str(req.get("id", ""))
+                    if worker_kind(wid) == "local":
+                        return self._json(400, {"error": "a local model starts when a task needs it; test it in the "
+                                                         "chat instead"})
+                    t0, usage = time.time(), {}
+                    text = chat_off_machine(wid, [{"role": "user", "content": "Reply with the single word: ready"}],
+                                            usage)
+                    reg.event(wid, "tested", f"{time.time() - t0:.1f}s: {text[:60]!r}")
+                    return self._json(200, {"reply": text[:500], "seconds": round(time.time() - t0, 2),
+                                            "usage": usage})
+            except (worker_registry.RegistryError, ValueError) as e:
+                return self._json(400, {"error": str(e)})
+            except Exception as e:
+                return self._json(502, {"error": f"{type(e).__name__}: {e}"})
+            return self._json(404, {"error": "not found"})
         try:
             if self.path == "/api/projects":
                 req = self._read(4 * 1024 * 1024)
@@ -3473,7 +3731,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._settings()
         if self.path == "/api/plugins" or self.path.startswith("/plugins/"):
             return self._plugins_get()
-        if self.path == "/projects" or self.path.startswith("/api/projects") or self.path == "/api/workers":
+        if self.path in ("/projects", "/workers", "/api/workers", "/api/workers/overview") \
+                or self.path.startswith("/api/projects"):
             return self._projects_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
             if self._role != "owner":
@@ -3651,7 +3910,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in ("/api/jobs", "/api/jobs/cancel"):
                 return self._jobs_post()
 
-            if self.path.startswith("/api/projects") or self.path == "/api/workers/stop":
+            if self.path.startswith(("/api/projects", "/api/workers/")):
                 return self._projects_post()
 
             if self.path == "/mcp":
@@ -4184,6 +4443,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
   <a href="/review" class="chip" style="text-decoration:none" title="how each neuron behaves across tests, benchmarks and checked replies, by subject and over time">Review</a>
   <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
+  <a href="/workers" class="chip" style="text-decoration:none" title="where the project tasks run: worker models here, endpoints and remote hosts; pause, limit, route by subject, watch GPU temperatures">Workers</a>
   <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
   <button id="theme" title="toggle theme">◐</button>
   <button id="unload" disabled>Unload</button>

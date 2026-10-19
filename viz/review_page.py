@@ -33,7 +33,7 @@ th{color:var(--mut);font-weight:500;font-size:12px}td.num{font-variant-numeric:t
 .empty{padding:2rem;text-align:center;color:var(--mut)}
 code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3rem;border-radius:4px}
 </style>
-<header><h1>Studio · Review</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
+<header><h1>Studio · Review</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <aside>
 <section class="card"><h2>What to review</h2>

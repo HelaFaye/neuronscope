@@ -66,6 +66,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Adapt to a task while protecting a subspace (SAGE) | **Jobs → Retrain → SAGE** | `python scripts/sage_edit.py train / chat / export` | `start_job sage_train` |
 | Share results with a scoreboard (opt-in; what is sent is listed and previewed) | **Settings → Sharing results** | `python scripts/score_cards.py`, `scripts/scoreboard_server.py` ([SHARING.md](SHARING.md)) | — |
 | Plugins: turn on, open their pages; their jobs and reply checks | **Settings → Plugins**, Jobs → *Plugins*, *plugins* under a reply | a plugin's own scripts ([PLUGINS.md](PLUGINS.md)) | — |
+| Where project tasks run: workers, endpoints, routing by subject, pause/drain, GPU temperatures | **Workers** (`/workers`) | `workers.json`; the API in [WORKERS.md](WORKERS.md) | — |
 | How sure the model was, per token | chat: tick **confidence** | — | — |
 | Logit lens over a reply (Hugging Face models) | Jobs → **Logit lens over a reply** | `python scripts/logit_lens.py` ([CONFIDENCE.md](CONFIDENCE.md)) | `start_job logit_lens` |
 | Compare decoding variants (SLED, adaptive steering) | Jobs → **Decoding lab**, then TestQA and the gate | `python scripts/decode_lab.py` ([DECODING.md](DECODING.md)) | `start_job decode_lab` |
