@@ -121,6 +121,16 @@ SPECS: dict[str, dict] = {
             F("subject", multi=True), F("allow_exec", kind="bool"),
             F("sandbox", choices=["none", "docker", "podman"], default="docker"),
             F("quant", default="Q4_K_M"), F("llama", help="llama.cpp checkout (default $NS_LLAMA)")]},
+    "decode_lab": {
+        "title": "Decoding lab (SLED, adaptive steering)", "group": "Evaluate", "argv": [S / "decode_lab.py"],
+        "help": "Serve one Hugging Face model as several decoding variants on an OpenAI-compatible port, for TestQA "
+                "and the retrain gate to compare; runs until cancelled (docs/DECODING.md).",
+        "fields": [
+            F("model", req=True, help="HF id or folder"),
+            F("variant", repeat=True, help="name={json}, each in single quotes, e.g. 'plain={}' 'sled={\"sled\": {\"alpha\": 2}}'; "
+                                           "default: plain"),
+            F("port", kind="int", default=8090), F("dtype", choices=["auto", "float32", "bfloat16", "float16"],
+                                                   default="auto")]},
     "logit_lens": {
         "title": "Logit lens over a reply", "group": "Evaluate", "argv": [S / "logit_lens.py"],
         "help": "What every layer would say next for each token of a reply, how spread out it is, and where the "

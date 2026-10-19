@@ -11,6 +11,13 @@
   Face models: each layer's guess for every token of a reply, its spread,
   the settle layer and the top-k decay layer. Tokens that settle late with
   a spread-out final layer are marked. Writes JSON and a heatmap page.
+- `scripts/decode_lab.py` (Jobs → *Decoding lab*): one Hugging Face model
+  served as several decoding variants on an OpenAI-compatible port, for
+  TestQA and the gate to compare.
+  - SLED (self logits evolution decoding).
+  - Steering with a concept_edit direction, at a fixed strength or one that
+    follows the model's uncertainty (output spread, or attention entropy).
+  - docs/DECODING.md.
 - docs/CONFIDENCE.md: the three signals side by side (confidence strip,
   logit lens, H-Neuron check), and what it would take to tell dishonesty
   from a confident mistake.

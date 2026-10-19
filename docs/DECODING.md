@@ -1,0 +1,109 @@
+# Decoding lab: SLED and adaptive steering, measured
+
+`scripts/decode_lab.py` loads one Hugging Face model and serves it as
+several **variants**, each with its own decoding options, on an
+OpenAI-compatible port. The request's `model` names the variant. TestQA
+can then grade the variants side by side, and the retrain gate says whether
+a variant is better than plain decoding.
+
+Nothing here is on by default. These are research methods with mixed
+published results, and they are worth keeping only where your measurements
+say so.
+
+```bash
+python scripts/decode_lab.py --model org/m --port 8090 \
+    --variant plain='{}' \
+    --variant sled='{"sled": {"alpha": 2, "k": 10}}' \
+    --variant calm='{"steer": {"vectors": "runs/dk/directions.pt", "layer": 14, "alpha": 4, "adapt": "spread"}}'
+python scripts/testqa.py --endpoint plain=http://127.0.0.1:8090/v1@plain \
+    --endpoint sled=http://127.0.0.1:8090/v1@sled --endpoint calm=http://127.0.0.1:8090/v1@calm \
+    --per-subject 30 --out runs/decoding.json
+python scripts/retrain_gate.py --results runs/decoding.json --before plain --after sled
+```
+
+In Studio: Jobs → *Decoding lab* starts the server, and it runs until you
+cancel it. Then run Jobs → *TestQA* against its variants, and Jobs → *Gate*.
+To chat with a variant, link it as an OpenAI-compatible endpoint, or try
+all variants once from the command line:
+`python scripts/decode_lab.py --model org/m --prompt "…" --variant …`.
+
+The model stays in memory once, and requests are answered one at a time.
+Each answer also returns `decode_lab.spread` (per-token uncertainty, as in
+[CONFIDENCE.md](CONFIDENCE.md)) and the steering strength used per token.
+
+## SLED: self logits evolution decoding
+
+Zhang et al., NeurIPS 2024. Earlier layers often "know" the right token
+before the last layers settle. SLED compares the logit-lens logits of
+earlier layers with the final ones, over the final top-k tokens:
+
+- for each layer n and candidate i: `m_i(n) = max(0, cos(logits_n − logits_N, p_N − e_i))²`.
+  This is high when moving from layer n to the final layer went toward
+  token i;
+- the layers' normalised `m` are averaged, weighted by each layer's total,
+  into a latent distribution;
+- the final logits take one step toward it,
+  `logits_N[i] −= alpha·(p_N[i] − P_latent[i])`. Tokens outside the top k
+  are dropped.
+
+Options:
+
+| option | meaning | default |
+|---|---|---|
+| `alpha` | evolution rate: how far the step goes | 2 |
+| `k` | evolution scale: candidates considered | 10 |
+| `layers` | `"even"` (every second layer below the last), `"all"`, or a list | `"even"` |
+| `temperature` | for p_N | 1 |
+
+This follows the paper's description. The authors' code differs in
+details, so compare it with `plain` on your model before trusting it.
+
+## Steering with adaptive strength
+
+`steer` adds `alpha·v` to the residual stream after one layer at every step:
+- `v` is a direction from `concept_edit.py` (`directions.pt`; the position
+  after that layer is used), or any `.pt` / `.npy` vector;
+- a positive `alpha` adds the concept, a negative one pushes away from it.
+
+| option | meaning | default |
+|---|---|---|
+| `vectors`, `layer` | the direction and where it is added | required |
+| `alpha` | full strength | 1 |
+| `direction` | which column of a multi-direction cone | 0 |
+| `adapt` | `fixed`, `spread` or `attention` | `fixed` |
+| `target` | the uncertainty at which the full alpha applies | 0.5 |
+| `min`, `max` | bounds on the scale | 0, 2 |
+
+With `adapt`, the strength follows the model's uncertainty on the previous
+token: `alpha_t = alpha · clip(u / target, min, max)`. Here `u` is either
+the output spread, or the mean entropy of the last layer's attention at the
+current position over log(context length). The second needs eager
+attention, which the lab turns on by itself and which is slower.
+
+This is the "context-aware α" idea: steer hard where the model hesitates,
+and leave it alone where it is sure. It suits a direction like *declining
+when unsure* from CONCEPT_EDITING.md: the model leans toward "I don't
+know" only when it has started to guess.
+
+## Reading the result
+
+The gate compares the variants item by item on the same TestQA bank, and
+reports right, wrong (hallucinated) and declined rates per subject with
+significance tests. A useful variant:
+- raises right answers or declines without raising wrong ones;
+- breaks no subject.
+
+Decoding changes cost speed too: SLED computes the output head for each
+layer it reads, so expect it to be noticeably slower. Each answer reports
+tokens per second.
+
+## Not here (yet)
+
+- **SLED or adaptive steering inside llama.cpp:** the engines Studio runs
+  don't expose per-layer logits or per-token hooks to callers. GGUF models
+  get the measurement half (the confidence strip) but not these decoders.
+  Control vectors (fixed strength) work in llama.cpp; see sage_edit.py
+  export.
+- **Steering found in random low-dimensional projections:** not
+  implemented. The directions here come from concept_edit.py's measured
+  differences.
