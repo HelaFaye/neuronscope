@@ -897,6 +897,98 @@ def tool_rules():
     return tr.Rules(STATE.get("tool_rules_path"))
 
 
+def fs_places():
+    """Shortcuts for the folder browser: home and its usual folders, Studio's model and download
+    folders, LM Studio's and Hugging Face's model folders, and drives or mounted disks."""
+    import platform
+    home = os.path.expanduser("~")
+    out = [{"label": "Home", "path": home}]
+    for n in ("Desktop", "Documents", "Downloads"):
+        p = os.path.join(home, n)
+        if os.path.isdir(p):
+            out.append({"label": n, "path": p})
+    for d in STATE.get("models_dirs") or []:
+        out.append({"label": "Models: " + (os.path.basename(d.rstrip("/\\")) or d), "path": d, "kind": "models"})
+    if STATE.get("download_dir"):
+        out.append({"label": "Downloads (models)", "path": STATE["download_dir"], "kind": "models"})
+    for label, p in (("LM Studio models", os.path.join(home, ".lmstudio", "models")),
+                     ("LM Studio models (old)", os.path.join(home, ".cache", "lm-studio", "models")),
+                     ("Hugging Face cache", os.path.join(home, ".cache", "huggingface", "hub")),
+                     ("NeuronScope", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ("Studio's settings", os.path.dirname(
+                         os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json")))):
+        if os.path.isdir(p):
+            out.append({"label": label, "path": p})
+    if platform.system() == "Windows":
+        import string
+        for c in string.ascii_uppercase:
+            if os.path.exists(f"{c}:\\"):
+                out.append({"label": f"Drive {c}:", "path": f"{c}:\\", "kind": "drive"})
+    else:
+        out.append({"label": "Computer (/)", "path": "/", "kind": "drive"})
+        for base in ("/run/media", "/media", "/mnt", "/Volumes"):
+            try:
+                tops = sorted((e for e in os.scandir(base) if e.is_dir()), key=lambda e: e.name)
+            except OSError:
+                continue
+            for e in tops:
+                # /run/media/<user>/<disk> and /media/<user>/<disk>: the disks are one level down
+                disks = [e]
+                if base in ("/run/media", "/media") and not os.path.ismount(e.path):
+                    try:
+                        disks = sorted((x for x in os.scandir(e.path) if x.is_dir()), key=lambda x: x.name) or [e]
+                    except OSError:
+                        disks = [e]
+                for x in disks:
+                    out.append({"label": f"{x.name} ({base})", "path": x.path, "kind": "drive"})
+    seen, uniq = set(), []
+    for x in out:
+        k = os.path.normcase(os.path.abspath(x["path"]))
+        if k not in seen and os.path.isdir(x["path"]):
+            seen.add(k)
+            uniq.append(x)
+    return uniq
+
+
+def fs_list(path, want="any", exts=(), hidden=False, limit=3000):
+    """One folder for the browser: its subfolders, and files when want is file or any (filtered by
+    extension). -> {path, parent, sep, entries: [{name, path, dir, size, mtime}], truncated}."""
+    p = os.path.abspath(os.path.expanduser(path or "~"))
+    while not os.path.isdir(p):
+        up = os.path.dirname(p)
+        if up == p:
+            break
+        p = up
+    exts = tuple(e.lower() if e.startswith(".") else "." + e.lower() for e in exts if e)
+    rows, truncated = [], False
+    try:
+        it = list(os.scandir(p))
+    except OSError as e:
+        return {"path": p, "parent": os.path.dirname(p) if os.path.dirname(p) != p else None, "sep": os.sep,
+                "entries": [], "error": f"cannot open this folder: {e.strerror or e}"}
+    for e in it:
+        if not hidden and (e.name.startswith(".") or e.name in ("$RECYCLE.BIN", "System Volume Information")):
+            continue
+        try:
+            is_dir = e.is_dir()
+        except OSError:
+            continue
+        if not is_dir and (want == "dir" or (exts and not e.name.lower().endswith(exts))):
+            continue
+        try:
+            st = e.stat()
+            size, mt = (None if is_dir else st.st_size), st.st_mtime
+        except OSError:
+            size = mt = None
+        rows.append({"name": e.name, "path": e.path, "dir": is_dir, "size": size, "mtime": mt})
+        if len(rows) >= limit:
+            truncated = True
+            break
+    rows.sort(key=lambda r: (not r["dir"], r["name"].lower()))
+    parent = os.path.dirname(p)
+    return {"path": p, "parent": parent if parent != p else None, "sep": os.sep, "entries": rows,
+            "truncated": truncated, "writable": os.access(p, os.W_OK)}
+
+
 def plugins():
     """Studio's plugin manager (viz/plugins.py): the plugins folder in Studio's home, and the
     repository's plugins/ examples. None of them runs until the owner turns it on."""
@@ -3052,7 +3144,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"gguf": ex(ws.get("gguf")), "cett": ex(STATE.get("cett") or ws.get("cett")),
                                     "server": ex(STATE.get("server_bin") or ws.get("server")),
                                     "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
-                                    "workspace": STATE.get("workspace_name"), "root": ws.get("root")})
+                                    "workspace": STATE.get("workspace_name"), "root": ws.get("root"),
+                                    "ggufs": [m["path"] for m in scan_models()][:200]})
         if runner is None:
             return self._jobs_off()
         if self.path == "/api/jobs":
@@ -3729,6 +3822,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._requirements()
         if self.path in ("/settings", "/api/workspaces", "/api/settings", "/api/settings/sharing"):
             return self._settings()
+        if self.path.startswith("/api/fs/"):
+            # The folder browser: the owner's own files on Studio's computer.
+            if not self._owner_only():
+                return
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            if self.path.startswith("/api/fs/places"):
+                return self._json(200, {"places": fs_places(), "sep": os.sep, "home": os.path.expanduser("~")})
+            if self.path.startswith("/api/fs/list"):
+                return self._json(200, fs_list((q.get("path") or [""])[0], (q.get("want") or ["any"])[0],
+                                               [x for x in (q.get("ext") or [""])[0].split(",") if x],
+                                               (q.get("hidden") or ["0"])[0] == "1"))
         if self.path == "/api/plugins" or self.path.startswith("/plugins/"):
             return self._plugins_get()
         if self.path.startswith("/help"):
@@ -4541,7 +4645,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
       <input id="experts" value="0">
     </div>
     <label>Served name (API model id)</label><input id="served_name" placeholder="defaults to the model id">
-    <label>LoRA adapter (optional)</label><input id="lora" placeholder="/path/suppress-lora.gguf">
+    <label>LoRA adapter (optional)</label><input id="lora" placeholder="a LoRA .gguf file" data-pick="file" data-ext="gguf">
     <details id="eoBox" class="eo"><summary>Engine options <span id="eoCount" class="note"></span></summary>
       <div id="eoForm" class="note">loading…</div></details>
     <label>Extra flags</label><input id="extra" placeholder="--override-tensor '\.ffn_.*_exps\.=CPU'">

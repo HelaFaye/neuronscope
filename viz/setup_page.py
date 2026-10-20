@@ -97,7 +97,10 @@ function fieldHTML(s,k,f){
     if(f.kind==='bool') return `<div><label style="margin-top:1.4rem"><input type="checkbox" data-k="${k}" ${v?'checked':''}>${esc(f.help)}${f.live?'':' <span class="note">(after restart)</span>'}</label><div class="err" data-err="${k}"></div></div>`;
     const val=f.kind==='dirs'?(v||[]).join('\n'):(v??'');
     const ph={duration:'e.g. 5m',durations:'e.g. 1h,8h,1d',url:'http://host:port/v1@model',path:'a file (created when needed)',readfile:'a file'}[f.kind]||'';
-    const el=f.kind==='dirs'?`<textarea data-k="${k}" placeholder="one folder per line">${esc(val)}</textarea>`:`<input data-k="${k}" value="${esc(val)}" placeholder="${ph}" ${['int','float'].includes(f.kind)?'inputmode="decimal"':''}>`;
+    const pick={file:'file',readfile:'file',path:'file',dir:'dir'}[f.kind], ext={rag_embed_gguf:'gguf',mcp_config:'json',hardware:'json',tls_cert:'pem,crt',tls_key:'pem,key'}[k]||'';
+    const dl={host:['127.0.0.1','0.0.0.0'],pair_default:['persistent','1h','8h','1d','7d']}[k];
+    const el=f.kind==='dirs'?`<textarea data-k="${k}" hidden>${esc(val)}</textarea><div data-list="${k}"></div>`
+      :`<input data-k="${k}" value="${esc(val)}" placeholder="${ph}" ${['int','float'].includes(f.kind)?'inputmode="decimal"':''}${pick?` data-pick="${pick}"${ext?` data-ext="${ext}"`:''}`:''}${dl?` list="dl-${k}"`:''}>`+(dl?`<datalist id="dl-${k}">${dl.map(x=>`<option value="${x}">`).join('')}</datalist>`:'');
     const sug=s.found[k]&&s.found[k]!==v?`<button type="button" data-use="${k}" style="margin-top:.25rem">Use ${esc(s.found[k])}</button>`:'';
     return `<div><label>${esc(k.replace(/_/g,' '))}<span class="note">${esc(f.help)}${f.live?'':' (after restart)'}</span></label>${el}${sug}<div class="err" data-err="${k}"></div></div>`; }
 function renderForm(s){
@@ -107,6 +110,9 @@ function renderForm(s){
   const basic=Object.entries(groups).filter(([g,xs])=>!xs[0][1].advanced), adv=Object.entries(groups).filter(([g,xs])=>xs[0][1].advanced);
   $('#form').innerHTML=basic.map(([g,xs])=>block(g,xs)).join('')+
     (adv.length?`<details style="margin-top:1rem" ${location.hash==='#advanced'?'open':''}><summary><b>Advanced</b> <span class="note">${adv.map(([g])=>esc(g)).join(', ')}. These apply after a restart; an address Studio would refuse to start with is refused here first.</span></summary>${adv.map(([g,xs])=>block(g,xs)).join('')}</details>`:'');
+  // Folder lists: one row per folder (Browse…, reorder, remove), kept in the hidden field the save reads.
+  document.querySelectorAll('[data-list]').forEach(d=>{ const k=d.dataset.list, ta=document.querySelector(`textarea[data-k=${k}]`);
+    nsListEditor(d,{values:(s.fields[k].value||[]),want:'dir',addLabel:'+ Add folder',empty:'No folders yet: add the ones that hold your .gguf models.',onchange:v=>ta.value=v.join('\n')}); });
   document.querySelectorAll('[data-use]').forEach(b=>b.onclick=()=>{document.querySelector(`[data-k=${b.dataset.use}]`).value=s.found[b.dataset.use]});
 }
 async function load(){ S=await api('api/setup'); renderStatus(S); renderForm(S); }
@@ -146,10 +152,10 @@ function renderHW(h){
       <td><b>${esc(d.id)}</b> ${esc(d.name)}${d.note?`<div class="note" style="color:var(--warn)">${esc(d.note)}</div>`:''}</td>
       <td class="note">${d.memory_total==null?'unknown':gib(d.memory_free)+' / '+gib(d.memory_total)+' GiB'+(d.estimated?' (est.)':'')}${d.unified&&d.backend!=='cpu'?'<br>shared with RAM':''}</td>
       <td><details><summary class="note">${c.server||c.rocm_path||env||c.reserve_gib!=null?'customised':'defaults'}</summary>
-        <label>llama-server for this device</label><input data-x="${esc(d.id)}" data-f="server" value="${esc(c.server||'')}">
+        <label>llama-server for this device</label><input data-x="${esc(d.id)}" data-f="server" value="${esc(c.server||'')}" data-pick="file">
         ${d.backend==='rocm'?`<label>pinned ROCm release <span class="note">e.g. /opt/rocm-6.2.4</span></label><input data-x="${esc(d.id)}" data-f="rocm_path" value="${esc(c.rocm_path||'')}">`:''}
         <label>memory to keep free (GiB)</label><input data-x="${esc(d.id)}" data-f="reserve_gib" value="${esc(c.reserve_gib??'')}">
-        <label>environment <span class="note">KEY=value per line; HSA_, HIP_, ROCR_, GGML_, CUDA_, VK_… only</span></label><textarea data-x="${esc(d.id)}" data-f="env">${esc(env)}</textarea>
+        <label>environment <span class="note">KEY=value per line; HSA_, HIP_, ROCR_, GGML_, CUDA_, VK_… only</span></label><textarea data-x="${esc(d.id)}" data-f="env" data-lines="text" data-add="+ Add variable" placeholder="NAME=value">${esc(env)}</textarea>
       </details></td></tr>`}).join('');
   $('#servers').innerHTML=['rocm','vulkan','cuda','metal','cpu'].map(b=>`<div><label>${b}</label><input data-srv="${b}" value="${esc((cfg.servers||{})[b]||'')}"></div>`).join('');
 }

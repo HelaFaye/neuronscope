@@ -710,6 +710,12 @@ function suggest(f){ const h=(f.help||'').toLowerCase();
   if(f.name==='server'&&h.includes('llama-server')) return DEF.server;
   if(f.name==='llama') return DEF.llama;
   return null; }
+// Fields that name a file or folder get Browse…; GGUF fields also a list of the models Studio knows.
+const PICK={gguf:'file',server:'file',binary:'file',cett:'file',classifier:'file',predictions:'file',reply_file:'file',h_neurons:'file',
+  llama:'dir',cache:'dir',out:'any',dataset:'any',data:'any',results:'any',report:'any',traces:'any',state:'any',session:'any',reference:'any',
+  model:'any',base:'any',teacher:'any',student:'any',review_model:'any'};
+function pickFor(f){ const w=PICK[f.name]; if(!w||f.multi||f.choices) return '';
+  return ` data-pick="${w}"`+(f.name==='gguf'?' data-ext="gguf" list="dl-ggufs"':''); }
 function renderForm(prefill){const k=$('#kind').value, s=specs[k]; prefill=prefill||{};
  $('#khelp').innerHTML=esc(s.help)+(DEF.root?` <span class="note">· runs in ${esc(DEF.root)} (workspace ${esc(DEF.workspace)}, <a href="/settings#workspaces">change</a>)</span>`:'');
  $('#form').innerHTML=s.fields.map(f=>{const id='f_'+f.name, lab=esc(f.name.replace(/_/g,' '))+(f.required?' *':'');
@@ -717,8 +723,9 @@ function renderForm(prefill){const k=$('#kind').value, s=specs[k]; prefill=prefi
   const d=f.name in prefill?prefill[f.name]:Array.isArray(f.default)?f.default.join(' '):(f.default??sg??'');
   if(f.kind==='bool')return `<label><input type="checkbox" id="${id}" ${prefill[f.name]==='1'||prefill[f.name]==='true'?'checked':''}>${lab}${f.help?` <span class="note">${esc(f.help)}</span>`:''}</label>`;
   const inp=f.choices?`<select id="${id}">${f.choices.map(c=>`<option ${c===d?'selected':''}>${esc(c)}</option>`).join('')}</select>`
-   :`<input id="${id}" value="${esc(d)}" placeholder="${esc(f.help||'')}">`;
-  return `<label for="${id}">${lab}${f.multi?' <span class="note">(space-separated)</span>':''}</label>${inp}`}).join('');}
+   :`<input id="${id}" value="${esc(d)}" placeholder="${esc(f.help||'')}"${pickFor(f)}>`;
+  return `<label for="${id}">${lab}${f.multi?' <span class="note">(space-separated)</span>':''}</label>${inp}`}).join('')
+  +`<datalist id="dl-ggufs">${(DEF.ggufs||[]).map(p=>`<option value="${esc(p)}">`).join('')}</datalist>`;}
 let DEF={};
 async function load(){specs=await api('/api/jobs/specs'); DEF=await api('/api/jobs/defaults').catch(()=>({}));const g={};for(const[k,s]of Object.entries(specs))(g[s.group]??=[]).push([k,s]);
  $('#kind').innerHTML=Object.entries(g).map(([n,xs])=>`<optgroup label="${esc(n)}">${xs.map(([k,s])=>`<option value="${k}">${esc(s.title)}</option>`).join('')}</optgroup>`).join('');

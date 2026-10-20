@@ -215,7 +215,7 @@ function reqCard(p){
     <div class="note">What this project needs on the machine that builds it: the toolchain, libraries and Python packages from its build files, hardware, NeuronScope features, and your notes. Workers are told what is available; Start waits until required items are here (or you start anyway).</div>
     <div class="row" style="margin:.5rem 0"><span class="grow">${summary}</span><button id="rqcheck">Check now</button></div>
     ${r.items.length?`<div class="tscroll"><table class="rq"><tr><th></th><th>kind</th><th>what</th><th>needs</th><th>this machine</th><th></th></tr>${rows}</table></div>`:'<div class="note">No requirements yet. Scan the checkout, or add them below.</div>'}
-    <div class="row" style="margin-top:.6rem"><input id="rqroot" class="grow" placeholder="project checkout folder" value="${esc(r.root||(p.census&&p.census.path)||'')}"><button id="rqscan">Scan build files</button></div>
+    <div class="row" style="margin-top:.6rem"><input id="rqroot" class="grow" data-pick="dir" placeholder="project checkout folder" value="${esc(r.root||(p.census&&p.census.path)||'')}"><button id="rqscan">Scan build files</button></div>
     ${r.files&&r.files.length?`<div class="note">read: ${esc(r.files.join(', '))}</div>`:''}
     <details style="margin-top:.5rem"><summary>add a requirement</summary><div class="row">
       <select id="rqkind" style="width:auto">${kindOpts}</select><span id="rqnamebox" class="grow"></span>

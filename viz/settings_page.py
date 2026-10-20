@@ -120,8 +120,8 @@ async function restartBtn(el){ $(el).insertAdjacentHTML('beforeend',' <button id
 
 // ---------- workspaces
 let WS=null, cur=null;
-const LABEL={root:'Pipeline data root',models_dirs:'Models folders (one per line)',download_dir:'Downloads folder',llama_dir:'llama.cpp checkout',
-  server:'llama-server',cett:'llama-cett-dump',gguf:'Model for the H-Neuron pipeline (.gguf)',state_dir:'Studio state folder',env:'Environment (one VAR=value per line)',note:'Note'};
+const LABEL={root:'Pipeline data root',models_dirs:'Models folders',download_dir:'Downloads folder',llama_dir:'llama.cpp checkout',
+  server:'llama-server',cett:'llama-cett-dump',gguf:'Model for the H-Neuron pipeline (.gguf)',state_dir:'Studio state folder',env:'Environment variables',note:'Note'};
 function wsTabs(){ $('#wstabs').innerHTML=WS.workspaces.map(w=>`<span class="tab ${w.name===cur?'on':''}" data-w="${esc(w.name)}">${esc(w.name)}${w.active?'<span class="act">active</span>':''}${w.name===WS.running&&!w.active?'<span class="act" style="color:var(--warn)">running</span>':''}</span>`).join('');
   document.querySelectorAll('[data-w]').forEach(t=>t.onclick=()=>{cur=t.dataset.w;wsTabs();wsForm();}); }
 function wsForm(){
@@ -130,12 +130,16 @@ function wsForm(){
     if(k==='models_dirs') val=(val||[]).join('\n'); if(k==='env') val=Object.entries(val||{}).map(([a,b])=>a+'='+b).join('\n');
     const dflt=k==='models_dirs'?r.models_dirs.join(', '):k==='env'?'':r[k]||'';
     const missing=k==='models_dirs'?(ex.models_dirs.every(x=>!x)?'none of these folders exists':''):(k in ex&&r[k]&&!ex[k]?'does not exist':'');
-    const big=['models_dirs','env'].includes(k);
+    const big=['models_dirs','env'].includes(k), pick={root:'dir',download_dir:'dir',llama_dir:'dir',state_dir:'dir',gguf:'file',server:'file',cett:'file'}[k];
     return `<label>${esc(LABEL[k]||k)}<span class="note">${esc(f.help)}</span></label>`+
-      (big?`<textarea data-f="${k}" placeholder="${esc(dflt)}">${esc(val||'')}</textarea>`:`<input data-f="${k}" value="${esc(val||'')}" placeholder="${esc(dflt?'default: '+dflt:'')}">`)+
+      (big?`<textarea data-f="${k}" hidden>${esc(val||'')}</textarea><div data-wl="${k}" data-dflt="${esc(dflt)}"></div>`:`<input data-f="${k}" value="${esc(val||'')}" placeholder="${esc(dflt?'default: '+dflt:'')}"${pick?` data-pick="${pick}"`:''}${k==='gguf'?' data-ext="gguf"':''}>`)+
       `${missing?`<div class="miss">${esc(missing)}${k==='server'||k==='cett'?' · <a href="/setup#build">build llama.cpp</a>':''}</div>`:''}<div data-err="${k}" class="err"></div>`; };
   $('#wsform').innerHTML=`<div class="grid"><div>${['root','models_dirs','download_dir','gguf','note'].map(field).join('')}</div><div>${['llama_dir','server','cett','state_dir','env'].map(field).join('')}</div></div>`+
     `<div class="note" style="margin-top:.5rem">Saved in <code>${esc(WS.config)}</code>. ${WS.env_override?`Studio was started with workspace ${esc(WS.env_override)} (--workspace or NS_WORKSPACE); “active” applies when it starts without one.`:''} Empty fields use the default shown in grey.</div>`;
+  // Per-entry lists, synced into the hidden fields wsValues reads.
+  document.querySelectorAll('[data-wl]').forEach(d=>{ const k=d.dataset.wl, ta=document.querySelector(`#wsform textarea[data-f=${k}]`), dirs=k==='models_dirs';
+    nsListEditor(d,{values:ta.value.split('\n').map(x=>x.trim()).filter(Boolean),want:'dir',browse:dirs,addLabel:dirs?'+ Add folder':'+ Add variable',
+      placeholder:dirs?'':'NAME=value',empty:dirs?(d.dataset.dflt?'None set: the default is '+d.dataset.dflt:'None set.'):'None set.',onchange:v=>ta.value=v.join('\n')}); });
   $('#wsuse').disabled=w.active; $('#wsdel').disabled=w.name==='default'||w.name===WS.running;
 }
 function wsValues(){ const out={}; document.querySelectorAll('#wsform [data-f]').forEach(e=>{ const k=e.dataset.f; let v=e.value.trim();
