@@ -51,7 +51,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import engine_optimizer as eopt  # noqa: E402
 
-QUANT = re.compile(r"(?<![A-Za-z0-9])(TQ[12]_0|IQ\d_(?:XXS|XS|S|M|NL)|Q\d_K(?:_[SML])?|Q\d_[01]|BF16|F16|F32)"
+QUANT = re.compile(r"(?<![A-Za-z0-9])(TQ[12]_0|IQ\d_(?:XXS|XS|S|M|NL)|Q\d_K(?:_[SML])?|Q\d_[01]|BF16|FP?16|FP?32)"
                    r"(?![A-Za-z0-9])", re.I)
 BPW = {"F32": 32, "F16": 16, "BF16": 16, "Q8_0": 8.5, "Q6_K": 6.56, "Q5_K_M": 5.75, "Q5_K_S": 5.5, "Q5_0": 5.5,
        "Q5_1": 6, "Q4_K_M": 4.75, "Q4_K_S": 4.5, "Q4_0": 4.5, "Q4_1": 5, "IQ4_XS": 4.25, "IQ4_NL": 4.5,
@@ -73,7 +73,7 @@ PROMPTS = [
 
 def quant_of(path: str) -> str | None:
     m = QUANT.search(Path(path).name)
-    return m.group(1).upper() if m else None
+    return m.group(1).upper().replace("FP", "F") if m else None       # fp16 -> F16
 
 
 def family(path: str) -> str:

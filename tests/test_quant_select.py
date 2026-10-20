@@ -63,6 +63,8 @@ def tools(tmp_path, perplexity=False):
 def test_names():
     assert qs.quant_of("Llama-3-8B-Instruct-Q4_K_M.gguf") == "Q4_K_M" and qs.quant_of("x-TQ2_0.gguf") == "TQ2_0"
     assert qs.quant_of("m-IQ3_XS.gguf") == "IQ3_XS" and qs.quant_of("model.gguf") is None
+    assert qs.quant_of("qwen2.5-0.5b-instruct-fp16.gguf") == "F16" and qs.family("qwen2.5-0.5b-instruct-fp16.gguf") == \
+        qs.family("qwen2.5-0.5b-instruct-q4_k_m.gguf") == "qwen2.5-0.5b-instruct"
     assert qs.family("Llama-3-8B-Instruct-Q4_K_M.gguf") == "Llama-3-8B-Instruct" == qs.family("Llama-3-8B-Instruct.Q8_0.gguf")
 
 

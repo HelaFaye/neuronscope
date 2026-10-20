@@ -180,6 +180,22 @@ it keeps the most faithful file that fits and says so. The choice is stored per 
 `~/.neuronscope/quant_choices.json`, and My Models marks it with ★. A
 laptop and a GPU desktop can then each run the file that suits them.
 
+One real run (Qwen2.5-0.5B-Instruct, 4 CPU cores, no GPU, default bars;
+KL divergence over 20 chunks of text against the fp16 file):
+
+| quant | size | generation tok/s | KLD | same top token |
+|---|---|---|---|---|
+| F16 (reference) | 1.18 GB | 26.1 | 0 | 100% |
+| Q8_0 | 0.63 GB | 38.8 | 0.002 | 97.3% |
+| **Q4_K_M** (chosen) | 0.46 GB | 51.0 | 0.032 | 89.1% |
+| Q3_K_M | 0.40 GB | 58.5 | 0.066 | 84.9% |
+| Q2_K | 0.39 GB | 57.7 | 0.119 | 79.9% |
+
+On a CPU, smaller files are faster because memory bandwidth is the limit.
+Q3_K_M fell just short of the same-top bar, and Q2_K was no faster than
+Q3_K_M while losing more. A bigger model, or a GPU, moves these numbers,
+which is why the choice is kept per computer.
+
 Switching between quantizations is never lossless. Each file loses
 something against the original weights, and the fidelity column measures
 how much. The ternary types TQ1_0 and TQ2_0 keep quality only for models
