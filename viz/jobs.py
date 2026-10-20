@@ -131,6 +131,24 @@ SPECS: dict[str, dict] = {
                                            "default: plain"),
             F("port", kind="int", default=8090), F("dtype", choices=["auto", "float32", "bfloat16", "float16"],
                                                    default="auto")]},
+    "rp_fit": {
+        "title": "Random-projection steering: fit", "group": "Evaluate", "argv": [S / "rp_steer.py", "fit"],
+        "help": "Project layers' MLP outputs to a few dozen random dimensions and find the direction that separates "
+                "wrong answers from right ones; held-out AUC per layer against the full space. Steer with the "
+                "decoding lab's rp variant (docs/DECODING.md).",
+        "fields": [F("model", req=True, help="HF id or folder"),
+                   F("data", help="JSONL of prompt or messages, reply, label right|wrong"),
+                   F("testqa", help="or TestQA results JSON"), F("endpoint", help="which endpoint in those results"),
+                   F("layers", multi=True, help="default: half and three quarters of the depth"),
+                   F("dim", kind="int", default=48), F("projections", kind="int", default=5),
+                   F("dtype", choices=["auto", "float32", "bfloat16", "float16"], default="auto"),
+                   F("out", req=True, help="e.g. runs/rp.pt")]},
+    "rp_export": {
+        "title": "Random-projection steering: llama.cpp control vector", "group": "Evaluate",
+        "argv": [S / "rp_steer.py", "export"],
+        "help": "The fitted directions as a control vector GGUF for llama-server --control-vector-scaled. Fixed at "
+                "every step, not gated like the decoding lab's rp variant.",
+        "fields": [F("file", req=True, help="rp.pt from the fit"), F("out", req=True, help="e.g. runs/rp-cvec.gguf")]},
     "logit_lens": {
         "title": "Logit lens over a reply", "group": "Evaluate", "argv": [S / "logit_lens.py"],
         "help": "What every layer would say next for each token of a reply, how spread out it is, and where the "
@@ -724,7 +742,7 @@ function suggest(f){ const h=(f.help||'').toLowerCase();
   if(f.name==='llama') return DEF.llama;
   return null; }
 // Fields that name a file or folder get Browse…; GGUF fields also a list of the models Studio knows.
-const PICK={gguf:'file',from:'file',imatrix:'file',server:'file',binary:'file',cett:'file',classifier:'file',predictions:'file',reply_file:'file',h_neurons:'file',
+const PICK={gguf:'file',from:'file',imatrix:'file',testqa:'file',file:'file',server:'file',binary:'file',cett:'file',classifier:'file',predictions:'file',reply_file:'file',h_neurons:'file',
   llama:'dir',cache:'dir',out:'any',dataset:'any',data:'any',results:'any',report:'any',traces:'any',state:'any',session:'any',reference:'any',
   model:'any',base:'any',teacher:'any',student:'any',review_model:'any'};
 function pickFor(f){ const w=PICK[f.name]; if(!w||f.multi||f.choices) return '';

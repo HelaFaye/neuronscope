@@ -42,6 +42,14 @@ steer    Add alpha * v to the residual stream after one layer, at every step.
          position over log(context length). Steering then acts when the model
          hesitates and stays out of the way when it is sure.
 
+rp       Steering through a low-dimensional random projection, fitted by
+         rp_steer.py fit: on each fitted layer the MLP output is pulled back
+         toward the right answers' side when it drifts past it.
+         {"file": rp.pt, "alpha": 1.0, "mode": "direction" | "subspace",
+          "layers": "all" | [indices]}
+         The reply reports the drift per step ("rp_drift"), so you can see
+         where the model leaned toward its wrong-answer pattern.
+
 Greedy unless the request sets temperature > 0. One request at a time.
 """
 from __future__ import annotations
@@ -134,6 +142,13 @@ class Lab:
             if st:
                 self.vectors[name] = load_vector(st["vectors"], int(st.get("direction", 0)),
                                                  int(st["layer"])).to(self.dev)
+        self.rp = {}
+        for name, v in variants.items():
+            r = v.get("rp")
+            if r:
+                from rp_steer import Steerer
+                self.rp[name] = Steerer(r["file"], float(r.get("alpha", 1.0)), r.get("mode", "direction"),
+                                        r.get("layers"), self.dev)
         self.lock = threading.Lock()
         self.model_id = model_id
 
@@ -172,6 +187,10 @@ class Lab:
                 h = h + scale["a"] * v.to(h.dtype)
                 return (h, *out[1:]) if isinstance(out, tuple) else h
             hook = self.layers[int(st["layer"])].register_forward_hook(add)
+        rp = self.rp.get(variant)
+        if rp is not None:
+            rp.attach(self.layers)
+        drift = []
         want_att = bool(st and st.get("adapt") == "attention")
         out_ids, past, cur, alphas, spreads = [], None, ids, [], []
         eos = {tok.eos_token_id} | set(getattr(self.model.generation_config, "eos_token_id", None) or []
@@ -202,6 +221,8 @@ class Lab:
                                                                 u_ctx / float(st.get("target", 0.5))))
                         scale["a"] = float(st.get("alpha", 1.0)) * k
                     alphas.append(round(scale["a"], 4))
+                    if rp is not None:
+                        drift.append(round(rp.flagged(), 4))
                     if temperature and temperature > 0:
                         probs = torch.softmax(logits / temperature, -1)
                         if top_p < 1:
@@ -225,8 +246,13 @@ class Lab:
         finally:
             if hook is not None:
                 hook.remove()
-        return {"text": text_out, "n_prompt": int(ids.shape[1]), "n_out": len(out_ids), "seconds": time.time() - t0,
-                "spread": spreads, "alpha": alphas}
+            if rp is not None:
+                rp.remove()
+        out = {"text": text_out, "n_prompt": int(ids.shape[1]), "n_out": len(out_ids), "seconds": time.time() - t0,
+               "spread": spreads, "alpha": alphas}
+        if rp is not None:
+            out["rp_drift"] = drift
+        return out
 
 
 def make_handler(lab: Lab):
@@ -291,7 +317,8 @@ def make_handler(lab: Lab):
                                  "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": r["n_prompt"], "completion_tokens": r["n_out"],
                               "total_tokens": r["n_prompt"] + r["n_out"]},
-                    "decode_lab": {"spread": r["spread"], "alpha": r["alpha"],
+                    "decode_lab": {"spread": r["spread"], "alpha": r["alpha"], **({"rp_drift": r["rp_drift"]}
+                                                                                    if "rp_drift" in r else {}),
                                    "tokens_per_second": round(r["n_out"] / max(r["seconds"], 1e-6), 2)}})
             except (KeyError, ValueError, TypeError) as e:
                 return self._json(400, {"error": {"message": f"{type(e).__name__}: {e}"}})
@@ -330,8 +357,10 @@ def main(argv=None) -> int:
         for name in variants:
             r = lab.generate([{"role": "user", "content": a.prompt}], name, a.max_tokens)
             al = f" · alpha {min(r['alpha']):.2f}..{max(r['alpha']):.2f}" if r["alpha"] and any(r["alpha"]) else ""
+            dr = f" · rp drift on {sum(1 for x in r['rp_drift'] if x > 0)} of {len(r['rp_drift'])} steps" \
+                if r.get("rp_drift") else ""
             print(f"[{name}] {r['text']!r}  ({r['n_out']} tokens, mean spread "
-                  f"{sum(r['spread']) / max(1, len(r['spread'])):.2f}{al})")
+                  f"{sum(r['spread']) / max(1, len(r['spread'])):.2f}{al}{dr})")
         return 0
     import ns_security as sec
     sec.loopback_only(a.host, "decode_lab")

@@ -85,6 +85,45 @@ and leave it alone where it is sure. It suits a direction like *declining
 when unsure* from CONCEPT_EDITING.md: the model leans toward "I don't
 know" only when it has started to guess.
 
+## Steering in a random low-dimensional projection
+
+Suppressing single H-Neurons can disturb what else those neurons do.
+`scripts/rp_steer.py` works on the whole MLP output of a layer instead
+(Jobs → *Random-projection steering: fit*):
+
+1. **Fit.** From answers labelled right and wrong (a JSONL of prompt,
+   reply and label, or TestQA results with `--testqa`), it averages each
+   chosen layer's MLP output over the reply's tokens and projects it onto
+   `--dim` random orthonormal directions. In that space it finds the
+   direction separating wrong from right (LDA with shrinkage, which a small
+   space makes reliable from a few hundred examples).
+2. **Check.** For each layer it prints the held-out AUC in the
+   projection, the same classifier's AUC on the full space, and the spread
+   over `--projections` random projections. A projection keeps only part of
+   a single direction's signal, about √(k/d) against even noise, so a large
+   gap to the full space means raise `--dim`, or that the signal is not
+   spread widely in this model. A small spread across projections is the
+   redundancy the method relies on.
+3. **Steer.** Add an `rp` variant to the decoding lab:
+
+```bash
+python scripts/rp_steer.py fit --model org/m --testqa runs/testqa.json --endpoint base --layers 12 16 20 --out runs/rp.pt
+python scripts/decode_lab.py --model org/m --variant plain='{}' \
+    --variant rp='{"rp": {"file": "runs/rp.pt", "alpha": 1.0, "mode": "direction"}}'
+```
+
+At each step the layer's MLP output is scored along the fitted direction.
+Only when it drifts past the right answers' typical level is it pulled back:
+along the direction (`direction`), or across the whole projected subspace
+toward the right answers' mean, gated by how far it drifted (`subspace`).
+Each reply reports `rp_drift` per token, which shows where the model leaned
+toward its wrong-answer pattern. Compare `plain` and `rp` with TestQA and
+the retrain gate before trusting it.
+
+`rp_steer.py export` writes the directions as a llama.cpp control vector
+(`llama-server --control-vector-scaled rp-cvec.gguf 0.5`) for GGUF models.
+That one is fixed: llama.cpp adds it at every step, without the gate.
+
 ## Reading the result
 
 The gate compares the variants item by item on the same TestQA bank, and
@@ -104,6 +143,3 @@ tokens per second.
   get the measurement half (the confidence strip) but not these decoders.
   Control vectors (fixed strength) work in llama.cpp; see sage_edit.py
   export.
-- **Steering found in random low-dimensional projections:** not
-  implemented. The directions here come from concept_edit.py's measured
-  differences.
