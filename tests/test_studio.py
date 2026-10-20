@@ -576,6 +576,9 @@ def test_multi_gpu_flags_and_vram_fit(studio_srv, monkeypatch):
     monkeypatch.setattr(studio.time, "sleep", lambda s: None)
     monkeypatch.setattr(studio, "wait_healthy", lambda port, proc: (True, "ready"))
     monkeypatch.setattr(studio, "port_busy", lambda port: False)
+    # the engine's --help probe would run through the fake Popen too: answer it here, as other tests' cache did
+    import engine_options
+    monkeypatch.setattr(engine_options, "probe", lambda binary, engine: set())
     m = {"path": "/m.gguf", "id": "m", "name": "m.gguf"}
     ok, _ = studio.start_server(m, {**studio.DEFAULTS, "gpus": "0,1,2,3", "split_mode": "layer",
                                     "tensor_split": "1,1,1,1", "main_gpu": 0}, 9999)
@@ -589,8 +592,15 @@ def test_multi_gpu_flags_and_vram_fit(studio_srv, monkeypatch):
     import cuda_info
     m10 = cuda_info.parse_smi("".join(f"{i}, Tesla M10, 5.0, 8192, 8000, 580.95.05, b{i}\n" for i in range(4)))
     monkeypatch.setattr(studio, "nvidia_gpus", lambda: m10)
-    assert studio.fit_estimate(20 * 2**30)["ok"] is True and "4 GPUs" in studio.fit_estimate(20 * 2**30)["note"]
-    assert studio.fit_estimate(40 * 2**30)["ok"] is False
+
+    class FewRam:
+        ram, ram_available = 16 * 2**30, 12 * 2**30
+    monkeypatch.setattr(studio, "Host", FewRam)
+    f20 = studio.fit_estimate(20 * 2**30)
+    assert f20["ok"] is True and f20["level"] == "gpu" and "4 GPUs" in f20["note"]
+    f35 = studio.fit_estimate(35 * 2**30)                   # 40 GiB needed: 31 on the GPUs, the rest in RAM
+    assert f35["ok"] is True and f35["level"] == "partial"
+    assert studio.fit_estimate(60 * 2**30)["level"] == "no"
     code, adv = call(studio_srv, "/api/gpus")
     assert code == 200 and adv["count"] == 4 and adv["multi_gpu"]["llama_server"] == "-sm layer -ts 1,1,1,1"
 

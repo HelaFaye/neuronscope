@@ -22,6 +22,7 @@ that. Studio handles everything around it.
 |---|---|---|
 | Model library with metadata (arch, quant, MoE, size, fit) | yes | yes; fit is estimated against this host before loading |
 | Hugging Face search and resumable download | yes | yes; multi-part GGUFs offered as one set; `HF_TOKEN` for gated repos |
+| Will it run here | yes (green/yellow/red) | Discover and My Models: *Full GPU offload*, *Partial GPU offload*, *Runs on the CPU* or *Likely too large*, for NVIDIA, AMD, Intel and Apple GPUs (integrated ones share RAM); ★ *Recommended* marks the largest file that runs fully on the GPU |
 | Per-model load settings (GPU layers, context, batch, threads, flash-attn, KV cache type) | yes | yes; persisted per file |
 | Several GPUs (split mode, tensor split, main GPU, which GPUs) | yes | yes; shown when NVIDIA GPUs are present, with a suggested split; fit estimate counts free VRAM on all of them ([HARDWARE.md](HARDWARE.md#nvidia--cuda)) |
 | Chat with streaming, reasoning shown separately | yes | yes |

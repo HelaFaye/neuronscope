@@ -232,38 +232,70 @@ def nvidia_gpus():
     return _GPU_CACHE["gpus"]
 
 
+_ACCEL = {"t": 0.0, "devs": []}
+
+
+def accel_devices() -> list:
+    """GPUs and other accelerators with memory, any vendor (scripts/accelerators.py; cached 30 s)."""
+    if time.time() - _ACCEL["t"] > 30:
+        try:
+            import accelerators
+            devs = accelerators.detect(accelerators.load_config(STATE.get("hardware_path")))
+            _ACCEL["devs"] = [d for d in devs if d.get("enabled", True) and d.get("backend") != "cpu"
+                              and d.get("memory_total") and not d.get("twin_of")]
+        except Exception:
+            _ACCEL["devs"] = []
+        _ACCEL["t"] = time.time()
+    return _ACCEL["devs"]
+
+
 def fit_estimate(size_bytes):
-    """Will this load, on this machine? Reuses the shared host checks."""
-    if Host is None:
-        return {"ok": None, "note": "hostcheck unavailable"}
+    """Will this load, on this machine, and where? -> {ok, level, note}, level one of
+    gpu (all layers on accelerators), partial (some layers stay on the CPU), cpu (no accelerator; fits in RAM),
+    no (too large). Rough by design: weights plus a modest allowance for the KV cache."""
+    if not size_bytes:
+        return {"ok": None, "level": None, "note": "size unknown"}
+    need = int(size_bytes * 1.15)
+    gib = lambda b: f"{b / 2**30:.1f}"            # noqa: E731
+    ram = None
+    if Host is not None:
+        try:
+            h = Host()
+            ram = h.ram_available or h.ram
+        except Exception:
+            ram = None
     gpus = nvidia_gpus()
     if gpus:
-        # Offloaded weights live in VRAM, summed over every GPU llama-server can split across.
-        avail = sum(g["memory_free"] or g["memory_total"] for g in gpus)
+        vram = sum(g["memory_free"] or g["memory_total"] for g in gpus)
         where = f"VRAM on {len(gpus)} GPUs" if len(gpus) > 1 else "VRAM"
-        need = int(size_bytes * 1.15)
-        ratio = need / avail if avail else 9
-        if ratio > 1.0:
-            return {"ok": False, "note": f"needs ~{need / 2**30:.1f} GiB, {avail / 2**30:.1f} GiB free {where} "
-                                         "(lower GPU layers to keep some on the CPU)"}
-        return {"ok": True, "note": f"{'tight: ' if ratio > 0.85 else ''}~{need / 2**30:.1f} of "
-                                    f"{avail / 2**30:.1f} GiB {where}"}
-    h = Host()
-    avail = h.ram_available or h.ram
-    if not avail:
-        return {"ok": None, "note": "cannot read memory"}
-    # Weights plus a modest KV allowance. Deliberately rough: the real number
-    # depends on context length, which the user is about to choose.
-    need = int(size_bytes * 1.15)
-    ratio = need / avail
-    if ratio > 1.0:
-        return {"ok": False, "note": f"needs ~{need / 2**30:.1f} GiB, "
-                                     f"{avail / 2**30:.1f} GiB available"}
-    if ratio > 0.85:
-        return {"ok": True, "note": f"tight: ~{need / 2**30:.1f} of "
-                                    f"{avail / 2**30:.1f} GiB"}
-    return {"ok": True, "note": f"~{need / 2**30:.1f} of "
-                                f"{avail / 2**30:.1f} GiB"}
+        unified = False
+    else:
+        devs = accel_devices()
+        dedicated = [d for d in devs if not d.get("unified")]
+        shared = [d for d in devs if d.get("unified")]
+        pick = dedicated or shared
+        vram = sum(max(0, (d.get("memory_free") or d["memory_total"]) - (d.get("reserve") or 0)) for d in pick)
+        unified = not dedicated and bool(shared)
+        where = (f"memory on {len(pick)} GPUs" if len(pick) > 1 else
+                 "memory shared by the GPU and the CPU" if unified else "VRAM") if pick else ""
+    if vram:
+        if need <= vram:
+            tight = need > 0.85 * vram
+            return {"ok": True, "level": "gpu", "note": f"{'tight: ' if tight else ''}full GPU offload: ~{gib(need)} "
+                                                       f"of {gib(vram)} GiB {where}"}
+        if not unified and ram and need <= vram + 0.9 * ram:
+            return {"ok": True, "level": "partial",
+                    "note": f"partial GPU offload: ~{gib(need)} GiB, {gib(vram)} GiB {where}; the rest runs on the CPU "
+                            "(slower)"}
+        return {"ok": False, "level": "no", "note": f"needs ~{gib(need)} GiB, {gib(vram)} GiB free {where}"
+                                                    + (f" and {gib(ram)} GiB RAM" if ram and not unified else "")
+                                                    + " (lower GPU layers to keep more on the CPU)"}
+    if not ram:
+        return {"ok": None, "level": None, "note": "cannot read memory"}
+    if need > ram:
+        return {"ok": False, "level": "no", "note": f"needs ~{gib(need)} GiB, {gib(ram)} GiB available"}
+    return {"ok": True, "level": "cpu", "note": f"{'tight: ' if need > 0.85 * ram else ''}on the CPU: ~{gib(need)} "
+                                                f"of {gib(ram)} GiB RAM"}
 
 
 # ------------------------------------------------------------- hub search
@@ -319,7 +351,15 @@ def hub_files(repo):
             g["size"] += f["size"]
     for g in groups.values():
         g["parts"].sort()
-    return sorted(groups.values(), key=lambda g: g["name"])
+        g["fit"] = fit_estimate(g["size"])
+    out = sorted(groups.values(), key=lambda g: (g["size"] or 0, g["name"]))   # smallest first, as in LM Studio
+    # The download to suggest: the largest file that runs fully on the GPU (or in RAM without one), skipping
+    # unquantized copies, which are rarely worth their size for chatting.
+    ok = [g for g in out if g["fit"].get("level") in ("gpu", "cpu") and g["quant"] not in ("F32", "F16", "BF16")
+          and not str(g["name"]).lower().startswith("mmproj")]
+    if ok:
+        max(ok, key=lambda g: g["size"])["recommended"] = True
+    return out
 
 
 def _download_one(repo, path, dest, job):
@@ -4765,6 +4805,11 @@ form{border-top:1px solid var(--line);padding:.6rem 1.2rem;display:flex;gap:.5re
 .dials select{width:auto}.dials input[type=range]{width:140px}
 .note{font-size:12px;color:var(--mut);margin:.4rem 0}
 .empty{max-width:560px;margin:15vh auto;text-align:center;color:var(--mut)}
+ol.gs{list-style:none;padding:0;margin:.8rem 0 0;display:grid;gap:.55rem}ol.gs li{display:flex;gap:.6rem;align-items:flex-start;color:var(--fg)}
+ol.gs .ck{flex:none;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:12px;margin-top:1px}
+ol.gs li.done .ck{background:var(--ok);border-color:var(--ok);color:var(--accfg)}ol.gs li.done b{color:var(--mut)}
+.starters{display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.35rem}.starters button{text-align:left;font-weight:400;font-size:12.5px;line-height:1.35}
+@media(max-width:600px){.starters{grid-template-columns:1fr}.empty{margin:4vh auto}}
 .warnico{color:#e8890c;cursor:help;font-weight:700;margin-left:.3rem}
 .stat{font-size:11px;color:var(--mut);cursor:help}
 .route{font-size:11px;color:var(--mut);margin-top:.2rem}
@@ -4841,7 +4886,7 @@ section.chat{position:relative}
   <div id="tab-hub" style="display:none">
     <input id="q" placeholder="search GGUF models on Hugging Face">
     <button id="go" style="width:100%;margin-top:.4rem">Search</button>
-    <div id="hits" class="note"></div>
+    <div id="hits" class="note">Search by model name, e.g. <a href="#" data-qs="qwen2.5 instruct">qwen2.5 instruct</a>, <a href="#" data-qs="llama 3.1 instruct">llama 3.1 instruct</a>, <a href="#" data-qs="gemma">gemma</a>, <a href="#" data-qs="phi">phi</a>, <a href="#" data-qs="mistral instruct">mistral instruct</a>. Each file then shows whether it fits this computer, and ★ marks the one to start with.</div>
     <div id="jobs"></div>
   </div>
   <div id="tab-local" style="display:none">
@@ -5060,9 +5105,10 @@ addEventListener('hashchange',applyHash);
 // ---------- models
 let linked=[];
 async function refresh(){
-  models=await (await fetch('/api/models')).json();
+  models=await (await fetch('/api/models')).json(); modelsLoaded=true;
   try{ linked=await (await fetch('/api/links/models')).json(); }catch{ linked=[]; }
   renderModels(); renderPicker();
+  if(chat&&!chat.messages.length) emptyState();
 }
 function renderPicker(){
   const cur=$('#modelPick').value; const anyOk=models.some(m=>m.stats&&m.stats.eligible);
@@ -5083,17 +5129,20 @@ function renderModels(){
   const q=$('#filter').value.toLowerCase();
   const rows=models.map((m,i)=>[m,i]).filter(([m])=>!q||m.name.toLowerCase().includes(q)||(m.arch||'').includes(q));
   $('#list').innerHTML = rows.length ? rows.map(([m,i])=>{
-    const f=m.fit||{}; const cls=f.ok===false?'bad':(/tight/.test(f.note||'')?'warn':'');
+    const f=m.fit||{}; const cls=f.ok===false?'bad':(/tight/.test(f.note||'')||f.level==='partial'?'warn':'');
     return `<div class="m${sel&&sel.path===m.path?' sel':''}" data-i="${i}">
       <div class="mn">${esc(m.name)}${statBadge(m)}</div>
       <div class="mm">${m.quant?`<span class="tag">${esc(m.quant)}</span>`:''}${m.arch?`<span class="tag">${esc(m.arch)}</span>`:''}
         ${m.n_experts?`<span class="tag">MoE ${m.n_experts}</span>`:''}${m.mmproj?'<span class="tag">vision</span>':''}
-        <span class="tag">${human(m.size)}</span></div>
+        <span class="tag">${human(m.size)}</span>${fitBadge(f)}</div>
       <div class="mm ${cls}">${esc(f.note||'')}</div>${statLine(m)}</div>`;
   }).join('') : '<div class="note">No .gguf files found under the configured directories.</div>';
   $$('#list .m').forEach(el=>el.onclick=()=>pick(+el.dataset.i));
 }
 $('#filter').oninput=renderModels;
+// LM Studio-style: will it run here, and how.
+function fitBadge(f){ const t={gpu:['okc','Full GPU offload'],partial:['warn','Partial GPU offload'],cpu:['','Runs on the CPU'],no:['bad','Likely too large']}[f&&f.level];
+  return t?`<span class="tag ${t[0]}" title="${esc(f.note||'')}">${t[1]}</span>`:''; }
 function pick(i){
   sel=models[i]; renderModels(); $('#panel').style.display='block';
   const s=sel.settings||{};
@@ -5137,6 +5186,7 @@ async function status(){
   $('#dot').className='dot'+(s.running?' on':'');
   $('#st').textContent = s.running ? `${s.id||s.model}${s.vision?' · vision':''} · up ${s.uptime}s${s.idle_ttl?` · TTL ${s.idle_ttl}s`:''}` : 'no model loaded';
   $('#unload').disabled=!s.running; pickChanged(); sideEnv();
+  if(s.running!==status.was){ status.was=s.running; if(chat&&!chat.messages.length) emptyState(); }
   const hasLora=!!s.lora; $('#alpha').disabled=!hasLora;
   $('#adesc').textContent = hasLora ? s.lora.split('/').pop() : 'no adapter loaded';
   if(hasLora && document.activeElement!==$('#alpha')){ $('#alpha').value=s.lora_scale; $('#av').textContent=(+s.lora_scale).toFixed(2); }
@@ -5215,9 +5265,29 @@ function toolCard(box,t){
     const r=await post('/api/tools/approve',{key:t.key,allow:v!=='deny',remember:v}); if(!r.ok){ try{ alert((await r.json()).error) }catch{} } };
 }
 function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
+// What an empty chat shows: where you are in getting started, and something to ask.
+let modelsLoaded=false;
+const STARTERS=['Explain how a transformer decides the next word, in plain language.','Write a Python function that checks whether a string is a palindrome.',
+  'What were the main causes of the French Revolution?','Plan a three-day trip to Lisbon on a small budget.'];
+async function emptyState(){ const el=$('#log');
+  el.innerHTML='<div class="empty"><h2>Start a conversation</h2></div>';
+  let ready=null; try{ const r=await fetch('api/setup'); if(r.ok) ready=(await r.json()).ready; }catch{}
+  if(chat.messages.length) return;
+  const nModels=models.length, running=!!(status_&&status_.running);
+  const step=(done,title,body)=>`<li class="${done?'done':''}"><span class="ck" aria-hidden="true">${done?'✓':''}</span><div><b>${title}</b><div class="note" style="margin:.1rem 0 0">${body}</div></div></li>`;
+  const steps=[
+    ready?step(ready.server,'The engine (llama.cpp)',ready.server?'Ready.':'Not found yet. <a href="/setup#build">Setup → Build llama.cpp</a> makes it with one button, or point to an existing llama-server.'):'',
+    !modelsLoaded&&!nModels?step(false,'A model','Looking in your model folders…'):step(nModels>0,'A model',nModels?`${nModels} model${nModels>1?'s':''} in <a href="#models">My Models</a>.`:'<a href="#hub">Discover</a> finds and downloads one (each file says whether it fits this computer), or <a href="/setup#paths">add a folder</a> that already has .gguf files.'),
+    step(running,'Load it',running?`${esc(status_.id||status_.model)} is loaded.`:'Pick one in <a href="#models">My Models</a>, or just send a message: with the model picker on <i>auto</i>, Studio loads the best one for the question.'),
+  ].join('');
+  el.innerHTML=`<div class="empty" style="text-align:left;max-width:560px"><h2 style="text-align:center">Start a conversation</h2>
+    <ol class="gs">${steps}</ol>
+    <div class="note" style="margin-top:1rem">Try one:</div><div class="starters">${STARTERS.map((q,i)=>`<button type="button" data-st="${i}">${esc(q)}</button>`).join('')}</div>
+    <div class="note" style="margin-top:1rem">Other apps can use these models too: point any OpenAI client at <code>${esc(location.origin)}/v1</code>, or see <a href="/connect">Connect</a>. New here? The <b>?</b> button has a two-minute tour.</div></div>`;
+  el.querySelectorAll('[data-st]').forEach(b=>b.onclick=()=>{ $('#in').value=STARTERS[+b.dataset.st]; $('#in').focus(); sideSoon(); }); }
 function renderChat(){
   sideSoon(); $('#log').innerHTML='';
-  if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from My Models, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
+  if(!chat.messages.length){ emptyState(); return; }
   for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check,plugin_checks:m.plugin_checks,confidence:m.confidence}); b.root._msg=m; }
 }
 // ---------- per-reply check: token risk from the activation classifier
@@ -5442,6 +5512,8 @@ $('#export').onclick=()=>{
 };
 
 // ---------- hub
+$('#q').onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#go').click(); } };
+$$('[data-qs]').forEach(a=>a.onclick=e=>{ e.preventDefault(); $('#q').value=a.dataset.qs; $('#go').click(); });
 $('#go').onclick=async()=>{
   const q=$('#q').value.trim(); if(!q) return;
   $('#hits').textContent='searching…';
@@ -5457,8 +5529,8 @@ async function files(repo){
   if(r.error){ $('#hits').innerHTML='<span class="bad">'+esc(r.error)+'</span>'; return; }
   $('#hits').innerHTML=`<div class="note"><b>${esc(repo)}</b> · click a file to download</div>`+r.map((g,i)=>
     `<div class="m" data-i="${i}"><div class="mn">${esc(g.name)}</div>
-     <div class="mm">${g.quant?`<span class="tag">${esc(g.quant)}</span>`:''}${g.size?human(g.size):'size unknown'}
-     ${g.parts.length>1?`<span class="tag">${g.parts.length} parts</span>`:''}</div></div>`).join('');
+     <div class="mm">${g.recommended?'<span class="tag okc" title="the largest file that runs fully on this computer\'s GPU (or in RAM)">★ Recommended</span>':''}${g.quant?`<span class="tag">${esc(g.quant)}</span>`:''}${g.size?human(g.size):'size unknown'}
+     ${g.parts.length>1?`<span class="tag">${g.parts.length} parts</span>`:''}${fitBadge(g.fit)}</div>${g.fit&&g.fit.note?`<div class="mm ${g.fit.ok===false?'bad':g.fit.level==='partial'?'warn':''}">${esc(g.fit.note)}</div>`:''}</div>`).join('');
   $$('#hits .m[data-i]').forEach(el=>el.onclick=async()=>{ await post('/api/download',{repo,group:r[+el.dataset.i]}); jobs(); });
 }
 async function jobs(){
