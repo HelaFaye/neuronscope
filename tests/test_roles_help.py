@@ -53,7 +53,8 @@ def test_tour_stops_point_at_real_elements(studio_srv):
             ids = re.findall(r"#([\w-]+)", part)
             tab = re.findall(r"\[data-tab=(\w+)\]", part)
             if ids:
-                assert all(f'id="{i}"' in page for i in ids), (path, part, title)
+                # in the page's HTML, or made by the shared script (the sidebar)
+                assert all(f'id="{i}"' in page or f".id='{i}'" in page for i in ids), (path, part, title)
             elif tab:
                 assert f'data-tab="{tab[0]}"' in page, (path, part)
             else:

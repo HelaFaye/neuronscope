@@ -6,6 +6,19 @@ in your browser. Everything below is also scriptable, for people who prefer a
 shell and for automation; and the third column is what an AI agent (Cline,
 Claude Desktop) can do through NeuronScope's MCP server ([CONNECT.md](CONNECT.md)).
 
+Every page has the same sidebar on the left (a bar along the bottom on a
+phone, with the rest under **More**):
+
+| Sidebar | What it is |
+|---|---|
+| Chat, My Models, Discover, Docs, Tools | Studio's main page: chats; the models in your folders (load, settings, measured accuracy); finding and downloading models from Hugging Face; document collections; MCP tool servers |
+| Jobs, Projects, Workers, Lab, Review | longer runs; tasks for worker models and where they run; labs and 3D views; neuron behaviour over time |
+| Remote, Devices, Connect | models on other computers; pairing devices and linking Studios; using Studio from other apps |
+| Setup, Settings | paths, llama.cpp, hardware and health check; themes, workspaces, models per subject, tool approval, plugins |
+
+Wherever a file or folder is asked for, **Browse…** opens a picker on the
+computer Studio runs on, and lists of folders are edited one row at a time.
+
 Jobs on the Jobs page are the same scripts as the command-line column, built
 from typed forms: no free-form command line, values cannot smuggle in flags,
 each run keeps its log, and the form's fields are tested against the script's

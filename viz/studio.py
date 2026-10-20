@@ -4562,16 +4562,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <h1>NeuronScope Studio</h1>
   <div class="status"><span id="dot" class="dot"></span><span id="st">no model loaded</span></div>
   <span class="chip" id="api" title="OpenAI-compatible endpoint; click to copy"></span>
-  <a href="/remote" class="chip" style="margin-left:auto;text-decoration:none" title="this Studio controls other computers' models (LM Studio, Ollama, llama.cpp) through the NeuronScope Remote agent">Remote</a>
-  <a href="/link" class="chip" style="text-decoration:none" title="pair devices and link other machines' models">Link</a>
-  <a href="/lab" class="chip" style="text-decoration:none" title="labs, live and 3D views, pipeline dashboard">Lab</a>
-  <a href="/setup" class="chip" style="text-decoration:none" title="paths, building llama.cpp, hardware, health check">Setup</a>
-  <a href="/settings" class="chip" style="text-decoration:none" title="workspaces (folders), the model per subject, tool approval rules">Settings</a>
-  <a href="/connect" class="chip" style="text-decoration:none" title="settings for Cline, Claude Desktop and other apps: your models as their AI, NeuronScope as their tools (MCP)">Connect</a>
-  <a href="/review" class="chip" style="text-decoration:none" title="how each neuron behaves across tests, benchmarks and checked replies, by subject and over time">Review</a>
-  <a href="/projects" class="chip" style="text-decoration:none" title="split a project into tasks by skill, approve a plan, and review what worker models produce">Projects</a>
-  <a href="/workers" class="chip" style="text-decoration:none" title="where the project tasks run: worker models here, endpoints and remote hosts; pause, limit, route by subject, watch GPU temperatures">Workers</a>
-  <a href="/jobs" class="chip" style="text-decoration:none" title="evaluation, retraining and benchmark jobs">Jobs</a>
+  <span style="margin-left:auto"></span>
   <button id="theme" title="toggle theme">◐</button>
   <button id="unload" disabled>Unload</button>
 </header>
@@ -4580,7 +4571,7 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   <div class="tabs">
     <button data-tab="chats" class="pri">Chats</button>
     <button data-tab="local">Models</button>
-    <button data-tab="hub">Hub</button>
+    <button data-tab="hub">Discover</button>
     <button data-tab="docs">Docs</button>
     <button data-tab="tools">Tools</button>
   </div>
@@ -4801,8 +4792,10 @@ $('#api').onclick=async()=>{try{await navigator.clipboard.writeText(location.ori
 
 // tabs
 function showTab(name){ $$('.tabs button').forEach(x=>x.classList.toggle('pri',x.dataset.tab===name));
+  // The sidebar shows which tab is open.
+  window.NS_TAB=name; document.dispatchEvent(new CustomEvent('ns-tab',{detail:name}));
   ['chats','local','hub','docs','tools'].forEach(t=>$('#tab-'+t).style.display=t===name?'block':'none'); }
-$$('.tabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+$$('.tabs button').forEach(b=>b.onclick=()=>{ showTab(b.dataset.tab); history.replaceState(null,'','#'+(b.dataset.tab==='local'?'models':b.dataset.tab)); });
 // Links from other pages: /#tools, /#models, /#hub, /#docs, /#chats, or
 // /#model=<id>&field=classifier to open a model's settings at that field.
 const TAB_ALIAS={models:'local',local:'local',chats:'chats',hub:'hub',docs:'docs',tools:'tools'};
@@ -4963,7 +4956,7 @@ function toolCard(box,t){
 function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
 function renderChat(){
   $('#log').innerHTML='';
-  if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from the Models tab, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
+  if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from My Models, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
   for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check,plugin_checks:m.plugin_checks,confidence:m.confidence}); b.root._msg=m; }
 }
 // ---------- per-reply check: token risk from the activation classifier
@@ -5200,7 +5193,7 @@ async function mcp(reload){
 }
 $('#mcpreload').onclick=()=>mcp(true);
 
-refresh(); (function hashWhenReady(n){ if(models.length||n>40) applyHash(); else setTimeout(()=>hashWhenReady(n+1),150); })(0); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
+refresh(); if(TAB_ALIAS[location.hash.slice(1)]) applyHash(); (function hashWhenReady(n){ if(models.length||n>40) applyHash(); else setTimeout(()=>hashWhenReady(n+1),150); })(0); status(); presets(); jobs(); loadChats(); renderChat(); colls(); mcp(); gpus(); setInterval(status,4000);
 // First run: point at Setup while llama-server or models are missing (owner only; devices get 403).
 fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server&&s.ready.models)) return;
   const miss=[!s.ready.server&&'llama-server',!s.ready.models&&'models'].filter(Boolean).join(' and ');
@@ -5211,6 +5204,7 @@ fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server
 </script>"""
 from ui_links import inject as _inject_links  # noqa: E402
 PAGE = _inject_links(PAGE)
+LINK_PAGE = _inject_links(LINK_PAGE)
 
 
 

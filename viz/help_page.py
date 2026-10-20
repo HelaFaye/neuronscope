@@ -88,6 +88,15 @@ def render(md: str) -> str:
     return "\n".join(out)
 
 
+def _ui_js() -> str:
+    """The sidebar, tour and ? button every Studio page shares."""
+    try:
+        import ui_links
+    except ImportError:
+        return ""
+    return ui_links.js()
+
+
 def page(name: str) -> str | None:
     if not NAME.match(name):
         return None
@@ -113,4 +122,4 @@ pre{{font:13px/1.45 ui-monospace,monospace;background:var(--code);padding:.7rem;
 th{{color:var(--mut);font-weight:500}}details{{margin:.5rem 0}}
 </style>
 <header><a href="/">← Studio</a><details style="display:inline"><summary style="display:inline;cursor:pointer;color:var(--acc)">All help pages</summary><div style="margin-top:.4rem">{index}</div></details></header>
-<main>{body}</main>"""
+<main>{body}</main>""" + "<script>" + _ui_js() + "</script>"

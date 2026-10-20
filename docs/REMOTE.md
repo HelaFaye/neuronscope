@@ -30,7 +30,7 @@ Which computer controls and which does the work, for every connection and port: 
 
 ## Adding a host
 
-Open Studio → **Remote** (the *Remote* chip in the header) → **Add a host**.
+Open Studio → **Remote** (*Remote* in the sidebar) → **Add a host**.
 
 1. **Put the agent on the host.** Click **Download NeuronScope Remote**,
    copy the zip to the host, and start it:

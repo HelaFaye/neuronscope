@@ -1,7 +1,7 @@
 # Workers: where project tasks run, and how work is spread
 
 Studio's director splits a project into tasks (Projects page). The **Workers**
-page (`/workers`, *Workers* in the header) shows where those tasks run and
+page (`/workers`, *Workers* in the sidebar) shows where those tasks run and
 lets you steer them.
 
 ## Who does what

@@ -51,6 +51,84 @@ function nsChart(){ try{ return JSON.parse(localStorage.getItem('ns-chart')||'nu
 function nsThemeName(){ try{ return localStorage.getItem('ns-theme')||'midnight'; }catch(e){ return 'midnight'; } }
 async function nsCycleTheme(){ const j=await (await fetch('/api/themes')).json(); const names=Object.keys(j.themes);
   const cur=nsThemeName(); const nx=names[(names.indexOf(cur)+1)%names.length]; nsApplyTheme(nx,j.themes[nx]); return nx; }
+// ---- the sidebar on every page: what Studio does, in the order people use it (LM Studio-style)
+const NS_ICON={chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
+  search:'<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',doc:'<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>',
+  plug:'<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/>',play:'<path d="M7 4l13 8-13 8z"/>',
+  tasks:'<path d="M10 6h10M10 12h10M10 18h10M4 6l1.2 1.2L7.5 5M4 12l1.2 1.2L7.5 11M4 18l1.2 1.2L7.5 17"/>',
+  cpu:'<path d="M7 7h10v10H7zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>',
+  flask:'<path d="M9 3h6M10 3v6l-5 10a1.2 1.2 0 0 0 1 2h12a1.2 1.2 0 0 0 1-2l-5-10V3M7.5 15h9"/>',
+  grid:'<path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/>',
+  globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3.5 3.5 3.5 14.5 0 18M12 3c-3.5 3.5-3.5 14.5 0 18"/>',
+  link:'<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  share:'<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 10.9l7.4-3.7M8.3 13.1l7.4 3.7"/>',
+  wrench:'<path d="M14.5 4.5a4.5 4.5 0 0 0 5 6L11 19a2.1 2.1 0 0 1-3-3l8.5-8.5a4.5 4.5 0 0 1-2-3z"/>',
+  gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+  more:'<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>'};
+// tab: the Studio-page tab the item opens. mobile: also on the phone bar.
+const NS_NAV=[
+  {href:'/#chats',tab:'chats',label:'Chat',icon:'chat',tip:'Chat with your models',mobile:1},
+  {href:'/#models',tab:'local',label:'My Models',icon:'box',tip:'Models on this computer: load, settings, measured accuracy',mobile:1},
+  {href:'/#hub',tab:'hub',label:'Discover',icon:'search',tip:'Find and download GGUF models from Hugging Face',mobile:1},
+  {href:'/#docs',tab:'docs',label:'Docs',icon:'doc',tip:'Document collections replies can cite'},
+  {href:'/#tools',tab:'tools',label:'Tools',icon:'plug',tip:'MCP servers whose tools models may call'},
+  {sep:1},
+  {href:'/jobs',label:'Jobs',icon:'play',tip:'Evaluation, retraining and benchmark jobs',mobile:1},
+  {href:'/projects',label:'Projects',icon:'tasks',tip:'Split a project into tasks for worker models'},
+  {href:'/workers',label:'Workers',icon:'cpu',tip:'Where tasks run; GPU temperatures'},
+  {href:'/lab',label:'Lab',icon:'flask',tip:'Labs, live and 3D views'},
+  {href:'/review',label:'Review',icon:'grid',tip:'How neurons behave across tests, by subject and over time'},
+  {sep:1},
+  {href:'/remote',label:'Remote',icon:'globe',tip:'Models on other computers (NeuronScope Remote)'},
+  {href:'/link',label:'Devices',icon:'link',tip:'Pair devices; link other Studios'},
+  {href:'/connect',label:'Connect',icon:'share',tip:'Use these models and tools from Cline, Claude and other apps'},
+  {sep:1,bottom:1},
+  {href:'/setup',label:'Setup',icon:'wrench',tip:'Paths, building llama.cpp, hardware, health check',bottom:1},
+  {href:'/settings',label:'Settings',icon:'gear',tip:'Themes, workspaces, models per subject, tool approval, plugins',bottom:1}];
+function nsSvg(n){ return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NS_ICON[n]||''}</svg>`; }
+function nsNavActive(it){ const here=location.pathname.replace(/\/+$/,'')||'/';
+  if(it.tab) return here==='/'&&(window.NS_TAB||'chats')===it.tab;
+  return here===it.href||here.startsWith(it.href+'/'); }
+function nsRailDraw(){ const r=document.getElementById('ns-rail'); if(!r) return;
+  r.querySelectorAll('[data-nav]').forEach(a=>{ const it=NS_NAV[+a.dataset.nav]; const on=nsNavActive(it); a.classList.toggle('on',on); if(on) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current'); });
+  const b=document.getElementById('ns-bar'); if(b) b.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('on',nsNavActive(NS_NAV[+a.dataset.nav]))); }
+function nsRail(){ if(window.self!==window.top||document.getElementById('ns-rail')||/^\/(pair|login)/.test(location.pathname)) return;
+  const st=document.createElement('style'); st.textContent=`
+#ns-rail{position:fixed;left:0;top:0;bottom:0;width:76px;z-index:8000;background:var(--panel,#1d1d1b);border-right:1px solid var(--line,#33332f);display:flex;flex-direction:column;align-items:stretch;padding:.35rem .3rem;gap:0;overflow-y:auto;font:500 10.5px/1.15 ui-sans-serif,system-ui}
+#ns-rail .brand{display:flex;justify-content:center;margin:.1rem 0 .3rem;color:var(--acc,#6f93ff);text-decoration:none}
+#ns-rail a.it,#ns-bar a.it,#ns-more a.it{display:flex;flex-direction:column;align-items:center;gap:.15rem;padding:.3rem .1rem;border-radius:8px;color:var(--mut,#9a9a94);text-decoration:none;text-align:center}
+#ns-rail a.it:hover,#ns-bar a.it:hover,#ns-more a.it:hover{background:var(--code,#262624);color:var(--fg,#ececea)}
+#ns-rail a.it.on,#ns-bar a.it.on{background:color-mix(in srgb,var(--acc,#6f93ff) 18%,transparent);color:var(--fg,#ececea)}
+#ns-rail a.it.on svg,#ns-bar a.it.on svg{color:var(--acc,#6f93ff)}
+#ns-rail a.it:focus-visible,#ns-bar a.it:focus-visible{outline:2px solid var(--acc,#6f93ff);outline-offset:-2px}
+#ns-rail hr{border:none;border-top:1px solid var(--line,#33332f);margin:.25rem .5rem;width:auto}
+#ns-rail .brand svg{width:24px;height:24px}
+#ns-rail .grow{flex:1}
+body.ns-railed{padding-left:76px}
+body.ns-railed>header>a{display:none}
+body.ns-railed aside>.tabs{display:none}
+#ns-bar{display:none}
+@media(max-width:700px){#ns-rail{display:none}body.ns-railed{padding-left:0;padding-bottom:58px}
+  #ns-bar{display:flex;position:fixed;left:0;right:0;bottom:0;height:58px;z-index:8000;background:var(--panel,#1d1d1b);border-top:1px solid var(--line,#33332f);font:500 10.5px/1.1 ui-sans-serif,system-ui;padding:0 .2rem}
+  #ns-bar a.it{flex:1;justify-content:center;padding:.3rem 0;margin:.25rem .1rem}
+  #ns-more{position:fixed;left:8px;right:8px;bottom:66px;z-index:9100;background:var(--panel,#1d1d1b);border:1px solid var(--line,#33332f);border-radius:12px;padding:.4rem;display:grid;grid-template-columns:repeat(4,1fr);gap:.2rem;box-shadow:0 8px 30px rgba(0,0,0,.4);font:500 11px/1.15 ui-sans-serif,system-ui}
+  #ns-more[hidden]{display:none}}`;
+  document.head.appendChild(st);
+  const item=(it,i)=>`<a class="it" href="${it.href}" data-nav="${i}" title="${nsEsc(it.tip)}">${nsSvg(it.icon)}<span>${nsEsc(it.label)}</span></a>`;
+  let top='',bot='';
+  NS_NAV.forEach((it,i)=>{ const h=it.sep?'<hr>':item(it,i); if(it.bottom) bot+=h; else top+=h; });
+  const r=document.createElement('nav'); r.id='ns-rail'; r.setAttribute('aria-label','Studio');
+  r.innerHTML=`<a class="brand" href="/#chats" title="NeuronScope Studio" aria-label="NeuronScope Studio home"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="6" r="1.6"/><circle cx="19.5" cy="6" r="1.6"/><circle cx="4.5" cy="18" r="1.6"/><circle cx="19.5" cy="18" r="1.6"/><path d="M6 6.8l3.6 3.4M18 6.8l-3.6 3.4M6 17.2l3.6-3.4M18 17.2l-3.6-3.4"/></svg></a>${top}<div class="grow"></div>${bot}`;
+  const bar=document.createElement('nav'); bar.id='ns-bar'; bar.setAttribute('aria-label','Studio');
+  bar.innerHTML=NS_NAV.map((it,i)=>it.mobile?item(it,i):'').join('')+`<a class="it" href="#" data-more="1" aria-haspopup="true">${nsSvg('more')}<span>More</span></a>`;
+  const more=document.createElement('div'); more.id='ns-more'; more.hidden=true;
+  more.innerHTML=NS_NAV.map((it,i)=>it.sep||it.mobile?'':item(it,i)).join('');
+  document.body.prepend(r); document.body.append(bar,more); document.body.classList.add('ns-railed');
+  bar.querySelector('[data-more]').onclick=e=>{ e.preventDefault(); more.hidden=!more.hidden; };
+  more.onclick=()=>more.hidden=true;
+  addEventListener('hashchange',nsRailDraw); document.addEventListener('ns-tab',e=>{ window.NS_TAB=e.detail; nsRailDraw(); });
+  nsRailDraw(); }
+(function(){ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',nsRail); else nsRail(); })();
 // ---- files and folders on Studio's computer: a browse dialog, path fields, per-entry lists
 function nsEsc(x){ return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function nsRecent(kind){ try{ return JSON.parse(localStorage.getItem('ns-recent-'+kind)||'[]'); }catch(e){ return []; } }
@@ -147,7 +225,7 @@ function nsEnhancePickers(root){ (root||document).querySelectorAll('input[data-p
 // ---- the tour: optional, offered once, restartable from the ? button on every page
 const NS_TOUR=[
  {path:'/', sel:'header', title:'Welcome to NeuronScope Studio', body:'Studio runs your local models, lets you chat with them, and shows what happens inside them: which neurons fire, and how likely a reply is to be a confident guess. Two minutes, ten stops. Skip any time.'},
- {path:'/', sel:'[data-tab=local]', title:'Your models', body:'Every GGUF model in your folders. Pick one to load it, see its measured accuracy per subject (the radar), and set its engine options.'},
+ {path:'/', sel:'#ns-rail', title:'The sidebar', body:'Everything Studio does is one click away here, on every page. My Models lists the GGUF models in your folders: pick one to load it, see its measured accuracy and set its options. Discover finds and downloads more. Then Docs and Tools; then Jobs, Projects, Workers, Lab and Review; then other computers and apps. Setup and Settings sit at the bottom.'},
  {path:'/', sel:'#in', title:'Chat', body:'Ask anything. The model picker below chooses which model answers; auto picks the one with the best measured record for the question.'},
  {path:'/', sel:'label:has(#autoCheck),label:has(#confOn)', title:'How sure was it?', body:'With confidence on, Studio marks the words the model was unsure about. check replies scores each reply with the model\'s hallucination classifier and opens a 3D view of its neurons.'},
  {path:'/setup', sel:'#status-card', title:'Setup', body:'What is ready and the one thing to do next. Build llama.cpp here with one button, add model folders, and run the health check when something seems off.'},
@@ -189,9 +267,10 @@ function nsTourShow(){ const t=nsTourGet(); if(!t||t.state!=='running') return; 
   card.onkeydown=e=>{ if(e.key==='Escape') nsTourEnd('skipped'); if(e.key==='ArrowRight') go(1); if(e.key==='ArrowLeft'&&t.i) go(-1); }; }
 function nsHelpButton(){ if(document.getElementById('ns-help')||window.self!==window.top) return;
   const b=document.createElement('button'); b.id='ns-help'; b.textContent='?'; b.title='Tour and help'; b.setAttribute('aria-label','Tour and help');
-  b.style.cssText='position:fixed;right:14px;bottom:'+(location.pathname==='/'?'150':'14')+'px;z-index:9000;width:34px;height:34px;border-radius:50%;border:1px solid var(--line,#33332f);background:var(--panel,#1d1d1b);color:var(--fg,#ececea);font:700 15px ui-sans-serif,system-ui;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.25)';
+  const lift=innerWidth<=700?58:0;
+  b.style.cssText='position:fixed;right:14px;bottom:'+((location.pathname==='/'?150:14)+lift)+'px;z-index:9000;width:34px;height:34px;border-radius:50%;border:1px solid var(--line,#33332f);background:var(--panel,#1d1d1b);color:var(--fg,#ececea);font:700 15px ui-sans-serif,system-ui;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.25)';
   const m=document.createElement('div'); m.id='ns-help-menu'; m.hidden=true;
-  m.style.cssText='position:fixed;right:14px;bottom:'+(location.pathname==='/'?'190':'54')+'px;z-index:9000;background:var(--panel,#1d1d1b);color:var(--fg,#ececea);border:1px solid var(--line,#33332f);border-radius:8px;padding:.35rem;font:13px ui-sans-serif,system-ui;box-shadow:0 4px 16px rgba(0,0,0,.3)';
+  m.style.cssText='position:fixed;right:14px;bottom:'+((location.pathname==='/'?190:54)+lift)+'px;z-index:9000;background:var(--panel,#1d1d1b);color:var(--fg,#ececea);border:1px solid var(--line,#33332f);border-radius:8px;padding:.35rem;font:13px ui-sans-serif,system-ui;box-shadow:0 4px 16px rgba(0,0,0,.3)';
   const here=NS_TOUR.findIndex(s=>s.path===location.pathname);
   m.innerHTML=`<a href="#" data-h="tour" style="display:block;padding:.3rem .6rem;color:inherit">Take the tour</a>${here>=0?'<a href="#" data-h="here" style="display:block;padding:.3rem .6rem;color:inherit">This page in the tour</a>':''}<a href="/help/GETTING_STARTED" style="display:block;padding:.3rem .6rem;color:inherit">Getting started</a><a href="/help/UI_AND_CLI" style="display:block;padding:.3rem .6rem;color:inherit">Where everything is</a><a href="/help/GLOSSARY" style="display:block;padding:.3rem .6rem;color:inherit">Glossary</a><a href="/help/ROLES" style="display:block;padding:.3rem .6rem;color:inherit">Roles and ports</a>`;
   b.onclick=()=>{ m.hidden=!m.hidden; };

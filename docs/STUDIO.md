@@ -280,7 +280,7 @@ should only be used inside a VPN. Tokens for linked hosts are kept in
 
 ## Jobs
 
-`/jobs` (the **Jobs** link in the header) starts evaluation, retraining and
+`/jobs` (**Jobs** in the sidebar) starts evaluation, retraining and
 benchmark runs without a terminal: TestQA, deficit datasets, SWE-bench training
 data, fine-tuning, merge and GGUF conversion, SWE-bench predict / evaluate /
 import, LiveBench and CLIP_benchmark. Each job is a fixed script with a form of
