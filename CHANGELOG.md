@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added (installing)
+- A cross-platform installer wizard (`scripts/installer.py`, standard
+  library only), opened by double-clicking `Install NeuronScope.bat`
+  (Windows), `Install NeuronScope.command` (macOS) or `install-gui.sh`
+  (Linux).
+  - It finds a suitable Python first, and offers or explains how to get
+    one.
+  - It shows what it found and each platform's peculiarities.
+  - It picks the PyTorch build per GPU (CUDA per generation, ROCm per AMD
+    target, Metal, CPU, or none), installs with live output and advice on
+    failure, smoke-tests the GPU, and adds a Start menu, Applications or
+    app-menu shortcut.
+  - `--yes` and `--check` run it in a terminal. `scripts/torch_smoke.py` is
+    the shared GPU check.
+- Batch files are stored with Windows line endings (`.gitattributes`).
+
 ### Added (roles and help)
 - docs/ROLES.md: every connection with its controller and the side that
   does the work, every default port and whether it speaks MCP, and who may

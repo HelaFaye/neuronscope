@@ -21,17 +21,48 @@ only the wall-clock timeout applies.
 
 ## The short way
 
+Get NeuronScope (clone it, or *Download ZIP* and unpack it), then
+double-click the installer for your system:
+
+| system | double-click | if it will not start |
+|---|---|---|
+| Windows | `Install NeuronScope.bat` | it offers to install Python with winget, or opens python.org |
+| macOS | `Install NeuronScope.command` | right-click → Open the first time (it is a downloaded script); needs Python 3.10+ from python.org or Homebrew, since the built-in one is 3.9 |
+| Linux | `install-gui.sh` | it prints the package to install if Python's venv module is missing |
+
+The installer opens in your browser:
+1. **This computer**: the system, Python, GPUs and free space, and anything
+   peculiar about them. It checks for:
+   - the Microsoft Store's Python;
+   - long Windows paths;
+   - an Intel Mac, which has no current PyTorch;
+   - an AMD GPU on Windows, which has no ROCm PyTorch;
+   - membership of the `video` and `render` groups for AMD on Linux;
+   - an RDNA4 card, which needs ROCm 7 and no `HSA_OVERRIDE_GFX_VERSION`;
+   - older NVIDIA cards, which need the CUDA 12.6 wheels.
+2. **Choices**: the PyTorch build recommended for this computer, or NVIDIA,
+   AMD, CPU only, or none (Studio, TestQA, Projects and the llama.cpp path
+   don't need it); the extras; a shortcut (Start menu, Applications folder,
+   app menu); and where to install.
+3. **Installing**: each step with its output. A failed step says what to
+   try, and *Install* again resumes quickly.
+4. **Done**: *Open NeuronScope* starts Studio on its Setup page, which
+   builds llama.cpp (or uses one you have) and finds your models. A short
+   tour starts the first time.
+
+Terminal instead:
+
 ```bash
-git clone <this repo> neuronscope && cd neuronscope
-./install.sh            # add --no-torch for a lighter install without PyTorch
-./neuronscope           # or start "NeuronScope" from the app menu
+python3 scripts/installer.py --yes            # the same, with the recommended choices
+python3 scripts/installer.py --check          # what it found and would do; installs nothing
+python3 scripts/installer.py --yes --torch none
+./install.sh                                  # the original Linux/macOS script, still supported
 ```
 
-Studio opens in your browser on its **Setup** page: build llama.cpp with one
-button (or point it at an existing build), add your models folder, run the
-health check. Everything after that is in the browser; see
-[UI_AND_CLI.md](UI_AND_CLI.md) for where each feature lives, and the steps
-below for doing the same from a terminal.
+Then start it from the shortcut, `NeuronScope.bat` or `./neuronscope`.
+Everything after that is in the browser; see [UI_AND_CLI.md](UI_AND_CLI.md)
+for where each feature lives, and the steps below for doing the same from
+a terminal.
 
 ## 1. Install
 

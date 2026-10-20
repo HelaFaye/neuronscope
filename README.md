@@ -42,9 +42,15 @@ New to the terms (GGUF, CETT, H-Neurons, abstention, MCP…)? The
 
 ## Quick start
 
+Double-click the installer for your system: **Install NeuronScope.bat**
+(Windows), **Install NeuronScope.command** (macOS) or **install-gui.sh**
+(Linux). A wizard opens in your browser, checks the computer, picks the
+right PyTorch build for your GPU (or none), installs, and adds a shortcut
+([details](docs/GETTING_STARTED.md#the-short-way)). In a terminal:
+
 ```bash
-./install.sh            # picks CUDA / ROCm / MPS / CPU PyTorch, adds NeuronScope to the app menu
-./neuronscope           # or the app menu: starts Studio and opens it in your browser
+python3 scripts/installer.py --yes   # or ./install.sh on Linux and macOS
+./neuronscope                        # or the shortcut: starts Studio and opens it in your browser
 ```
 
 From there everything is in the browser: **Setup** builds llama.cpp and finds
