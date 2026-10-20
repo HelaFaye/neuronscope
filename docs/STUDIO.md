@@ -93,6 +93,27 @@ there and in the model list; hovering explains why and how to add stats. Each
 reply notes which model answered, and for auto picks, why (e.g.
 `auto → coder-7b: subject code (97%) -> expected +0.56`).
 
+## Context usage and outputs
+
+The strip above the chat shows the loaded model and how much of its context
+window the next request would take. Click it (or Tab to it and press Enter)
+for three panes:
+
+- **Environment**: the model, its context window and what it was trained
+  for, GPU layers, vision, LoRA, workspace and computer, with a link to the
+  model's settings.
+- **Context usage**: the system prompt, documents (the passages the last
+  reply cited, when a collection is picked), tool definitions (when tools are
+  on) and messages, including what you are typing, plus the room kept for the
+  reply (the preset's max tokens). Counts come from the running engine's
+  tokenizer, or are estimated at about 4 characters a token when no model is
+  loaded. The chat template adds a little. Past 75% the count turns amber;
+  when the next request would not fit, the strip says so. The last reply's
+  measured prompt and reply tokens are shown next to it. `POST /api/context`
+  returns the same counts.
+- **Outputs**: what this chat produced: 3D views and neuron review links of
+  checked replies, tool calls, cited sources, plugin checks, and Export .md.
+
 ## Rolling stats
 
 Stats live in `~/.neuronscope/stats/<model id>.jsonl` (append-only) and are
@@ -172,8 +193,14 @@ python scripts/rag.py search --collection notes "how does auto routing pick a mo
 
 ## Tools (MCP)
 
-Studio connects to the MCP servers listed in `~/.neuronscope/mcp.json`
-(`--mcp-config`), in the format LM Studio and Claude Desktop use:
+Add, edit, test, turn off and remove MCP servers under **Settings →
+Connectors** (the Tools tab links there). **+ Add connector** asks for a name
+and either the server's URL, with an optional sign-in (a token file, an
+environment variable or headers), or the program to start with its
+arguments and environment. Saved secrets are never sent back to the page:
+they show as dots, and leaving them as dots keeps them. The page writes
+`~/.neuronscope/mcp.json` (`--mcp-config`), and the file can be edited by
+hand too. It uses the format LM Studio and Claude Desktop use:
 
 ```json
 {"mcpServers": {

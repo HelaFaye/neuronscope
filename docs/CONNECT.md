@@ -119,6 +119,31 @@ Claude Desktop:
                                 "args": ["/path/to/neuronscope/scripts/ns_mcp.py", "--studio", "http://127.0.0.1:7870"]}}}
 ```
 
+If Studio needs a token, add `"--token-file", "/path/to/token"` to `args`.
+
+## Claude Code
+
+The Connect page shows both commands with this Studio's address filled in:
+
+```bash
+# over HTTP, while Studio runs (add --header "Authorization: Bearer <token>" if Studio has a token)
+claude mcp add --transport http --scope user neuronscope http://127.0.0.1:7870/mcp
+# or let Claude Code start the bridge itself
+claude mcp add --scope user neuronscope -- /path/to/neuronscope/venv/bin/python /path/to/neuronscope/scripts/ns_mcp.py --studio http://127.0.0.1:7870
+```
+
+`claude mcp list` (or `/mcp` inside Claude Code) shows whether it connected.
+
+## claude.ai (web and mobile)
+
+Not directly. Custom connectors on claude.ai (*Settings → Connectors → Add
+custom connector*) are reached from Anthropic's servers, not from your
+computer. The URL has to be public HTTPS that anyone on the internet can
+reach, and sign-in goes through OAuth. Studio signs apps in with a bearer
+token, and that dialog has no field for one. Opening Studio to the
+internet without sign-in would give your models and tools to anyone. Use
+Claude Desktop or Claude Code on a computer that can reach Studio instead.
+
 ## Other apps
 
 Open WebUI, Continue, LibreChat or your own scripts: base URL

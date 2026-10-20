@@ -25,6 +25,8 @@ ol{margin:.3rem 0 .3rem 1.2rem;padding:0}
 .role{border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;background:var(--bg)}.role.me{border:2px solid var(--acc)}
 .arrow{font-size:20px;color:var(--mut)}
 @media(max-width:800px){.roles{grid-template-columns:1fr}.arrow{justify-self:center;transform:rotate(90deg)}}li{margin:.2rem 0}
+.ctabs{display:flex;gap:.3rem;margin:.5rem 0;flex-wrap:wrap}.ctabs button{border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:999px;padding:.25rem .8rem;cursor:pointer;font:500 13px ui-sans-serif,system-ui}
+.ctabs button.on{border-color:var(--acc);color:var(--acc)}#ccHttp,#ccStdio{white-space:pre-wrap;word-break:break-all}ol.steps{margin:.4rem 0 .4rem 1.1rem;padding:0}ol.steps li{margin:.2rem 0}
 .tok{background:color-mix(in srgb,var(--ok) 15%,transparent);border:1px solid var(--ok);border-radius:6px;padding:.6rem;margin-top:.5rem;word-break:break-all}
 </style>
 <header><h1>Studio · Connect</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
@@ -52,9 +54,24 @@ ol{margin:.3rem 0 .3rem 1.2rem;padding:0}
 <div class="note">Or have NeuronScope write it for you: <code>python scripts/ns_connect.py cline --write</code> (add <code>--editor cursor</code>, <code>codium</code>…). It keeps a backup and touches only the neuronscope entry.</div>
 </section>
 
-<section class="card"><h2>Claude Desktop</h2>
-<div class="note">Settings → Developer → Edit Config (claude_desktop_config.json), then restart Claude Desktop. Or <code>python scripts/ns_connect.py claude-desktop --write</code>.</div>
-<pre id="claude"></pre></section>
+<section class="card" id="claude"><h2>Claude</h2>
+<div class="note">Give Claude NeuronScope's tools. Claude is the controller; the tools run on this Studio. Which Claude you use decides how:</div>
+<div class="ctabs" role="tablist"><button role="tab" data-ct="desktop" class="on">Claude Desktop</button><button role="tab" data-ct="code">Claude Code</button><button role="tab" data-ct="web">claude.ai (web, mobile)</button></div>
+<div data-cp="desktop">
+<ol class="steps"><li>In Claude Desktop open <b>Settings → Developer → Edit Config</b>. That opens <code>claude_desktop_config.json</code>.</li>
+<li>Paste this inside <code>"mcpServers"</code> (or have NeuronScope write it: <code>python scripts/ns_connect.py claude-desktop --write</code>, which keeps a backup).</li></ol>
+<pre id="claudeDesk"></pre>
+<ol class="steps" start="3"><li>Quit Claude Desktop completely and start it again. NeuronScope's tools appear under the tools (slider) button in a chat.</li>
+<li>Claude asks before it uses a tool; Studio's own <a href="/settings#tools">Tool approval</a> applies on top.</li></ol>
+<div class="note" id="deskTok"></div></div>
+<div data-cp="code" hidden>
+<div class="note">Run one of these in a terminal. <code>--scope user</code> makes it available in every project; leave it out for this project only. Check with <code>claude mcp list</code>, or <code>/mcp</code> inside Claude Code.</div>
+<h3>Over HTTP (Studio must be running)</h3><pre id="ccHttp"></pre>
+<h3>Or let Claude Code start the bridge itself</h3><pre id="ccStdio"></pre></div>
+<div data-cp="web" hidden>
+<div class="note"><b>Not with this Studio as it is, and that is deliberate.</b> claude.ai custom connectors (Settings → Connectors → <i>Add custom connector</i>) are reached from Anthropic's servers, not from your computer. So the address must be a public HTTPS URL that anyone on the internet can reach, and sign-in has to work through OAuth. Studio signs apps in with its own token, which that dialog has no place for. Putting Studio on the public internet without a sign-in would hand your models and tools to anyone who finds the address.</div>
+<div class="note">Use Claude Desktop or Claude Code on a computer that can reach this Studio (this one, or one on your LAN or VPN). Claude Desktop's own connectors list then shows NeuronScope too.</div></div>
+</section>
 
 <section class="card"><h2>Any OpenAI-compatible app</h2><table id="oa"></table>
 <div class="note">Open WebUI, Continue, LibreChat, scripts with the <code>openai</code> package… Model ids are in Studio's model list; <code>auto</code> picks the model with the best measured record for each prompt.</div></section>
@@ -74,11 +91,15 @@ function modelRow(tbl,models){const tr=[...tbl.rows].find(r=>r.cells[0].textCont
   const b=copyBtn(''); b.onclick=async()=>{try{await navigator.clipboard.writeText(sel.value);b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)}catch{}};
   td.append(sel,b); td.insertAdjacentHTML('beforeend','<div class="note">auto picks per prompt from measured results</div>')}
 function block(el,obj){const inner=obj.mcpServers?JSON.stringify(obj.mcpServers,null,2).replace(/^\{\n|\n\}$/g,''):JSON.stringify(obj,null,2);el.textContent=JSON.stringify(obj,null,2);el.before(copyBtn(inner))}
+function line(el,text){el.textContent=text;el.before(copyBtn(text))}
+document.querySelectorAll('[data-ct]').forEach(b=>b.onclick=()=>{ document.querySelectorAll('[data-ct]').forEach(x=>{ x.classList.toggle('on',x===b); x.setAttribute('aria-selected',x===b); });
+  document.querySelectorAll('[data-cp]').forEach(p=>p.hidden=p.dataset.cp!==b.dataset.ct); });
 (async()=>{
   const r=await fetch('api/connect'); const j=await r.json();
   if(!r.ok){document.querySelector('main').innerHTML='<div class="card">'+esc(j.error||r.status)+'</div>';return}
   table($('#prov'),j.cline_provider); modelRow($('#prov'),j.models); block($('#mcphttp'),j.cline_mcp_http); block($('#mcpstdio'),j.cline_mcp_stdio);
-  block($('#claude'),j.claude_desktop); table($('#oa'),{'Base URL':j.openai.base_url,'API key':j.openai.api_key,'Model':j.openai.model});
+  block($('#claudeDesk'),j.claude_desktop); line($('#ccHttp'),j.claude_code.http); line($('#ccStdio'),j.claude_code.stdio);
+  $('#deskTok').innerHTML=j.token_required?'This Studio needs a token: add <code>"--token-file", "/path/to/a/file/with/the/token"</code> to <code>args</code> (<b>Create a token for an app</b> above makes one; save it in a file only you can read).':''; table($('#oa'),{'Base URL':j.openai.base_url,'API key':j.openai.api_key,'Model':j.openai.model});
   $('#auth').innerHTML=j.token_required
     ?`This Studio requires a token. Use the owner token for full access (jobs, projects), or create a separate one for an app: it can chat, check replies and read status, and you can revoke it under Link. <button class="pri" id="mk">Create a token for an app</button><div id="tokout"></div>`
     :`This Studio is on ${esc(location.host)} with no token: apps on this computer need no key (Cline still wants some text in API Key; any will do).`;

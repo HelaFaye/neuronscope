@@ -398,3 +398,143 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ------------------------------------------------------------ editing mcp.json (Studio's Connectors page)
+MASK = "••••••"
+SERVER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")
+
+
+def read_config(path: str | Path) -> dict:
+    p = Path(path).expanduser()
+    if not p.exists():
+        return {"mcpServers": {}}
+    cfg = json.loads(p.read_text() or "{}")
+    if not isinstance(cfg, dict):
+        raise ValueError(f"{p} is not a JSON object")
+    if "mcpServers" not in cfg:                     # the bare {name: spec} form: keep it readable
+        cfg = {"mcpServers": {k: v for k, v in cfg.items() if isinstance(v, dict)}}
+    return cfg
+
+
+def write_config(path: str | Path, cfg: dict) -> None:
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    os.chmod(tmp, 0o600)                            # headers and env may hold keys
+    os.replace(tmp, p)
+
+
+def _masked(d: dict) -> dict:
+    """Values shown to the page: ${file:...} / ${env:...} references as they are, anything else hidden."""
+    return {k: (v if isinstance(v, str) and REF.fullmatch(v.strip()) else MASK) for k, v in (d or {}).items()}
+
+
+def public_spec(spec: dict) -> dict:
+    out = {k: spec[k] for k in ("command", "args", "cwd", "url", "token_file", "token_env", "autoApprove", "disabled")
+           if k in spec}
+    if spec.get("env"):
+        out["env"] = _masked(spec["env"])
+    if spec.get("headers"):
+        out["headers"] = _masked(spec["headers"])
+    return out
+
+
+def _pairs(d, old: dict, what: str, key_rx) -> dict:
+    if d is None:
+        return {}
+    if not isinstance(d, dict):
+        raise ValueError(f"{what}: expected NAME: value pairs")
+    out = {}
+    for k, v in d.items():
+        k, v = str(k).strip(), "" if v is None else str(v)
+        if not key_rx.match(k):
+            raise ValueError(f"{what}: bad name {k!r}")
+        if v == MASK:                               # unchanged secret: keep what the file has
+            if k not in (old or {}):
+                raise ValueError(f"{what}: {k} has no saved value to keep")
+            v = old[k]
+        if any(c in v for c in "\r\n\0"):
+            raise ValueError(f"{what}: {k} has a line break in it")
+        out[k] = v
+    return out
+
+
+def clean_spec(spec: dict, old: dict | None = None) -> dict:
+    """Check a server entry from the page. Keys this page does not manage are kept from the old entry."""
+    old = old or {}
+    out = {k: v for k, v in old.items() if k not in ("command", "args", "cwd", "env", "url", "headers", "token_file",
+                                                     "token_env", "autoApprove", "disabled")}
+    if spec.get("url"):
+        url = str(spec["url"]).strip()
+        if not re.match(r"^https?://[^\s/]+", url):
+            raise ValueError("url: http(s)://host[:port]/path")
+        out["url"] = url
+        h = _pairs(spec.get("headers"), old.get("headers"), "headers", re.compile(r"^[A-Za-z0-9-]{1,100}$"))
+        if h:
+            out["headers"] = h
+        if spec.get("token_file"):
+            out["token_file"] = str(spec["token_file"]).strip()
+        elif spec.get("token_env"):
+            if not ENV_NAME.match(str(spec["token_env"])):
+                raise ValueError("token_env: an environment variable name")
+            out["token_env"] = str(spec["token_env"])
+    elif spec.get("command"):
+        cmd = str(spec["command"]).strip()
+        args = spec.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(a, (str, int, float)) for a in args):
+            raise ValueError("args: a list of words")
+        out["command"], out["args"] = cmd, [str(a) for a in args]
+        if spec.get("cwd"):
+            out["cwd"] = str(spec["cwd"])
+        e = _pairs(spec.get("env"), old.get("env"), "env", ENV_NAME)
+        if e:
+            out["env"] = e
+    else:
+        raise ValueError("give a server URL, or a command to start")
+    aa = spec.get("autoApprove", False)
+    if isinstance(aa, list):
+        out["autoApprove"] = [str(t) for t in aa if str(t)]
+    elif aa:
+        out["autoApprove"] = True
+    if spec.get("disabled"):
+        out["disabled"] = True
+    return out
+
+
+def save_server(path: str | Path, name: str, spec: dict, old_name: str | None = None) -> dict:
+    name = str(name).strip()
+    if not SERVER_NAME.match(name):
+        raise ValueError("name: letters, digits, - and _ (up to 40)")
+    cfg = read_config(path)
+    servers = cfg.setdefault("mcpServers", {})
+    old_name = old_name or name
+    if old_name != name and name in servers:
+        raise ValueError(f"there is already a server named {name}")
+    entry = clean_spec(spec, servers.get(old_name))
+    servers.pop(old_name, None)
+    servers[name] = entry
+    write_config(path, cfg)
+    return entry
+
+
+def remove_server(path: str | Path, name: str) -> None:
+    cfg = read_config(path)
+    if name not in cfg.get("mcpServers", {}):
+        raise ValueError(f"no server named {name}")
+    del cfg["mcpServers"][name]
+    write_config(path, cfg)
+
+
+def set_disabled(path: str | Path, name: str, disabled: bool) -> None:
+    cfg = read_config(path)
+    s = cfg.get("mcpServers", {}).get(name)
+    if s is None:
+        raise ValueError(f"no server named {name}")
+    if disabled:
+        s["disabled"] = True
+    else:
+        s.pop("disabled", None)
+    write_config(path, cfg)

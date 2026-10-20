@@ -79,6 +79,22 @@ def mcp_stdio_entry(studio: str, token_file: str | None = None, python: str | No
             "autoApprove": read_only_tools()}
 
 
+def _q(word: str) -> str:
+    """Quote a word for a shell command line, the same on Windows, macOS and Linux."""
+    return f'"{word}"' if any(c in word for c in " \t'&()") else word
+
+
+def claude_code_commands(studio: str, token: str | None = None, token_file: str | None = None) -> dict:
+    """`claude mcp add` lines for Claude Code: over HTTP to Studio's /mcp, or starting ns_mcp.py."""
+    base = studio.rstrip("/")
+    http = f"claude mcp add --transport http --scope user {NAME} {base}/mcp"
+    if token:
+        http += f' --header "Authorization: Bearer {token}"'
+    e = mcp_stdio_entry(base, token_file)
+    stdio = f"claude mcp add --scope user {NAME} -- " + " ".join(_q(w) for w in [e["command"], *e["args"]])
+    return {"http": http, "stdio": stdio}
+
+
 def snippets(studio: str, token: str | None = None, token_file: str | None = None) -> dict:
     """Everything a client needs, as data (Studio's /connect page renders this)."""
     base = studio.rstrip("/")
@@ -93,6 +109,8 @@ def snippets(studio: str, token: str | None = None, token_file: str | None = Non
                                                                                        "Studio token>" if token else None))}},
         "claude_desktop": {"mcpServers": {NAME: {k: v for k, v in mcp_stdio_entry(base, token_file).items()
                                                  if k in ("command", "args")}}},
+        "claude_code": claude_code_commands(base, "<your Studio token>" if token else None,
+                                            token_file or ("<path to a file with your Studio token>" if token else None)),
         "paths": {"cline": {e: str(cline_settings_path(e)) for e in EDITORS},
                   "claude_desktop": str(claude_desktop_path())},
     }

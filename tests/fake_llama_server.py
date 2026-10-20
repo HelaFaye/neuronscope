@@ -44,6 +44,8 @@ class H(BaseHTTPRequestHandler):
                     v[int(hashlib.md5(w.encode()).hexdigest(), 16) % 64] += 1.0
                 out.append({"index": i, "embedding": v})
             return self._send({"data": out, "model": a.alias})
+        if self.path == "/tokenize":
+            return self._send({"tokens": list(range(len(body.get("content", "").split())))})   # one per word
         msgs = body.get("messages", [])
         if body.get("tools") and body.get("stream") and (not msgs or msgs[-1].get("role") != "tool"):
             # call the first tool named like *__add, the way llama-server streams tool calls

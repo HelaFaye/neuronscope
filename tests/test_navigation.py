@@ -25,3 +25,21 @@ def test_sidebar_items_lead_to_pages(studio_srv):
             assert href.split("#")[1] in js, label                     # the main page's hash names it
     assert 'href="/jobs" class="chip"' not in home                     # the old header row is gone
     assert ">Discover</button>" in home
+
+
+def test_context_usage_by_part(studio_srv):
+    msgs = [{"role": "user", "content": "one two three four"}, {"role": "assistant", "content": "five six"}]
+    code, c = call(studio_srv, "/api/context", {"messages": msgs, "documents": "a passage of eight characters"})
+    assert code == 200 and c["method"] == "estimate" and c["n_ctx"] is None
+    parts = {p["key"]: p["tokens"] for p in c["parts"]}
+    assert set(parts) == {"system", "documents", "tools", "messages"} and parts["documents"] > 0
+    assert c["total"] == sum(parts.values()) and c["turns"] == 2 and c["reply_reserve"] > 0
+    # With a model running, its tokenizer counts (the fake server: one token per word) and its window is known.
+    call(studio_srv, "/v1/chat/completions", {"model": "coder-gguf/coder-7b-q4_k_m",
+                                              "messages": [{"role": "user", "content": "hi"}]})
+    code, c = call(studio_srv, "/api/context", {"messages": [{"role": "system", "content": "be brief"}] + msgs})
+    parts = {p["key"]: p["tokens"] for p in c["parts"]}
+    assert c["method"] == "tokenizer" and c["n_ctx"] == 8192 and parts["system"] == 2
+    assert parts["messages"] == 8                  # "user: one two three four" + "assistant: five six"
+    _, home = call(studio_srv, "/")
+    assert 'id="ctxStrip"' in home and 'id="side"' in home

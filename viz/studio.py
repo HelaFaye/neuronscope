@@ -799,7 +799,7 @@ def stop_server():
 # What a paired device may POST. Everything else needs the owner's token.
 DEVICE_POSTS = {"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/api/chat", "/api/chats",
                 "/api/chats/delete", "/api/rag/search", "/api/tools/approve", "/api/trace",
-                "/mcp", "/api/route"}
+                "/mcp", "/api/route", "/api/context"}
 
 LINKS = {"cache": {}, "lock": threading.Lock()}
 LINK_SEP = ":"
@@ -1014,6 +1014,52 @@ def mcp_hub():
     return hub
 
 
+def connectors_path() -> str:
+    """The mcp.json the Connectors page edits: the one in use, else where Studio looks for one."""
+    return (STATE.get("mcp_config") or STATE.get("mcp_config_path")
+            or os.path.join(os.path.dirname(STATE["settings_path"]), "mcp.json"))
+
+
+def connectors() -> dict:
+    path = connectors_path()
+    try:
+        cfg, err = ns_mcp.read_config(path), None
+    except (OSError, ValueError) as e:
+        cfg, err = {"mcpServers": {}}, f"{path}: {e}"
+    hub = STATE.get("mcp")
+    live = {x["name"]: x for x in (hub.status() if hub else [])}
+    out = []
+    for name, spec in cfg.get("mcpServers", {}).items():
+        if not isinstance(spec, dict):
+            continue
+        st = live.get(ns_mcp._safe(name)) or {}
+        out.append({"name": name, "spec": ns_mcp.public_spec(spec), "transport": "http" if spec.get("url") else "stdio",
+                    "disabled": bool(spec.get("disabled")), "connected": bool(st.get("connected")),
+                    "error": st.get("error"), "tools": [t["name"] for t in st.get("tools") or []]})
+    plug = []
+    try:
+        for name, spec in (plugins().mcp_servers() or {}).items():
+            st = live.get(ns_mcp._safe(name)) or {}
+            plug.append({"name": name, "plugin": True, "transport": "http" if spec.get("url") else "stdio",
+                         "connected": bool(st.get("connected")), "error": st.get("error"),
+                         "tools": [t["name"] for t in st.get("tools") or []]})
+    except Exception:
+        pass
+    return {"config": path, "exists": os.path.exists(path), "error": err, "servers": out, "plugins": plug}
+
+
+def connectors_changed() -> None:
+    """After mcp.json changed: use it, and reconnect every server."""
+    path = connectors_path()
+    STATE["mcp_config"] = path
+    hub = STATE.get("mcp")
+    if hub is not None and str(hub.config_path) != os.path.expanduser(path):
+        hub = STATE["mcp"] = None
+    hub = mcp_hub()
+    if hub is not None:
+        hub.connect(timeout=30)
+
+
 def wait_approval(key: str, timeout: float = 300) -> bool:
     ev = threading.Event()
     with APPROVALS_LOCK:
@@ -1152,6 +1198,82 @@ def rag_context(req: dict, msgs: list) -> tuple[list, list]:
     ctx = {"role": "system", "content": ns_rag.context_message(hits)}
     i = 1 if msgs and msgs[0].get("role") == "system" else 0
     return msgs[:i] + [ctx] + msgs[i:], hits
+
+
+def _ctx_size():
+    """The running engine's context window, from its command line."""
+    args = PROC["args"] or []
+    for flag in ("-c", "--ctx-size", "--max-model-len"):
+        if flag in args[:-1]:
+            try:
+                return int(args[args.index(flag) + 1])
+            except ValueError:
+                pass
+    return None
+
+
+def _msg_text(m: dict) -> str:
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    return " ".join(p.get("text", "") for p in c or [] if isinstance(p, dict) and p.get("type") == "text")
+
+
+def count_tokens(texts: list) -> tuple[list, str]:
+    """Tokens in each text: the running engine's tokenizer when it answers, else about 4 characters a token."""
+    if server_running() and PROC["port"]:
+        try:
+            out = []
+            for t in texts:
+                if not t:
+                    out.append(0)
+                    continue
+                req = urllib.request.Request(f"http://127.0.0.1:{PROC['port']}/tokenize",
+                                             data=json.dumps({"content": t, "prompt": t}).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=3) as r:
+                    d = json.loads(r.read())
+                n = d.get("count") if isinstance(d.get("count"), int) else len(d.get("tokens") or [])
+                if not n and t.strip():
+                    raise ValueError("no tokens")
+                out.append(n)
+            return out, "tokenizer"
+        except (OSError, ValueError, KeyError):
+            pass
+    return [round(len(t) / 4) if t else 0 for t in texts], "estimate"
+
+
+def context_usage(req: dict, role: str) -> dict:
+    """What the next chat request would put in the model's context, by part (the chat side panel)."""
+    msgs = [m for m in req.get("messages") or [] if isinstance(m, dict)]
+    preset = load_presets().get(req.get("preset", "default"), PRESET_DEFAULTS)
+    system = ""
+    if msgs and msgs[0].get("role") == "system":
+        system, msgs = _msg_text(msgs[0]), msgs[1:]
+    elif preset.get("system"):
+        system = preset["system"]
+    tools = ""
+    if req.get("tools") and role == "owner":
+        hub = mcp_hub()
+        if hub is not None:
+            try:
+                tools = json.dumps(hub.openai_tools())
+            except Exception:
+                tools = ""
+    docs = str(req.get("documents") or "")[:200_000]
+    convo = "\n".join(f"{m.get('role')}: {_msg_text(m)}" for m in msgs)
+    (n_sys, n_docs, n_tools, n_msgs), method = count_tokens([system, docs, tools, convo])
+    images = sum(1 for m in msgs if isinstance(m.get("content"), list)
+                 for p in m["content"] if isinstance(p, dict) and p.get("type") == "image_url")
+    parts = [{"key": "system", "label": "System prompt", "tokens": n_sys},
+             {"key": "documents", "label": "Documents", "tokens": n_docs},
+             {"key": "tools", "label": "Tool definitions", "tokens": n_tools},
+             {"key": "messages", "label": "Messages", "tokens": n_msgs}]
+    m = PROC["model"] or {}
+    return {"n_ctx": _ctx_size(), "model": m.get("id"), "trained_ctx": m.get("context"),
+            "reply_reserve": int(preset.get("max_tokens", 2048) or 0), "parts": parts,
+            "total": sum(p["tokens"] for p in parts), "images": images, "method": method,
+            "turns": len(msgs)}
 
 
 def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
@@ -3866,6 +3988,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/gpus":
             import cuda_info
             return self._json(200, cuda_info.advise(nvidia_gpus()))
+        if self.path == "/api/connectors":
+            if not self._owner_only():
+                return
+            mcp_hub()
+            return self._json(200, connectors())
         if self.path == "/api/mcp":
             hub = mcp_hub()
             return self._json(200, {"servers": hub.status() if hub else [], "config": STATE.get("mcp_config"),
@@ -4205,6 +4332,22 @@ class Handler(BaseHTTPRequestHandler):
                 hub.connect()
                 return self._json(200, {"servers": hub.status(), "config": str(hub.config_path)})
 
+            if self.path in ("/api/connectors/save", "/api/connectors/remove", "/api/connectors/toggle"):
+                if not self._owner_only():
+                    return
+                req, path = self._read(), connectors_path()
+                try:
+                    if self.path.endswith("/save"):
+                        ns_mcp.save_server(path, req.get("name", ""), req.get("spec") or {}, req.get("old_name"))
+                    elif self.path.endswith("/remove"):
+                        ns_mcp.remove_server(path, str(req.get("name", "")))
+                    else:
+                        ns_mcp.set_disabled(path, str(req.get("name", "")), bool(req.get("disabled")))
+                except (OSError, ValueError) as e:
+                    return self._json(400, {"error": str(e)})
+                connectors_changed()
+                return self._json(200, connectors())
+
             if self.path == "/api/mcp/test":
                 # The owner's own check: lists the tools again and calls one read-only tool that
                 # needs no arguments, if the server marks one so.
@@ -4299,6 +4442,8 @@ class Handler(BaseHTTPRequestHandler):
                     j["cancel"] = True
                 return self._json(200, {"ok": bool(j)})
 
+            if self.path == "/api/context":
+                return self._json(200, context_usage(self._read(MAX_BODY), self._role))
             if self.path == "/api/chat":
                 req = self._read(MAX_BODY)
                 lt = link_target(req.get("model"))
@@ -4557,6 +4702,25 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
 .tool button{font-size:11px;padding:.1rem .5rem;margin-right:.3rem}
 .src{font-size:12px;color:var(--mut);margin-top:.3rem}.src details{margin:.1rem 0}.src summary{cursor:pointer}
 .src pre{white-space:pre-wrap;font:12px ui-monospace,monospace;background:var(--code);padding:.4rem;border-radius:5px;margin:.2rem 0}
+/* the context strip over the chat, and what it opens: environment, context usage, outputs */
+section.chat{position:relative}
+#ctxStrip{display:flex;align-items:center;gap:.6rem;padding:.3rem 1.2rem;border-bottom:1px solid var(--line);background:var(--panel);font-size:12.5px;color:var(--mut);cursor:pointer;user-select:none;min-width:0}
+#ctxStrip:hover{background:var(--soft)}#ctxStrip:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+#ctxStrip .sm{color:var(--fg);font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:32%}
+#ctxStrip .cbar{flex:1;max-width:340px;height:7px;margin:0}#ctxStrip .chev{margin-left:auto;transition:transform .15s}
+#ctxStrip[aria-expanded=true] .chev{transform:rotate(180deg)}
+#side{position:absolute;left:0;right:0;top:var(--strip-h,31px);z-index:50;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 10px 24px rgba(0,0,0,.22);
+  padding:.4rem 1.2rem .7rem;font-size:13px;display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:1.2rem;max-height:60vh;overflow-y:auto}
+#side[hidden]{display:none}
+#side h3{margin:.3rem 0 .45rem;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);display:flex;gap:.4rem}#side h3 .r{margin-left:auto;text-transform:none;letter-spacing:0}
+@media(max-width:900px){#side{grid-template-columns:1fr;gap:.3rem}}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:.15rem .7rem;font-size:12.5px;margin:0}.kv dt{color:var(--mut)}.kv dd{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cbar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--code);margin:.2rem 0 .5rem;border:1px solid var(--line)}
+.cbar span{display:block;height:100%;min-width:0}.cbar .rsv{background:repeating-linear-gradient(45deg,var(--line) 0 3px,transparent 3px 6px)}
+.cleg{display:grid;grid-template-columns:10px 1fr auto;gap:.2rem .45rem;align-items:center;font-size:12.5px}.cleg i{width:10px;height:10px;border-radius:3px;display:block}
+.cleg .n{color:var(--mut);font-variant-numeric:tabular-nums}
+.outs a,.outs div.o{display:flex;gap:.45rem;align-items:baseline;padding:.25rem .3rem;border-radius:5px;color:var(--fg);text-decoration:none;font-size:12.5px}
+.outs a:hover{background:var(--soft)}.outs .k{color:var(--mut);font-size:11px;margin-left:auto;white-space:nowrap}
 </style>
 <header>
   <h1>NeuronScope Studio</h1>
@@ -4650,6 +4814,15 @@ table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px s
   </div>
 </aside>
 <section class="chat">
+  <div id="ctxStrip" role="button" tabindex="0" aria-controls="side" aria-expanded="false" title="Environment, context usage and outputs of this chat">
+    <span class="sm" id="stripModel">no model loaded</span><div class="cbar" id="stripBar" aria-hidden="true"></div><span id="stripPct"></span><span id="stripOut"></span><span class="chev" aria-hidden="true">▾</span></div>
+  <div id="side" hidden aria-label="Environment, context and outputs">
+    <section><h3>Environment <span class="r" id="envState"></span></h3><dl class="kv" id="envKv"></dl></section>
+    <section><h3>Context usage <span class="r" id="ctxPct"></span></h3>
+      <div class="cbar" id="ctxBar" role="img" aria-label="context usage"></div><div class="cleg" id="ctxLeg"></div><div class="note" id="ctxNote"></div></section>
+    <section><h3>Outputs <span class="r" id="outN"></span></h3><div class="outs" id="outList"></div>
+      <button id="outExport" style="margin-top:.4rem;font-size:12px;padding:.25rem .6rem">Export chat as .md</button></section>
+  </div>
   <div id="log"></div>
   <div class="dials">
     <span>preset</span><select id="preset"></select>
@@ -4875,7 +5048,7 @@ async function status(){
   const s=status_=await (await fetch('/api/status')).json();
   $('#dot').className='dot'+(s.running?' on':'');
   $('#st').textContent = s.running ? `${s.id||s.model}${s.vision?' · vision':''} · up ${s.uptime}s${s.idle_ttl?` · TTL ${s.idle_ttl}s`:''}` : 'no model loaded';
-  $('#unload').disabled=!s.running; pickChanged();
+  $('#unload').disabled=!s.running; pickChanged(); sideEnv();
   const hasLora=!!s.lora; $('#alpha').disabled=!hasLora;
   $('#adesc').textContent = hasLora ? s.lora.split('/').pop() : 'no adapter loaded';
   if(hasLora && document.activeElement!==$('#alpha')){ $('#alpha').value=s.lora_scale; $('#av').textContent=(+s.lora_scale).toFixed(2); }
@@ -4955,7 +5128,7 @@ function toolCard(box,t){
 }
 function showSources(el,src){ el.innerHTML='sources: '+src.map((h,i)=>`<details><summary>[${i+1}] ${esc(h.source)}${h.page?' p.'+h.page:''}</summary><pre>${esc(h.text)}</pre></details>`).join(''); }
 function renderChat(){
-  $('#log').innerHTML='';
+  sideSoon(); $('#log').innerHTML='';
   if(!chat.messages.length){ $('#log').innerHTML='<div class="empty"><h2>Start a conversation</h2><p>Load a model from My Models, or point any OpenAI client at <code>'+esc(location.origin)+'/v1</code>. Requests name a model and it loads on demand.</p></div>'; return; }
   for(const m of chat.messages){ const b=bubble(m.role,m.content,{think:m.think,stats:m.stats,sources:m.sources,tools:m.tools,check:m.check,plugin_checks:m.plugin_checks,confidence:m.confidence}); b.root._msg=m; }
 }
@@ -5094,13 +5267,67 @@ async function stream(){
   out.stats.textContent=fullStats;
   let msg=null;
   const conf=lp.length?confidenceOf(lp):null; if(conf) showConfidence(out.root,conf);
-  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined,confidence:conf||undefined};
+  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined,confidence:conf||undefined,usage:usage||undefined};
     chat.messages.push(msg); out.root._msg=msg; await persist(); }
   status(); refresh();
   busy=false; $('#send').textContent='Send';
   if(msg&&acc&&$('#autoCheck').checked) checkReply(out.root);
   if(msg&&acc) pluginChecks(out.root,true);
+  sideSoon();
 }
+// ---------- side panel: environment, context usage, outputs
+const CTX_COL={system:'var(--acc)',documents:'var(--ok)',tools:'var(--warn)',messages:'color-mix(in srgb,var(--fg) 55%,transparent)'};
+let sideT=null, ctxLast=null;
+function sideShown(){ return !$('#side').hidden; }
+function sideSet(open){ $('#side').hidden=!open; $('#ctxStrip').setAttribute('aria-expanded',open);
+  $('section.chat').style.setProperty('--strip-h',$('#ctxStrip').offsetHeight+'px'); try{ localStorage.setItem('ns-side',open?'1':'0'); }catch{} }
+$('#ctxStrip').onclick=()=>sideSet(!sideShown());
+$('#ctxStrip').onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); sideSet(!sideShown()); } };
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&sideShown()) sideSet(false); });
+function sideSoon(){ clearTimeout(sideT); sideT=setTimeout(()=>{ ctxRefresh(); sideOutputs(); },400); }
+function fmtN(n){ return n==null?'?':n>=10000?(n/1000).toFixed(1)+'k':String(n); }
+function sideEnv(){ const s=status_||{};
+  $('#stripModel').textContent=s.running?(s.id||s.model):'no model loaded'; const m=models.find(x=>x.id===s.id); const st=m?.settings||{};
+  $('#envState').innerHTML=s.running?'<span class="okc">● running</span>':'not loaded';
+  const row=(k,v)=>v==null||v===''?'':`<dt>${esc(k)}</dt><dd title="${esc(v)}">${esc(v)}</dd>`;
+  $('#envKv').innerHTML=row('Model',s.id||s.model||'none')+row('Context',ctxLast?.n_ctx?ctxLast.n_ctx.toLocaleString()+' tokens':(st.ctx?st.ctx.toLocaleString()+' (setting)':null))
+    +row('Trained for',ctxLast?.trained_ctx?ctxLast.trained_ctx.toLocaleString():null)+row('GPU layers',s.running?st.ngl:null)+row('Vision',s.running?(s.vision?'yes':'no'):null)
+    +row('LoRA',s.lora?s.lora.split(/[\\/]/).pop():null)+row('Workspace',s.workspace)+row('Computer',s.computer)
+    +(s.id?`<dt></dt><dd><a href="#model=${encodeURIComponent(s.id)}&field=ctx">Model settings</a></dd>`:''); }
+async function ctxRefresh(){
+  const draft=$('#in').value.trim(); const msgs=chat.messages.map(m=>({role:m.role,content:m.content})); if(draft) msgs.push({role:'user',content:draft});
+  const last=[...chat.messages].reverse().find(m=>m.role==='assistant'&&m.sources);
+  const documents=$('#ragPick').value&&last?last.sources.map(h=>h.text).join('\n'):'';
+  let c; try{ c=await post('/api/context',{messages:msgs,preset:$('#preset').value,tools:$('#toolsOn').checked||undefined,documents}).then(r=>r.json()); }catch{ return; }
+  ctxLast=c; const cap=c.n_ctx||(models.find(x=>x.id===(status_||{}).id)?.settings?.ctx)||null;
+  const used=c.total, rsv=c.reply_reserve||0, denom=Math.max(cap||0,used+rsv,1);
+  $('#ctxBar').innerHTML=c.parts.map(p=>p.tokens?`<span style="width:${100*p.tokens/denom}%;background:${CTX_COL[p.key]}" title="${esc(p.label)}: ${p.tokens}"></span>`:'').join('')
+    +(rsv?`<span class="rsv" style="width:${100*Math.min(rsv,Math.max(0,denom-used))/denom}%" title="room kept for the reply: ${rsv}"></span>`:'');
+  const pct=cap?Math.round(100*used/cap):null;
+  $('#stripBar').innerHTML=$('#ctxBar').innerHTML;
+  $('#stripPct').innerHTML=cap?`<span class="${pct>=90?'bad':pct>=75?'warn':''}">${fmtN(used)} / ${fmtN(cap)} tokens · ${pct}%</span>`:`${fmtN(used)} tokens`;
+  $('#ctxPct').innerHTML=cap?`<span class="${pct>=90?'bad':pct>=75?'warn':''}">${fmtN(used)} / ${fmtN(cap)} · ${pct}%</span>`:fmtN(used)+' tokens';
+  $('#ctxLeg').innerHTML=c.parts.map(p=>`<i style="background:${CTX_COL[p.key]}"></i><span>${esc(p.label)}</span><span class="n">${p.tokens.toLocaleString()}</span>`).join('')
+    +(rsv?`<i class="rsv" style="background:repeating-linear-gradient(45deg,var(--line) 0 3px,transparent 3px 6px)"></i><span>Room for the reply</span><span class="n">${rsv.toLocaleString()}</span>`:'');
+  const lastU=[...chat.messages].reverse().find(m=>m.usage)?.usage;
+  const notes=[c.method==='estimate'?'Estimated at about 4 characters a token; load the model for exact counts.':'Counted with the model\'s tokenizer; the chat template adds a little.',
+    lastU?`The last reply used ${lastU.prompt_tokens?.toLocaleString?.()??'?'} prompt + ${lastU.completion_tokens?.toLocaleString?.()??'?'} reply tokens.`:'',
+    c.images?`${c.images} image(s) also take context (how much depends on the vision projector).`:'',
+    pct!=null&&used+rsv>cap?'<b class="bad">The next request will not fit:</b> start a new chat, or raise the context in Model settings.':pct>=75?'<span class="warn">Getting full: older messages may soon be cut.</span>':''];
+  $('#ctxNote').innerHTML=notes.filter(Boolean).join(' '); sideEnv(); }
+function sideOutputs(){ const out=[]; let n=0;
+  chat.messages.forEach((m,i)=>{ if(m.role!=='assistant') return; n++;
+    if(m.check&&m.check.url) out.push(`<a href="${esc(m.check.url)}" target="_blank" rel="noopener">🧠 3D view of reply ${n}<span class="k">${m.check.flagged?m.check.flagged+' flagged':'checked'}</span></a>`);
+    if(m.check&&m.check.review) out.push(`<a href="${esc(m.check.review)}">▦ Neuron review, reply ${n}</a>`);
+    for(const t of m.tools||[]) out.push(`<div class="o">🔧 ${esc(t.name||t.server+'.'+t.tool||'tool call')}<span class="k">reply ${n}${t.result?.error?' · failed':''}</span></div>`);
+    if(m.sources&&m.sources.length) out.push(`<div class="o">📄 ${m.sources.length} source(s): ${esc([...new Set(m.sources.map(h=>h.source))].slice(0,3).join(', '))}<span class="k">reply ${n}</span></div>`);
+    for(const pc of m.plugin_checks||[]) out.push(`<div class="o">🧩 ${esc(pc.title||pc.plugin||'plugin check')}<span class="k">reply ${n}</span></div>`); });
+  $('#outN').textContent=out.length||''; $('#stripOut').textContent=out.length?`· ${out.length} output${out.length>1?'s':''}`:'';
+  $('#outList').innerHTML=out.length?out.join(''):'<div class="note">Nothing yet. 3D views of checked replies, tool calls, cited sources and plugin checks from this chat collect here.</div>'; }
+$('#outExport').onclick=()=>$('#export').click();
+$('#in').addEventListener('input',sideSoon); ['#preset','#ragPick','#toolsOn'].forEach(s=>$(s).addEventListener('change',sideSoon));
+try{ if(localStorage.getItem('ns-side')==='1') setTimeout(()=>sideSet(true),0); }catch{}
+sideSoon();
 $('#export').onclick=()=>{
   const md=`# ${chat.title}\n\n`+chat.messages.map(m=>`**${m.role}**\n\n${textOf(m.content)}${imagesOf(m.content).length?`\n\n_[${imagesOf(m.content).length} image(s)]_`:''}\n`).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([md],{type:'text/markdown'}));
@@ -5181,7 +5408,7 @@ async function gpus(){ try{ const r=await (await fetch('/api/gpus')).json(); if(
 async function mcp(reload){
   const r=reload?await (await post('/api/mcp/reload',{})).json():await (await fetch('/api/mcp')).json();
   if(r.error){ $('#mcplist').innerHTML='<span class="bad">'+esc(r.error)+'</span>'; return; }
-  $('#mcpcfg').innerHTML=r.config?'config: <code>'+esc(r.config)+'</code>':'No MCP config. Create <code>~/.neuronscope/mcp.json</code> (see docs/STUDIO.md) and restart, or pass --mcp-config.';
+  $('#mcpcfg').innerHTML=(r.config?'config: <code>'+esc(r.config)+'</code> · ':'No connectors yet. ')+'<a href="/settings#connectors">Manage connectors</a>';
   const sv=r.servers||[]; const n=sv.reduce((a,x)=>a+(x.connected?x.tools.length:0),0);
   $('#toolsBox').style.display=n?'':'none';
   $('#mcplist').innerHTML=sv.map(x=>`<div class="m"><div class="mn">${esc(x.name)} <span class="tag">${esc(x.transport)}</span>${x.disabled?'<span class="tag">disabled</span>':x.connected?'<span class="tag okc">connected</span>':'<span class="tag bad">down</span>'}${x.auto_approve===true?'<span class="tag warn">auto-approve all</span>':''}${x.disabled?'':` <button class="x" style="width:auto;padding:0 .4rem" data-mtest="${esc(x.name)}" title="list its tools again, and call one read-only tool that needs no arguments">Test</button>`}</div>
@@ -5380,7 +5607,8 @@ def main(argv=None):
         return 2
     STATE.update(devices=ns_pairing.DeviceRegistry(a.devices, policy), links_path=os.path.expanduser(a.links),
                  fingerprint=ns_pairing.cert_fingerprint(a.tls_cert) if a.tls_cert and a.tls_key else None)
-    STATE.update(mcp_config=a.mcp_config if os.path.exists(os.path.expanduser(a.mcp_config)) else None, mcp=None)
+    STATE.update(mcp_config=a.mcp_config if os.path.exists(os.path.expanduser(a.mcp_config)) else None, mcp=None,
+                 mcp_config_path=os.path.expanduser(a.mcp_config))
     STATE.update(rag_dir=a.rag_dir, rag_embed=a.rag_embed, rag_embed_gguf=a.rag_embed_gguf,
                  rag_embed_ngl=a.rag_embed_ngl, rag=None)
     if a.no_jobs:

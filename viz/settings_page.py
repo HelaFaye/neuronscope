@@ -39,10 +39,24 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 .themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:.6rem;margin-top:.6rem}
 .th{border:1px solid var(--line);border-radius:8px;padding:.5rem;cursor:pointer}.th.on{outline:2px solid var(--acc)}
 .th .sw{display:flex;height:34px;border-radius:5px;overflow:hidden;margin:.35rem 0}.th .sw span{flex:1}
+.cn{display:flex;gap:.7rem;align-items:center;padding:.6rem .2rem;border-bottom:1px solid var(--line)}.cn:last-child{border-bottom:none}
+.cn .ic{width:34px;height:34px;flex:none;border-radius:8px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--mut);background:var(--bg)}
+.cn .nm{font-weight:600}.cn .sub{font:11.5px ui-monospace,monospace;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cn .st{font-size:12px;white-space:nowrap}.cn .st.on{color:var(--ok)}.cn .st.err{color:var(--no)}.cn .st.off{color:var(--mut)}
+.cn .grow{min-width:0}.cn button{font-size:12px;padding:.25rem .6rem}
+.sw2{position:relative;width:36px;height:20px;flex:none}.sw2 input{opacity:0;width:0;height:0;position:absolute}
+.sw2 span{position:absolute;inset:0;border-radius:999px;background:var(--line);transition:.15s;cursor:pointer}
+.sw2 span::after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--panel);transition:.15s}
+.sw2 input:checked+span{background:var(--acc)}.sw2 input:checked+span::after{transform:translateX(16px)}.sw2 input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
+dialog.dlg{border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--fg);padding:0;width:min(560px,94vw);box-shadow:0 12px 40px rgba(0,0,0,.4)}
+dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1rem}dialog.dlg h3{margin:0 0 .6rem;font-size:17px;text-transform:none;letter-spacing:0;color:var(--fg)}
+.seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin:.2rem 0 .3rem}.seg label{flex:1;margin:0;text-align:center;padding:.35rem;cursor:pointer;font-size:12.5px;color:var(--mut)}
+.seg input{display:none}.seg label:has(input:checked){background:var(--soft,var(--code));color:var(--fg);font-weight:600}
+.cnres{font-size:12px;margin:.2rem 0 0 2.8rem}.cnres.ok{color:var(--ok)}.cnres.bad{color:var(--no)}
 </style>
 <header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><a href="#plugins">Plugins</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
+<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#connectors">Connectors</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><a href="#plugins">Plugins</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
 
 <section class="card" id="appearance"><h2>Appearance</h2>
 <div class="note">A theme colours Studio's pages, its charts (the model radar) and the 3D views of activations and hallucination risk. Your choice is kept in this browser; <b>Make default</b> sets it for browsers that have not chosen one, and for the Godot client's 3D view.</div>
@@ -61,6 +75,33 @@ code{font:12px ui-monospace,monospace;background:var(--code);padding:.05rem .3re
 <table id="subjtbl"></table>
 <div class="row" style="margin-top:.6rem"><button class="pri" id="subjsave">Save</button><span id="subjmsg"></span></div>
 <div class="note" id="subjnote" style="margin-top:.4rem"></div></section>
+
+<section class="card" id="connectors"><h2>Connectors</h2>
+<div class="note">MCP servers that give your models tools in chat (tick <b>tools</b> under the chat). Here Studio is the <i>client</i>: a tool runs wherever its server runs. Every call asks first unless <a href="#tools">Tool approval</a> says otherwise. To use NeuronScope's own tools from Claude, Cline or another app, see <a href="/connect#claude">Connect → Claude</a>.</div>
+<div class="row" style="margin:.5rem 0"><input id="cnq" placeholder="Search connectors" style="width:16rem"><span class="grow"></span><button class="pri" id="cnadd">+ Add connector</button></div>
+<div id="cnlist"></div><div id="cnmsg" class="note"></div><div id="cnpath" class="note"></div>
+<dialog class="dlg" id="cndlg" aria-labelledby="cntitle"><form method="dialog" id="cnform">
+  <h3 id="cntitle">Add connector</h3>
+  <label>Name<input id="cnname" placeholder="e.g. files, github, transfer" autocomplete="off"></label>
+  <label>How Studio reaches it</label>
+  <div class="seg" role="radiogroup"><label><input type="radio" name="cnkind" value="url" checked> Server URL (HTTP)</label><label><input type="radio" name="cnkind" value="cmd"> Program on this computer</label></div>
+  <div id="cnurlbox">
+    <label>MCP server URL<input id="cnurl" placeholder="https://host:port/mcp" autocomplete="off"></label>
+    <label>Sign-in</label><select id="cnauth"><option value="none">None</option><option value="file">Bearer token from a file</option><option value="env">Bearer token from an environment variable</option><option value="headers">Custom headers</option></select>
+    <div id="cnauthfile" hidden><label>Token file<input id="cntokfile" data-pick="file" placeholder="a file holding only the token"></label></div>
+    <div id="cnauthenv" hidden><label>Environment variable<input id="cntokenv" placeholder="MY_SERVER_TOKEN"></label></div>
+    <div id="cnauthhdr" hidden><label>Headers <span class="note">Name: value, one per row. ${file:/path} and ${env:NAME} are read when Studio connects.</span></label><div id="cnhdr"></div></div>
+  </div>
+  <div id="cncmdbox" hidden>
+    <label>Program<input id="cncmd" data-pick="file" placeholder="npx, uvx, python, or a path"></label>
+    <label>Arguments <span class="note">one per row</span></label><div id="cnargs"></div>
+    <label>Environment <span class="note">NAME=value, one per row</span></label><div id="cnenv"></div>
+    <label>Working folder <span class="note">optional</span><input id="cncwd" data-pick="dir"></label>
+  </div>
+  <label style="margin-top:.6rem"><input type="checkbox" id="cnauto"> Run this server's tools without asking <span class="note">(only for servers you trust completely)</span></label>
+  <div id="cnerr" class="err"></div>
+  <div class="row" style="margin-top:.8rem;justify-content:flex-end"><button value="cancel" formnovalidate>Cancel</button><button class="pri" id="cnsave" value="default">Add</button></div>
+</form></dialog></section>
 
 <section class="card" id="tools"><h2>Tool approval</h2>
 <div class="note">When a model calls an MCP tool in chat (Studio → Tools), each call is decided in order: <b>1</b> your rules below, first match wins; <b>2</b> a server's <code>autoApprove</code> in mcp.json; <b>3</b> the quick setting for the tool's kind of operation (from its MCP annotations); <b>4</b> the default. <i>Ask</i> shows Allow/Deny in the chat, where <i>always…</i> adds a rule here. Command line: <code>python scripts/tool_rules.py</code>.</div>
@@ -115,6 +156,56 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function api(p,b){const r=await fetch(p,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
   const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 const msg=(el,t,bad)=>{$(el).innerHTML=t?`<span class="${bad?'err':'okm'}">${t}</span>`:''};
+// ---------- connectors (MCP servers Studio's chat can use)
+let CN=null, cnEdit=null, cnRes={}, cnLists={};
+const CN_IC={http:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3.5 3.5 3.5 14.5 0 18M12 3c-3.5 3.5-3.5 14.5 0 18"/></svg>',
+  stdio:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 5h16v14H4zM7 10l3 2-3 2M12 15h5"/></svg>'};
+async function loadCN(){ try{ CN=await api('/api/connectors'); drawCN(); }catch(e){ $('#cnlist').innerHTML=`<div class="err">${esc(e.message)}</div>`; } }
+function cnSub(c){ const s=c.spec||{}; return s.url||[s.command,...(s.args||[])].filter(Boolean).join(' '); }
+function cnState(c){ if(c.disabled) return '<span class="st off">off</span>'; if(c.error) return `<span class="st err" title="${esc(c.error)}">● not connected</span>`;
+  return c.connected?`<span class="st on">● ${c.tools.length} tool${c.tools.length===1?'':'s'}</span>`:'<span class="st off">connecting…</span>'; }
+function drawCN(){ const q=$('#cnq').value.toLowerCase(); const hit=c=>!q||c.name.toLowerCase().includes(q)||cnSub(c).toLowerCase().includes(q);
+  const rows=CN.servers.filter(hit).map(c=>`<div class="cn" data-cn="${esc(c.name)}"><div class="ic">${CN_IC[c.transport]}</div>
+    <div class="grow" style="flex:1"><div class="nm">${esc(c.name)}</div><div class="sub" title="${esc(cnSub(c))}">${esc(cnSub(c))}</div></div>
+    ${cnState(c)}<button data-a="test" ${c.disabled?'disabled':''}>Test</button><button data-a="edit">Edit</button><button data-a="rm" class="bad" aria-label="Remove ${esc(c.name)}">Remove</button>
+    <label class="sw2" title="${c.disabled?'Turn on':'Turn off'}"><input type="checkbox" data-a="on" ${c.disabled?'':'checked'} aria-label="${esc(c.name)} on"><span></span></label></div>
+    ${cnRes[c.name]?`<div class="cnres ${cnRes[c.name].ok?'ok':'bad'}">${esc(cnRes[c.name].text)}</div>`:''}${c.error&&!c.disabled?`<div class="cnres bad">${esc(c.error)}</div>`:''}`).join('');
+  const plug=CN.plugins.filter(hit).map(c=>`<div class="cn"><div class="ic">${CN_IC[c.transport]}</div><div class="grow" style="flex:1"><div class="nm">${esc(c.name)}</div><div class="sub">from a plugin · <a href="#plugins">Plugins</a></div></div>${cnState(c)}</div>`).join('');
+  $('#cnlist').innerHTML=rows+plug||(CN.servers.length?'<div class="note">No connector matches.</div>':'<div class="note" style="padding:.6rem 0">No connectors yet. <b>+ Add connector</b> connects a server by its URL, or starts a program on this computer (most MCP servers you find are started with <code>npx</code> or <code>uvx</code>).</div>');
+  $('#cnpath').innerHTML=`Saved in <code>${esc(CN.config)}</code>${CN.exists?'':' (created when you add one)'}.`+(CN.error?` <span class="err">${esc(CN.error)}</span>`:'');
+  document.querySelectorAll('#cnlist [data-cn]').forEach(row=>{ const name=row.dataset.cn, c=CN.servers.find(x=>x.name===name);
+    row.querySelector('[data-a=edit]').onclick=()=>cnOpen(c);
+    row.querySelector('[data-a=rm]').onclick=async()=>{ if(!confirm(`Remove ${name}? Its tools stop being offered in chat.`)) return; try{ CN=await api('/api/connectors/remove',{name}); delete cnRes[name]; drawCN(); }catch(e){ msg('#cnmsg',esc(e.message),true); } };
+    row.querySelector('[data-a=on]').onchange=async e=>{ try{ CN=await api('/api/connectors/toggle',{name,disabled:!e.target.checked}); drawCN(); }catch(err){ msg('#cnmsg',esc(err.message),true); } };
+    row.querySelector('[data-a=test]').onclick=()=>cnTest(name); }); }
+async function cnTest(name){ cnRes[name]={ok:true,text:'testing…'}; drawCN();
+  try{ const r=await api('/api/mcp/test',{server:name});
+    cnRes[name]=r.ok?{ok:true,text:`Works: ${r.tools} tool${r.tools===1?'':'s'} in ${r.seconds}s`+(r.called?`; called ${r.called}: ${r.call_ok?'ok':'failed'}`:'')}:{ok:false,text:r.error||'failed'}; }
+  catch(e){ cnRes[name]={ok:false,text:e.message}; } drawCN(); }
+$('#cnq').oninput=()=>CN&&drawCN();
+const cnKind=()=>document.querySelector('[name=cnkind]:checked').value;
+function cnShow(){ const k=cnKind(); $('#cnurlbox').hidden=k!=='url'; $('#cncmdbox').hidden=k!=='cmd'; const a=$('#cnauth').value;
+  $('#cnauthfile').hidden=a!=='file'; $('#cnauthenv').hidden=a!=='env'; $('#cnauthhdr').hidden=a!=='headers'; }
+document.querySelectorAll('[name=cnkind]').forEach(r=>r.onchange=cnShow); $('#cnauth').onchange=cnShow;
+function cnOpen(c){ cnEdit=c||null; const s=(c&&c.spec)||{}; $('#cntitle').textContent=c?`Edit ${c.name}`:'Add connector'; $('#cnsave').textContent=c?'Save':'Add'; $('#cnerr').textContent='';
+  $('#cnname').value=c?c.name:''; document.querySelector(`[name=cnkind][value=${s.command?'cmd':'url'}]`).checked=true;
+  $('#cnurl').value=s.url||''; $('#cntokfile').value=s.token_file||''; $('#cntokenv').value=s.token_env||'';
+  $('#cnauth').value=s.token_file?'file':s.token_env?'env':s.headers?'headers':'none';
+  $('#cncmd').value=s.command||''; $('#cncwd').value=s.cwd||''; $('#cnauto').checked=!!s.autoApprove;
+  cnLists.hdr=nsListEditor($('#cnhdr'),{values:Object.entries(s.headers||{}).map(([k,v])=>`${k}: ${v}`),browse:false,addLabel:'+ Add header',placeholder:'Authorization: Bearer ${file:/path/to/token}'});
+  cnLists.args=nsListEditor($('#cnargs'),{values:s.args||[],browse:false,addLabel:'+ Add argument',placeholder:'-y'});
+  cnLists.env=nsListEditor($('#cnenv'),{values:Object.entries(s.env||{}).map(([k,v])=>`${k}=${v}`),browse:false,addLabel:'+ Add variable',placeholder:'NAME=value'});
+  cnShow(); $('#cndlg').showModal(); $('#cnname').focus(); }
+$('#cnadd').onclick=()=>cnOpen(null);
+const kvs=(rows,sep)=>{ const o={}; for(const r of rows){ const i=r.indexOf(sep); if(i<1) throw new Error(`"${r}": expected NAME${sep}value`); o[r.slice(0,i).trim()]=r.slice(i+1).trim(); } return o; };
+$('#cnsave').onclick=async e=>{ e.preventDefault(); $('#cnerr').textContent='';
+  try{ const spec={autoApprove:$('#cnauto').checked,disabled:cnEdit?cnEdit.disabled:false};
+    if(cnKind()==='url'){ spec.url=$('#cnurl').value.trim(); const a=$('#cnauth').value;
+      if(a==='file') spec.token_file=$('#cntokfile').value.trim(); if(a==='env') spec.token_env=$('#cntokenv').value.trim(); if(a==='headers') spec.headers=kvs(cnLists.hdr.get(),':'); }
+    else { spec.command=$('#cncmd').value.trim(); spec.args=cnLists.args.get(); spec.env=kvs(cnLists.env.get(),'='); const cwd=$('#cncwd').value.trim(); if(cwd) spec.cwd=cwd; }
+    const name=$('#cnname').value.trim(); $('#cnsave').disabled=true;
+    CN=await api('/api/connectors/save',{name,old_name:cnEdit?cnEdit.name:undefined,spec}); $('#cndlg').close(); drawCN(); if(!spec.disabled) cnTest(name); }
+  catch(err){ $('#cnerr').textContent=err.message; } finally{ $('#cnsave').disabled=false; } };
 async function restartBtn(el){ $(el).insertAdjacentHTML('beforeend',' <button id="rs">Restart Studio now</button>');
   $('#rs').onclick=async()=>{ await api('/api/restart',{}).catch(()=>{}); msg(el,'restarting…'); setTimeout(()=>location.reload(),4000); }; }
 
@@ -215,6 +306,7 @@ async function loadTools(){ const s=await api('/api/settings'); ST.tools=s.tools
   $('#tlist').innerHTML=!s.mcp_configured?'No MCP servers yet: add them in <a href="/#tools">Studio → Tools</a>.':!s.tools.length?'No server connected right now (<a href="/#tools">Studio → Tools</a>).':
     `<table><tr><th>server</th><th>tool</th><th>kinds</th><th>with no arguments</th></tr>`+s.tools.map(t=>`<tr><td>${esc(t.server)}</td><td>${esc(t.tool)}</td><td>${esc(t.decision.kinds.join(', '))}</td><td><span class="pill ${t.decision.action}">${t.decision.action}</span> <span class="note">${esc(t.decision.reason)}</span></td></tr>`).join('')+'</table>'; }
 (async()=>{
+  loadCN();
   try{ await loadWS(); }catch(e){ $('#wsform').innerHTML=`<div class="err">${esc(e.message)}</div>`; }
   try{ ST=await api('/api/settings'); RULES=ST.tool_rules; subjTable(); cats(); drawRules(); loadTools(); }catch(e){ $('#subjtbl').innerHTML=`<tr><td class="err">${esc(e.message)}</td></tr>`; }
   if(location.hash){ const t=document.querySelector(location.hash); if(t) t.scrollIntoView(); }
