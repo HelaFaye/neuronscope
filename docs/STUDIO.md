@@ -179,10 +179,19 @@ Studio connects to the MCP servers listed in `~/.neuronscope/mcp.json`
 {"mcpServers": {
   "files":  {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]},
   "search": {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer ..."}},
+  "box":    {"url": "https://box.example.ts.net/mcp", "token_file": "~/.config/neuronscope/secrets/box.token"},
   "clock":  {"command": "python", "args": ["clock_server.py"], "autoApprove": ["now"]},
   "old":    {"command": "...", "disabled": true}
 }}
 ```
+
+Keep tokens out of this file:
+- `"token_file"` (or `"token_env"`) becomes the server's
+  `Authorization: Bearer` header;
+- any header or `env` value may say `${file:PATH}` or `${env:NAME}`.
+
+They are read each time the server connects, so after rotating a token,
+press **Reconnect / reload config** on the Tools tab; there is nothing to edit here.
 
 Tick **tools** under the chat and the model is offered every connected tool
 (as `<server>__<tool>`; llama-server's Jinja templates, on by default, turn
@@ -193,7 +202,9 @@ tool. Results are shown under the call and fed back to the model, for up to 8
 rounds per message. A declined call is reported to the model as declined.
 
 The **Tools** tab shows each server's status and tools, and reconnects after
-you edit the file. Stdio servers' logs go to `~/.neuronscope/mcp-logs/`.
+you edit the file. **Test** next to a server asks it for its tools again, and
+calls one tool it marks read-only and that needs no arguments (for the
+transfer server, `list_targets`). It shows the time taken and the answer. Stdio servers' logs go to `~/.neuronscope/mcp-logs/`.
 `python scripts/mcp_client.py tools` checks a config from the command line.
 
 MCP servers run with your permissions. Only configure servers you trust, and

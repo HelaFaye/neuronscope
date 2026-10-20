@@ -8,6 +8,7 @@ Servers are configured in the format LM Studio and Claude Desktop use
     {"mcpServers": {
         "files":  {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"]},
         "search": {"url": "https://mcp.example.com/mcp", "headers": {"Authorization": "Bearer ..."}},
+        "remote": {"url": "https://box:8765/mcp", "token_file": "~/.config/neuronscope/secrets/box.token"},
         "clock":  {"command": "python", "args": ["clock_server.py"], "autoApprove": ["now"]},
         "old":    {"command": "...", "disabled": true}}}
 
@@ -15,6 +16,11 @@ Each enabled server keeps one connection (stdio subprocess or streamable HTTP)
 in a background event loop. Tools are offered to the model as OpenAI
 functions named `<server>__<tool>`. Studio asks before every call unless the
 server sets `"autoApprove": true` or lists the tool names it may run unasked.
+
+Secrets need not sit in this file: an HTTP server's `"token_file"` (or
+`"token_env"`) becomes its `Authorization: Bearer` header, and any header or
+env value may say `${file:PATH}` or `${env:NAME}`. They are read when the
+server connects, so rotating a token is a reload, not an edit here.
 
     python scripts/mcp_client.py tools               # what the configured servers offer
     python scripts/mcp_client.py call clock__now '{}'
@@ -44,6 +50,39 @@ def _attr(obj, *names):
     return None
 
 
+REF = re.compile(r"\$\{(file|env):([^}]+)\}")
+
+
+def expand(value: str) -> str:
+    """${file:PATH} -> the file's contents (stripped); ${env:NAME} -> the variable. Missing ones raise."""
+    def one(m):
+        kind, ref = m.group(1), m.group(2).strip()
+        if kind == "env":
+            if ref not in os.environ:
+                raise ValueError(f"${{env:{ref}}}: no such environment variable")
+            return os.environ[ref]
+        f = Path(ref).expanduser()
+        if not f.is_file():
+            raise ValueError(f"${{file:{ref}}}: no such file")
+        return f.read_text(encoding="utf-8").strip()
+    return REF.sub(one, str(value))
+
+
+def http_headers(spec: dict) -> dict:
+    """The headers an HTTP server's spec asks for, with token_file / token_env and ${...} resolved."""
+    headers = {k: expand(v) for k, v in (spec.get("headers") or {}).items()}
+    tok = None
+    if spec.get("token_file"):
+        tok = expand("${file:" + str(spec["token_file"]) + "}")
+    elif spec.get("token_env"):
+        tok = expand("${env:" + str(spec["token_env"]) + "}")
+    if tok:
+        if any(c in tok for c in "\r\n"):
+            raise ValueError("the token has a line break inside it")
+        headers["Authorization"] = f"Bearer {tok}"
+    return headers
+
+
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
@@ -64,12 +103,12 @@ class _Conn:
         if self.spec.get("url"):
             from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
             return streamable_http_client(self.spec["url"],
-                                          http_client=create_mcp_http_client(headers=self.spec.get("headers") or None))
+                                          http_client=create_mcp_http_client(headers=http_headers(self.spec) or None))
         from mcp import StdioServerParameters
         from mcp.client.stdio import stdio_client
         env = None
         if self.spec.get("env"):
-            env = {**os.environ, **{k: str(v) for k, v in self.spec["env"].items()}}
+            env = {**os.environ, **{k: expand(v) for k, v in self.spec["env"].items()}}
         params = StdioServerParameters(command=self.spec["command"], args=[str(a) for a in self.spec.get("args", [])],
                                        env=env, cwd=self.spec.get("cwd"))
         # The server's stderr (its logs) goes to a file, not into the host's console.
@@ -223,8 +262,11 @@ class MCPHub:
             if t.name == tool:
                 a = getattr(t, "annotations", None)
                 if a is not None:
-                    for k in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
-                        v = a.get(k) if isinstance(a, dict) else getattr(a, k, None)
+                    # mcp 2.x names them read_only_hint…; older releases and plain dicts readOnlyHint…
+                    for k, snake in (("readOnlyHint", "read_only_hint"), ("destructiveHint", "destructive_hint"),
+                                     ("idempotentHint", "idempotent_hint"), ("openWorldHint", "open_world_hint")):
+                        v = (a.get(k, a.get(snake)) if isinstance(a, dict)
+                             else _attr(a, snake, k))
                         if v is not None:
                             ann[k] = bool(v)
         return {"server": server, "tool": tool, "annotations": ann,
@@ -251,6 +293,40 @@ class MCPHub:
             return False
         aa = self.specs.get(server, {}).get("autoApprove", False)
         return aa is True or (isinstance(aa, list) and tool in aa)
+
+    def test(self, name: str, timeout: float = 60) -> dict:
+        """Check one server for real: ask it for its tools again, and call one read-only tool that
+        needs no arguments if it has one. -> {ok, tools, seconds, called, result | error}."""
+        import time as _t
+        c = self.conns.get(name)
+        if c is None:
+            return {"ok": False, "error": f"no server {name!r} (or it is disabled)"}
+        if c.error:
+            return {"ok": False, "error": c.error}
+        t0 = _t.time()
+        fut: Future = Future()
+
+        async def put():
+            await c.queue.put(("list", (), _Bridge(fut)))
+        try:
+            self._run(put(), 5)
+            tools = fut.result(timeout)
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"[:300], "seconds": round(_t.time() - t0, 2)}
+        out = {"ok": True, "tools": len(tools), "seconds": round(_t.time() - t0, 2), "called": None}
+        for t in tools:
+            ann = _attr(t, "annotations")
+            ro = bool(ann is not None and _attr(ann, "read_only_hint", "readOnlyHint"))
+            schema = _attr(t, "input_schema", "inputSchema") or {}
+            if ro and not (schema.get("required") if isinstance(schema, dict) else None):
+                try:
+                    ok, text = self.call(f"{name}{SEP}{_safe(t.name)}", {}, timeout)
+                    out.update(called=t.name, call_ok=ok, result=text[:600])
+                except Exception as e:
+                    out.update(called=t.name, call_ok=False, result=f"{type(e).__name__}: {e}"[:300])
+                break
+        out["seconds"] = round(_t.time() - t0, 2)
+        return out
 
     def call(self, fn_name: str, arguments: dict, timeout: float = 120) -> tuple[bool, str]:
         """-> (ok, text). Text content is joined; other content is summarised."""

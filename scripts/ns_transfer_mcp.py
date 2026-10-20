@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Optional MCP control plane for NeuronScope transfers (stdio only).
+"""Optional MCP control plane for NeuronScope transfers.
+
+Two ways to serve it:
+* stdio (default): an MCP client on this computer starts it as a process;
+* streamable HTTP (--http): an MCP client on another computer connects to
+  http(s)://this-computer:PORT/mcp with a bearer token. Every request needs the
+  token; requests from web pages of other sites are refused; a network address
+  needs TLS, or --allow-plaintext behind a VPN or a TLS proxy (tailscale serve).
+
+    python scripts/ns_transfer_mcp.py --http --token-file ~/.config/neuronscope/secrets/transfer-mcp-http.token
+    python scripts/ns_transfer_mcp.py --http --host 0.0.0.0 --port 8765 --token-file T --tls-cert C --tls-key K
+
+The tools act on the computer that runs this server: its targets, its files.
 
 Secrets handling:
 * the state file holds target identity only (url, CA file, hints), mode 0600;
@@ -166,10 +178,26 @@ def ensure() -> None:
                            "security advisories; pip install -U 'mcp>=2.3,<3'")
 
 
-if FastMCP:
-    mcp = FastMCP("neuronscope-transfer")
+INSTRUCTIONS = ("NeuronScope transfers. You, the MCP client, are the controller; every tool acts on the computer "
+                "running this server: the targets registered here, and file paths on this computer.")
 
-    @mcp.tool()
+def _ann(**kw):
+    """Tool annotations (read-only, destructive…), so clients can approve by kind."""
+    try:
+        from mcp.types import ToolAnnotations
+        return ToolAnnotations(**kw)
+    except Exception:                       # pragma: no cover - older SDKs
+        return None
+
+
+READ = dict(read_only_hint=True, destructive_hint=False, open_world_hint=True)
+CHANGE = dict(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+DESTROY = dict(read_only_hint=False, destructive_hint=True, open_world_hint=False)
+
+if FastMCP:
+    mcp = FastMCP("neuronscope-transfer", instructions=INSTRUCTIONS)
+
+    @mcp.tool(annotations=_ann(**CHANGE))
     def register_target(name: str, url: str, token: str = "", cafile: str = "",
                         destination_hint: str = "") -> dict:
         """Register a remote NeuronScope transfer receiver. The token is moved to
@@ -188,7 +216,7 @@ if FastMCP:
         return {"ok": True, "name": name, "token_store": where, "warnings": warn,
                 "target": public(name, d["targets"][name])}
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**DESTROY))
     def remove_target(name: str) -> dict:
         """Forget a target and delete its stored token."""
         d = load()
@@ -197,22 +225,22 @@ if FastMCP:
         delete_token(name)
         return {"ok": True}
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**dict(READ, open_world_hint=False)))
     def list_targets() -> dict:
         """List configured transfer targets (tokens are never returned)."""
         return {"targets": {k: public(k, v) for k, v in load()["targets"].items()}}
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**READ))
     def probe_target(name: str) -> dict:
         """Check a target receiver."""
         return run(name, ["health"])
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**CHANGE))
     def send_file(target: str, file_path: str, subdir: str = "") -> dict:
         """Start one reliable resumable file transfer."""
         return run(target, ["send", "--file", file_path, "--subdir", subdir], timeout=86400)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**CHANGE))
     def send_batch(target: str, directory: str, glob_pattern: str = "*.gguf", workers: int = 2,
                    subdir: str = "") -> dict:
         """Transfer a batch of GGUFs to a receiver."""
@@ -220,7 +248,7 @@ if FastMCP:
                             "--workers", str(max(1, min(workers, 8))), "--subdir", subdir],
                    timeout=86400)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**CHANGE))
     def start_watch(target: str, directory: str, glob_pattern: str = "*.gguf", workers: int = 1,
                     subdir: str = "") -> dict:
         """Start a background watcher that sends new GGUFs as they appear."""
@@ -237,12 +265,12 @@ if FastMCP:
             p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True, env=env)
         return {"ok": True, "pid": p.pid, "log": str(log), "command": cmd}
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**READ))
     def transfer_status(target: str) -> dict:
         """List receiver-side transfers."""
         return run(target, ["status"])
 
-    @mcp.tool()
+    @mcp.tool(annotations=_ann(**CHANGE))
     def pull_completed(target: str, transfer_id: str, out_directory: str) -> dict:
         """Pull a completed remote transfer back to the controller."""
         return run(target, ["pull", "--id", transfer_id, "--out", out_directory], timeout=86400)
@@ -250,16 +278,108 @@ else:
     mcp = None
 
 
-def main() -> None:
+class Guard:
+    """ASGI wrapper for the HTTP mode: bearer token on every request, no other site's web pages,
+    and a cool-off for addresses that keep sending wrong tokens. Lifespan events pass through
+    untouched, so the MCP session manager starts and stops with the server."""
+
+    def __init__(self, app, token: str, allowed_origins=(), path: str = "/mcp", max_failures: int = 20,
+                 window: float = 600.0):
+        self.app, self.token, self.path = app, token, path
+        self.origins = {o.rstrip("/") for o in allowed_origins}
+        self.max_failures, self.window = max_failures, window
+        self.failures: dict = {}
+
+    async def _deny(self, send, code: int, msg: str):
+        body = json.dumps({"error": msg}).encode()
+        await send({"type": "http.response.start", "status": code,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+                                *([(b"www-authenticate", b"Bearer")] if code == 401 else [])]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)            # lifespan and the rest
+        import hmac
+        import time as _t
+        h = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        ip = (scope.get("client") or ("?",))[0]
+        now = _t.time()
+        recent = [t for t in self.failures.get(ip, []) if now - t < self.window]
+        self.failures[ip] = recent
+        if len(recent) >= self.max_failures:
+            return await self._deny(send, 429, "too many wrong tokens from this address; wait a few minutes")
+        if scope.get("path") == "/health":
+            return await self._ok(send)
+        origin = h.get("origin")
+        if origin and origin.rstrip("/") not in self.origins:
+            return await self._deny(send, 403, "requests from web pages of other sites are refused")
+        auth = h.get("authorization", "")
+        given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not given or not hmac.compare_digest(given.encode(), self.token.encode()):
+            self.failures[ip].append(now)
+            return await self._deny(send, 401, "a valid bearer token is required")
+        return await self.app(scope, receive, send)
+
+    async def _ok(self, send):
+        body = b'{"status": "ok"}'
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+def http_app(token: str, allowed_origins=(), path: str = "/mcp"):
+    """The streamable-HTTP MCP app behind the Guard. Host-header checks are off because the
+    token already protects every request (and a proxy such as tailscale serve sends its own name)."""
+    from mcp.server.transport_security import TransportSecuritySettings
+    inner = mcp.streamable_http_app(streamable_http_path=path,
+                                    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+    return Guard(inner, token, allowed_origins, path)
+
+
+def main(argv=None) -> None:
     import argparse
     p = argparse.ArgumentParser(
-        description="MCP server (stdio) for NeuronScope transfers. An MCP client starts it; "
-                    "it reads requests on stdin, so run on its own it waits silently.",
-        epilog='client config: {"mcpServers": {"neuronscope-transfer": {"command": "python", '
-               '"args": ["/path/to/neuronscope/scripts/ns_transfer_mcp.py"]}}}')
-    p.parse_args()
+        description="MCP server for NeuronScope transfers. Default: stdio (an MCP client on this computer starts "
+                    "it; run on its own it waits silently). --http: serve over the network with a token.",
+        epilog='stdio client config: {"mcpServers": {"neuronscope-transfer": {"command": "python", '
+               '"args": ["/path/to/neuronscope/scripts/ns_transfer_mcp.py"]}}}. '
+               'HTTP client config: {"mcpServers": {"transfer-box": {"url": "https://box:8765/mcp", '
+               '"token_file": "~/.config/neuronscope/secrets/transfer-box.token"}}}')
+    p.add_argument("--http", action="store_true", help="serve streamable HTTP instead of stdio")
+    p.add_argument("--host", default="127.0.0.1", help="listen address (127.0.0.1: this computer, or a proxy "
+                   "such as tailscale serve in front)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--path", default="/mcp")
+    p.add_argument("--token-file", default="", help="file with the bearer token (or $NS_TRANSFER_MCP_TOKEN); "
+                   "make one with: python scripts/ns_security.py token --out FILE")
+    p.add_argument("--tls-cert", default="")
+    p.add_argument("--tls-key", default="")
+    p.add_argument("--allow-plaintext", action="store_true",
+                   help="HTTP without TLS on a network address: only behind a VPN or a TLS proxy")
+    p.add_argument("--allowed-origin", action="append", default=[],
+                   help="a web origin allowed to call it from a browser (none by default)")
+    a = p.parse_args(argv)
     ensure()
-    mcp.run("stdio")  # no network listener
+    if not a.http:
+        mcp.run("stdio")  # no network listener
+        return
+    token = (Path(a.token_file).expanduser().read_text().strip() if a.token_file
+             else os.environ.get("NS_TRANSFER_MCP_TOKEN", "").strip())
+    if len(token) < sec.MIN_TOKEN_CHARS:
+        raise SystemExit("--http needs a token of at least %d characters (--token-file, or NS_TRANSFER_MCP_TOKEN). "
+                         "Make one: python scripts/ns_security.py token --out FILE" % sec.MIN_TOKEN_CHARS)
+    tls = bool(a.tls_cert and a.tls_key)
+    try:
+        for w in sec.check_bind(a.host, token, tls=tls, allow_plaintext=a.allow_plaintext):
+            print("warning:", w, file=sys.stderr)
+    except sec.SecurityConfigError as e:
+        raise SystemExit(f"error: {e}")
+    import uvicorn
+    scheme = "https" if tls else "http"
+    print(f"neuronscope-transfer MCP at {scheme}://{a.host}:{a.port}{a.path} (bearer token required)", file=sys.stderr)
+    uvicorn.run(http_app(token, a.allowed_origin, a.path), host=a.host, port=a.port, log_level="warning",
+                ssl_certfile=a.tls_cert or None, ssl_keyfile=a.tls_key or None)
 
 
 if __name__ == "__main__":

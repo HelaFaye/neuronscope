@@ -140,7 +140,12 @@ python scripts/ns_transfer_mcp.py        # stdio MCP server; requires mcp>=2.3,<
 
 Tools: `register_target`, `remove_target`, `list_targets`, `probe_target`,
 `send_file`, `send_batch`, `start_watch`, `transfer_status`,
-`pull_completed`.
+`pull_completed`. They are annotated:
+- `list_targets`, `probe_target` and `transfer_status` only read;
+- `remove_target` is destructive.
+
+So a client's approval rules can tell them apart (Studio: Settings → Tool
+approval).
 
 - `register_target` moves the token into the OS keyring (with `keyring`
   installed) or `~/.config/neuronscope/secrets/<name>.token` (0600). The
@@ -148,7 +153,56 @@ Tools: `register_target`, `remove_target`, `list_targets`, `probe_target`,
   with inline tokens is migrated on first load.
 - The token reaches the CLI through the child's environment, never argv. It
   is redacted from any output and no tool returns it.
-- The server speaks stdio only and opens no network listener.
+- **The tools act on the computer that runs the server**: its registered
+  targets, and file paths on that computer. Each computer has its own
+  targets, so a server on another machine starts with none
+  (`list_targets` returns `{}`) until you register them there.
+
+### Over the network (`--http`)
+
+By default the server speaks stdio: an MCP client on the same computer
+starts it. To control transfers on another computer, serve it over
+streamable HTTP there:
+
+```bash
+python scripts/ns_security.py token --out ~/.config/neuronscope/secrets/transfer-mcp-http.token
+python scripts/ns_transfer_mcp.py --http --token-file ~/.config/neuronscope/secrets/transfer-mcp-http.token
+#   -> http://127.0.0.1:8765/mcp, bearer token required
+```
+
+- **Token**: every request needs the bearer token, even on 127.0.0.1. It
+  must be at least 32 characters. After 20 wrong tokens from one address in
+  ten minutes, that address waits.
+- **Other websites**: requests from web pages of other sites (an `Origin`
+  header) are refused. `--allowed-origin` admits one.
+- **Network addresses**: a network address (`--host 0.0.0.0`) needs
+  `--tls-cert` and `--tls-key`, or `--allow-plaintext` when only a VPN or a
+  TLS proxy can reach the port. The same rule as Studio and the receivers.
+- **Health**: `GET /health` answers without the token, for monitors.
+
+**Windows with Tailscale** (a ready HTTPS name, no certificates to manage), in Command Prompt:
+
+```bat
+py -3 scripts\ns_security.py token --out %USERPROFILE%\.config\neuronscope\secrets\transfer-mcp-http.token
+py -3 scripts\ns_transfer_mcp.py --http --token-file %USERPROFILE%\.config\neuronscope\secrets\transfer-mcp-http.token
+tailscale serve --bg 8765        # https://<machine>.<tailnet>.ts.net -> 127.0.0.1:8765
+```
+
+The server stays on 127.0.0.1, and Tailscale terminates TLS and only admits
+your tailnet. To start it at log-on, add the second command to Task
+Scheduler with the trigger *At log on*.
+
+On the controller, copy the token into a file
+(`~/.config/neuronscope/secrets/<name>.token`, mode 0600) and add the
+server to Studio's `~/.neuronscope/mcp.json` by reference:
+
+```json
+{"mcpServers": {"windows-transfer": {"url": "https://<machine>.<tailnet>.ts.net/mcp",
+                                     "token_file": "~/.config/neuronscope/secrets/windows-mcp-http.token"}}}
+```
+
+Then press **Reconnect / reload config** and **Test** on Studio's Tools tab. Other MCP clients
+take the same URL with an `Authorization: Bearer` header.
 
 ## Recommended topology
 
@@ -157,5 +211,5 @@ controller (laptop)
    ├── tuning worker over HTTPS ─────────► GPU host (builds + evaluates candidates)
    ├── ns_transfer watch over HTTPS/VPN ─► LM Studio host (receives finished GGUFs)
    ├── WebRTC GUI ───────────────────────► ad-hoc peer
-   └── MCP (stdio) ──────────────────────► the agent driving all of the above
+   └── MCP (stdio, or --http over a VPN) ► the agent driving all of the above
 ```

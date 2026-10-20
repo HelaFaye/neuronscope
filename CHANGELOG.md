@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added (MCP over the network)
+- `ns_transfer_mcp.py --http`: the transfer MCP server over streamable HTTP
+  for controllers on other computers.
+  - A bearer token is always required, compared in constant time, and
+    wrong guesses are throttled. Requests from other sites' web pages are
+    refused.
+  - A network address needs TLS or `--allow-plaintext`; behind `tailscale
+    serve` it stays on 127.0.0.1.
+  - The MCP session manager starts and stops with the server, and the
+    hostname check is replaced by the token check, so a proxy's own
+    hostname works. `GET /health` answers without the token.
+  - Its tools carry read-only and destructive annotations, and its
+    instructions say the tools act on the computer running it.
+- `mcp.json`: an HTTP server's `token_file` or `token_env`, and
+  `${file:…}` / `${env:…}` in header and env values, so tokens need not be
+  copied into the file. They are read at each connect.
+- Studio's Tools tab: **Test** per server. It lists the tools again and
+  calls one read-only tool that needs no arguments.
+
+### Fixed
+- With the MCP library 2.x, Studio read no tool annotations (2.x names
+  them `read_only_hint`…), so tool approval treated every tool as
+  unannotated. Both spellings are read now.
+
 ### Added (newcomers)
 - An optional tour of Studio, offered once on the first visit (*Show me
   around*, *Not now*, *Don't ask again*). It has eleven stops across

@@ -4101,6 +4101,14 @@ class Handler(BaseHTTPRequestHandler):
                 hub.connect()
                 return self._json(200, {"servers": hub.status(), "config": str(hub.config_path)})
 
+            if self.path == "/api/mcp/test":
+                # The owner's own check: lists the tools again and calls one read-only tool that
+                # needs no arguments, if the server marks one so.
+                hub = mcp_hub()
+                if hub is None:
+                    return self._json(400, {"error": "no MCP servers configured"})
+                return self._json(200, hub.test(str(self._read().get("server", ""))))
+
             if self.path == "/api/stats/ingest":
                 req = self._read(8 * 1024 * 1024)
                 target = find_model(str(req.get("model", "")))
@@ -5079,8 +5087,12 @@ async function mcp(reload){
   $('#mcpcfg').innerHTML=r.config?'config: <code>'+esc(r.config)+'</code>':'No MCP config. Create <code>~/.neuronscope/mcp.json</code> (see docs/STUDIO.md) and restart, or pass --mcp-config.';
   const sv=r.servers||[]; const n=sv.reduce((a,x)=>a+(x.connected?x.tools.length:0),0);
   $('#toolsBox').style.display=n?'':'none';
-  $('#mcplist').innerHTML=sv.map(x=>`<div class="m"><div class="mn">${esc(x.name)} <span class="tag">${esc(x.transport)}</span>${x.disabled?'<span class="tag">disabled</span>':x.connected?'<span class="tag okc">connected</span>':'<span class="tag bad">down</span>'}${x.auto_approve===true?'<span class="tag warn">auto-approve all</span>':''}</div>
-    <div class="mm">${x.error?'<span class="bad">'+esc(x.error)+'</span>':x.tools.map(t=>`<div title="${esc(t.description)}">${esc(t.name)}${Array.isArray(x.auto_approve)&&x.auto_approve.includes(t.name)?' <span class="tag">auto</span>':''}</div>`).join('')}</div></div>`).join('');
+  $('#mcplist').innerHTML=sv.map(x=>`<div class="m"><div class="mn">${esc(x.name)} <span class="tag">${esc(x.transport)}</span>${x.disabled?'<span class="tag">disabled</span>':x.connected?'<span class="tag okc">connected</span>':'<span class="tag bad">down</span>'}${x.auto_approve===true?'<span class="tag warn">auto-approve all</span>':''}${x.disabled?'':` <button class="x" style="width:auto;padding:0 .4rem" data-mtest="${esc(x.name)}" title="list its tools again, and call one read-only tool that needs no arguments">Test</button>`}</div>
+    <div class="mm" data-mres="${esc(x.name)}"></div><div class="mm">${x.error?'<span class="bad">'+esc(x.error)+'</span>':x.tools.map(t=>`<div title="${esc(t.description)}">${esc(t.name)}${Array.isArray(x.auto_approve)&&x.auto_approve.includes(t.name)?' <span class="tag">auto</span>':''}</div>`).join('')}</div></div>`).join('');
+  document.querySelectorAll('[data-mtest]').forEach(b=>b.onclick=async()=>{ const out=document.querySelector(`[data-mres="${b.dataset.mtest}"]`); out.textContent='testing…';
+    try{ const j=await (await post('/api/mcp/test',{server:b.dataset.mtest})).json();
+      out.innerHTML=j.ok?`<span class="okc">answered</span> in ${j.seconds}s · ${j.tools} tools`+(j.called?` · ${esc(j.called)}: ${j.call_ok?'<span class="okc">ok</span>':'<span class="bad">failed</span>'} <code>${esc((j.result||'').slice(0,160))}</code>`:' · no read-only tool without arguments to call')
+        :`<span class="bad">${esc(j.error||'failed')}</span>`; }catch(e){ out.innerHTML=`<span class="bad">${esc(String(e))}</span>`; } });
 }
 $('#mcpreload').onclick=()=>mcp(true);
 

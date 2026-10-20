@@ -34,6 +34,7 @@ work in another.
 | Studio sends project tasks to an endpoint | Studio | the endpoint's computer | OpenAI API at the endpoint's `/v1` | Workers page |
 | Studio's chat calls tools | Studio | wherever each tool server runs | MCP, from `mcp.json` and plugins | Settings, Plugins |
 | two Studios share models | the Studio that links | the linked Studio | Studio's API, with a device token | Link page |
+| an MCP client drives file transfers on another computer | Studio, or any MCP client | the computer running `ns_transfer_mcp.py --http` | MCP at its `/mcp`, bearer token | TRANSFER.md, *Over the network* |
 
 ## Ports
 
@@ -45,6 +46,8 @@ work in another.
 | 47870 (UDP) | NeuronScope Remote's beacon while pairing is open | UDP | no |
 | 8080 | llama-server (Studio's chat model) | OpenAI API | no |
 | 8090 | decode_lab (optional) | OpenAI API | no |
+| 8765 | `ns_transfer_mcp.py --http` (optional) | HTTP(S), bearer token | yes, at `/mcp` |
+| 8810 | `ns_transfer.py serve`, a file receiver | HTTP(S), bearer token | no |
 | 1234 / 11434 / 8000 | LM Studio / Ollama / vLLM | OpenAI API | no |
 
 An LLM server's port is a chat API. Pointing an MCP client at it does
