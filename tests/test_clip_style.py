@@ -28,10 +28,15 @@ def test_finds_the_grid_and_upscales_cleanly():
     assert cs.looks_like(shipped) == "pixel"
     out, used = cs.prepare(shipped, "auto", 224)
     assert used == "pixel" and out.size == (224, 224)
-    # nearest neighbour only: no blended colours appear
-    assert set(c for _, c in out.getcolors(1 << 16)) <= set(PAL)
-    # padded with the background, not cropped: the art's colours are all still there
-    assert {c for _, c in out.getcolors(1 << 16)} == {c for _, c in art.getcolors(1 << 16)}
+    # the default enlarges smoothly from the art's own grid (what CLIP reads best): new in-between colours
+    assert len(out.getcolors(1 << 16)) > len(PAL)
+    sharp, _ = cs.prepare(shipped, "pixel", 224, pixel_filter="nearest")
+    assert sharp.size == (224, 224)
+    # nearest: no blended colours, and padded with the background, not cropped: every art colour is still there
+    assert {c for _, c in sharp.getcolors(1 << 16)} == {c for _, c in art.getcolors(1 << 16)}
+    # bicubic from the grid is not the same as bicubic from the shipped blocks
+    blocks = shipped.resize((224, 224), Image.BICUBIC)
+    assert out.tobytes() != blocks.tobytes()
 
 
 def test_photos_and_cartoons():

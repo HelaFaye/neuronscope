@@ -4,18 +4,18 @@ Pixel art and cartoons for CLIP-style models: preprocessing and prompts.
 CLIP is trained mostly on photos. Two things hurt it on sprites and cartoons
 before the model sees anything:
 
-- the processor resizes with bicubic filtering, which smears a 32x32 sprite
-  into a blurry blob, and then centre-crops, which cuts off whatever is not in
-  the middle of a wide or tall image;
+- pixel art is usually shipped already enlarged with hard square blocks;
+  the processor resizes those blocks, not the art, and the sharp block edges
+  look nothing like the photos CLIP learned from. It then centre-crops,
+  which cuts off whatever is not in the middle of a wide or tall image;
 - photo prompts ("a photo of a cat") describe a different kind of picture.
 
 This module fixes the input side, with no training:
 
   pixel     find the art's own pixel grid (pixel art is often shipped already
-            upscaled, by 2, 3, 4...), shrink back to it, then upscale by a whole
-            number with nearest neighbour so every art pixel becomes a clean
-            square block; pad to a square with the background colour instead
-            of cropping
+            upscaled, by 2, 3, 4...), shrink back to it, pad to a square with
+            the background colour instead of cropping, and scale up smoothly
+            (bicubic) from that grid to the model's input size
   cartoon   pad to a square (no crop); no resampling change
   auto      pixel for images that look like pixel art (few colours, long runs
             of identical pixels), cartoon for flat-colour images, unchanged
@@ -24,6 +24,14 @@ This module fixes the input side, with no training:
 
 and adds style prompt templates ("pixel art of a {}", "a cartoon of a {}")
 to the photo ones, so the text side describes the picture's medium too.
+
+Measured (CLIP ViT-B/32, zero-shot CIFAR-10, 1,000 test images turned into
+16-colour pixel art shipped at 4x): 0.495 off, 0.750 with auto. Of that,
+the recovered grid with bicubic gives most (0.727 alone) and the style
+prompts the rest; nearest neighbour from the same grid gives 0.507, so hard
+block edges are what a photo-trained model misreads. The same 1,000 photos:
+0.908 off, 0.907 auto. These are pixelated photos, not drawn sprites; measure
+on your own images with clip_bench.py eval --style.
 
     python scripts/clip_style.py inspect sprite.png --out sprite-224.png
 """
@@ -134,24 +142,30 @@ def pad_square(img, colour=None):
     return out
 
 
-def pixel_upscale(img, target: int = 224):
-    """Back to the art's own grid, padded square, then whole-number nearest-neighbour upscale to
-    at least `target` (the processor's own resize then only shrinks slightly, or not at all)."""
+PIXEL_FILTERS = ("bicubic", "nearest")
+
+
+def pixel_upscale(img, target: int = 224, resample: str = "bicubic"):
+    """Back to the art's own grid, padded square, then scaled to exactly `target` from that grid.
+
+    bicubic (the default) is what measured best: CLIP reads smoothly enlarged art far better than
+    hard blocks. nearest keeps every art pixel a clean square, for comparison or other models."""
     from PIL import Image
+    if resample not in PIXEL_FILTERS:
+        raise ValueError(f"resample: one of {', '.join(PIXEL_FILTERS)}")
     img = _rgb(img)
     b = block_size(img)
     if b > 1:
         img = img.resize((max(1, img.size[0] // b), max(1, img.size[1] // b)), Image.NEAREST)
     img = pad_square(img)
-    k = max(1, math.ceil(target / img.size[0]))
-    out = img.resize((img.size[0] * k, img.size[1] * k), Image.NEAREST)
-    if out.size[0] > target and out.size[0] % target:
-        # land exactly on the target with nearest too, so the processor does no bicubic smoothing
-        out = out.resize((target, target), Image.NEAREST)
-    return out
+    if resample == "nearest":
+        k = max(1, math.ceil(target / img.size[0]))
+        img = img.resize((img.size[0] * k, img.size[1] * k), Image.NEAREST)
+        return img if img.size[0] == target else img.resize((target, target), Image.NEAREST)
+    return img.resize((target, target), Image.BICUBIC)
 
 
-def prepare(img, style: str = "auto", target: int = 224):
+def prepare(img, style: str = "auto", target: int = 224, pixel_filter: str = "bicubic"):
     """The image to hand the processor. -> (image, style used)."""
     if style not in STYLES:
         raise ValueError(f"style: one of {', '.join(STYLES)}")
@@ -160,7 +174,7 @@ def prepare(img, style: str = "auto", target: int = 224):
         return img, "off"
     kind = looks_like(img) if style == "auto" else style
     if kind == "pixel":
-        return pixel_upscale(img, target), "pixel"
+        return pixel_upscale(img, target, pixel_filter), "pixel"
     if kind == "cartoon":
         return pad_square(img), "cartoon"
     return img, "photo"
