@@ -214,6 +214,18 @@ SPECS: dict[str, dict] = {
         "help": "Needs a LiveBench checkout.",
         "fields": [F("livebench", req=True), F("endpoint", req=True, help="URL@model"),
                    F("bench", multi=True, default=["live_bench"]), F("publish_stats")]},
+    "quant_select": {
+        "title": "Choose a quantization", "group": "Benchmarks", "argv": [S / "quant_select.py"],
+        "help": "Measure fit, speed and fidelity of a model's quantizations on this computer; keep the fastest faithful one.",
+        "fields": [F("model", multi=True, help="GGUF files of one model in different quantizations"),
+                   F("from", help="or a high-precision GGUF to make them from"),
+                   F("make", help="types to make, e.g. Q8_0,Q6_K,Q4_K_M,TQ2_0"), F("imatrix"),
+                   F("objective", choices=["gen", "prompt", "request"], default="gen"),
+                   F("tune", kind="int", default=0, help="Bayesian engine-option trials per file"),
+                   F("memory_gb", kind="float", help="default: the largest accelerator's free memory, or RAM"),
+                   F("fidelity", choices=["auto", "kld", "agreement"], default="auto"),
+                   F("max_kld", kind="float", default=0.1), F("min_agreement", kind="float", default=0.6),
+                   F("server", help="llama-server"), F("out", req=True)]},
     "clip_bench": {
         "title": "CLIP_benchmark", "group": "Benchmarks", "argv": [S / "clip_bench.py", "eval"],
         "help": "Zero-shot classification at each suppression scale.",
@@ -712,7 +724,7 @@ function suggest(f){ const h=(f.help||'').toLowerCase();
   if(f.name==='llama') return DEF.llama;
   return null; }
 // Fields that name a file or folder get Browse…; GGUF fields also a list of the models Studio knows.
-const PICK={gguf:'file',server:'file',binary:'file',cett:'file',classifier:'file',predictions:'file',reply_file:'file',h_neurons:'file',
+const PICK={gguf:'file',from:'file',imatrix:'file',server:'file',binary:'file',cett:'file',classifier:'file',predictions:'file',reply_file:'file',h_neurons:'file',
   llama:'dir',cache:'dir',out:'any',dataset:'any',data:'any',results:'any',report:'any',traces:'any',state:'any',session:'any',reference:'any',
   model:'any',base:'any',teacher:'any',student:'any',review_model:'any'};
 function pickFor(f){ const w=PICK[f.name]; if(!w||f.multi||f.choices) return '';

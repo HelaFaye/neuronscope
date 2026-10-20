@@ -159,6 +159,33 @@ Only speed is measured. A quantized KV cache can change answers slightly,
 so check one with TestQA or the gate. The suppression α is a quality
 setting: tune it with `tune_scale_server.py`, not for tokens per second.
 
+## Choosing a quantization for each computer
+
+`scripts/quant_select.py` (Jobs → *Choose a quantization*, or **Measure
+which suits this computer** under a model in My Models) takes several GGUF
+files of one model in different quantizations, or makes them with
+`llama-quantize` from a high-precision file (`--from m-F16.gguf --make
+Q8_0,Q6_K,Q4_K_M,TQ2_0`). For each one it measures on this computer:
+
+| | how |
+|---|---|
+| fit | the file against the memory you give (`--memory-gb`), or the largest accelerator's free memory, or 80% of free RAM |
+| speed | the engine optimizer's benchmark; `--tune N` also runs its Bayesian search over engine options for that file |
+| fidelity | against the highest-precision file: llama.cpp's KL divergence and same-top-token rate (`llama-perplexity --kl-divergence`, found next to llama-server) or, without that tool, how much of each greedy answer to twelve fixed prompts matches word for word |
+
+It keeps the fastest file that fits and clears the fidelity bar (`--max-kld
+0.1`, `--min-same-top 85`, or `--min-agreement 0.6`). If none clears it,
+it keeps the most faithful file that fits and says so. The choice is stored per hardware
+(CPU, accelerators and their memory, never the computer's name) in
+`~/.neuronscope/quant_choices.json`, and My Models marks it with ★. A
+laptop and a GPU desktop can then each run the file that suits them.
+
+Switching between quantizations is never lossless. Each file loses
+something against the original weights, and the fidelity column measures
+how much. The ternary types TQ1_0 and TQ2_0 keep quality only for models
+trained ternary (BitNet b1.58 and its relatives). Quantizing an ordinary
+model to ternary wrecks it, and the numbers will show that.
+
 ## What Studio does not do for you
 
 These are real gains in some setups, but outside what an application should

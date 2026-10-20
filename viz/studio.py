@@ -66,6 +66,7 @@ import jobs as ns_jobs
 import rag as ns_rag
 import mcp_client as ns_mcp
 import context_compress as ns_compress
+import quant_select as ns_qsel
 import ns_pairing
 try:
     from hostcheck import Host, check as host_check
@@ -4066,6 +4067,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, json.load(f))
             except (ValueError, FileNotFoundError):
                 return self._json(404, {"error": "no such chat"})
+        m = re.fullmatch(r"/api/quant/choice\?family=(.+)", self.path)
+        if m:
+            # What quant_select.py measured for this model family on this hardware (Jobs -> Choose a quantization).
+            fam = urllib.parse.unquote(m.group(1))
+            if "hw" not in STATE:
+                STATE["hw"] = ns_qsel.hardware()
+            try:
+                allc = json.loads(Path(STATE.get("quant_choices") or ns_qsel.CHOICES).read_text())
+            except (OSError, ValueError):
+                allc = {}
+            here = (allc.get(fam) or {}).get(STATE["hw"]["id"])
+            return self._json(200, {"family": fam, "here": here, "elsewhere": len(allc.get(fam) or {}) - bool(here)})
         if self.path == "/api/models":
             ms = scan_models()
             st = load_settings()
@@ -4073,6 +4086,7 @@ class Handler(BaseHTTPRequestHandler):
                 m["settings"] = {**DEFAULTS, **st.get(_key(m["path"]), {})}
                 m["fit"] = fit_estimate(m["size"])
                 m["stats"] = model_summary(m, st)
+                m["family"], m["quant"] = ns_qsel.family(m["path"]), ns_qsel.quant_of(m["path"])
             return self._json(200, ms)
         if self.path == "/api/stats":
             return self._json(200, {"min_graded": STATE["min_graded"], "min_subject": STATE["min_subject"],
@@ -4869,6 +4883,7 @@ section.chat{position:relative}
     <button id="load" class="pri" style="margin-top:.7rem;width:100%">Load</button>
     <div id="radarBox" style="display:none"><div class="row2" style="align-items:end"><div><label>Compare with (2P)</label><select id="vsPick"></select></div><div class="note" id="radarNote"></div></div><div id="radar"></div></div>
     <div id="statsbox"></div>
+    <div id="quantbox" class="note"></div>
     <div id="loadmsg" class="note"></div>
   </div>
   </div>
@@ -5086,12 +5101,23 @@ function pick(i){
   $('#moebox').style.display = sel.n_experts?'block':'none';
   if(sel.n_experts) $('#moehint').textContent = `0 = model default (of ${sel.n_experts})`;
   $('#visionrow').style.display = sel.mmproj?'block':'none';
-  $('#statsbox').innerHTML = statsTable(sel.stats); renderRadar();
+  $('#statsbox').innerHTML = statsTable(sel.stats); renderRadar(); quantBox();
   $('#vision').checked = s.vision!==false; $('#mmname').textContent = sel.mmproj?'('+sel.mmproj.split('/').pop()+')':'';
   const eng = s.engine || (sel.format==='hf'?'vllm':'llama'); $('#engine').value=eng;
   const fa = s.flash_attn===true?'on':s.flash_attn===false?'off':s.flash_attn;
   loadEO(eng, {...s, flash_attn: fa});
 }
+// Other quantizations of the same model, and which one was measured best on this computer.
+async function quantBox(){ const m=sel, box=$('#quantbox'); box.innerHTML=''; if(!m||!m.family) return;
+  const sib=models.filter(x=>x.family===m.family).sort((a,b)=>b.size-a.size);
+  let ch=null; try{ ch=await (await fetch('/api/quant/choice?family='+encodeURIComponent(m.family))).json(); }catch{}
+  if(sel!==m) return;
+  const best=ch&&ch.here;
+  const chips=sib.map(x=>`<button type="button" data-q="${esc(x.id)}" style="font-size:11.5px;padding:.1rem .45rem;margin:.1rem .15rem 0 0;${x.id===m.id?'border-color:var(--acc)':''}" title="${esc(x.path)}">${esc(x.quant||'?')} · ${human(x.size)}${best&&best.model===x.path?' ★':''}</button>`).join('');
+  const jobs='/jobs#kind=quant_select&model='+encodeURIComponent(sib.map(x=>x.path).join(' '))+'&out='+encodeURIComponent('runs/qsel-'+m.family);
+  box.innerHTML=`<b>Quantizations</b> ${sib.length>1?chips:''}<div>${best?`★ <b>${esc(best.quant)}</b> was measured the best fit for this computer (${best.speed&&best.speed.gen_tps?best.speed.gen_tps.toFixed(1)+' tok/s':''}${best.fidelity&&best.fidelity.kld!=null?', KLD '+best.fidelity.kld.toFixed(3):best.fidelity&&best.fidelity.agreement!=null?', '+Math.round(best.fidelity.agreement*100)+'% agreement':''}).`:''}
+    ${sib.length>1?`<a href="${jobs}">Measure which suits this computer</a>`:`Only ${esc(m.quant||'this file')} is here. <a href="/jobs#kind=quant_select&from=${encodeURIComponent(m.path)}&make=Q8_0,Q6_K,Q4_K_M&out=${encodeURIComponent('runs/qsel-'+m.family)}">Make others and measure</a> (from a high-precision file works best).`}</div>`;
+  box.querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{ const i=models.findIndex(x=>x.id===b.dataset.q); if(i>=0) pick(i); }); }
 $('#load').onclick=async()=>{
   if(!sel) return;
   const s={}; F.forEach(k=>{ const el=$('#'+k); if(!el) return; s[k] = TEXT_FIELDS.includes(k) ? el.value : (parseFloat(el.value)||0); });
