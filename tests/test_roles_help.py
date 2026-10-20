@@ -37,3 +37,24 @@ def test_roles_are_stated(studio_srv):
     ins = out["result"]["instructions"]
     assert "CONTROLLER" in ins and "every tool acts on the computer Studio runs on" in ins
     assert call(studio_srv, "/help/NOPE")[0] == 404
+
+
+def test_tour_stops_point_at_real_elements(studio_srv):
+    import re
+    import ui_links
+    js = ui_links.js()
+    steps = re.findall(r"\{path:'([^']+)', sel:'([^']+)', title:'([^']+)'", js)
+    assert len(steps) >= 10 and steps[0][0] == "/"
+    for path, sel, title in steps:
+        code, page = call(studio_srv, path)
+        assert code == 200, path
+        assert "NS_TOUR" in page and "nsHelpButton" in page, path          # the tour and ? button on every page
+        for part in sel.split(","):
+            ids = re.findall(r"#([\w-]+)", part)
+            tab = re.findall(r"\[data-tab=(\w+)\]", part)
+            if ids:
+                assert all(f'id="{i}"' in page for i in ids), (path, part, title)
+            elif tab:
+                assert f'data-tab="{tab[0]}"' in page, (path, part)
+            else:
+                assert f"<{part.strip()}" in page, (path, part)

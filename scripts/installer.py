@@ -437,7 +437,7 @@ function follow(){ const es=new EventSource('/'+T+'/api/events'); const log=$('#
     if(ev.kind==='line'){ log.textContent+=ev.text+'\n'; log.scrollTop=1e9; }
     if(ev.kind==='step'){ const el=$('#st-'+ev.id); if(el){ el.textContent=ev.status; el.className='st '+ev.status; } }
     if(ev.kind==='end'){ es.close(); show(4); $('#endh').textContent=ev.ok?'Done':'Not finished';
-      $('#endmsg').innerHTML=ev.ok?'<p>NeuronScope is installed. It opens in your browser on its Setup page, which builds llama.cpp (or uses one you have), finds your models and checks everything. A short tour starts the first time.</p>':'<p>A step failed; the output says why, and what to try. Fix it and press Install again: finished steps are quick the second time.</p>';
+      $('#endmsg').innerHTML=ev.ok?'<p>NeuronScope is installed. It opens in your browser on its Setup page, which builds llama.cpp (or uses one you have), finds your models and checks everything. The first time, it offers a short tour (optional).</p>':'<p>A step failed; the output says why, and what to try. Fix it and press Install again: finished steps are quick the second time.</p>';
       $('#open').hidden=!ev.ok; } }; }
 $('#open').onclick=async()=>{ await api('/api/launch',{}); $('#endmsg').innerHTML+='<p class="note">Starting NeuronScope… it opens in a new tab.</p>'; };
 $('#quit').onclick=async()=>{ try{ await api('/api/quit',{}); }catch{} document.body.innerHTML='<main><h1>You can close this tab.</h1></main>'; };

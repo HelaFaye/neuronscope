@@ -47,8 +47,12 @@ The installer opens in your browser:
 3. **Installing**: each step with its output. A failed step says what to
    try, and *Install* again resumes quickly.
 4. **Done**: *Open NeuronScope* starts Studio on its Setup page, which
-   builds llama.cpp (or uses one you have) and finds your models. A short
-   tour starts the first time.
+   builds llama.cpp (or uses one you have) and finds your models.
+
+The first time you open Studio it offers a two-minute tour, which is
+optional. It points at each part of Studio in turn. The **?** button at the
+bottom right of every page brings it back, jumps to the current page's
+stop, or opens these help pages inside Studio.
 
 Terminal instead:
 

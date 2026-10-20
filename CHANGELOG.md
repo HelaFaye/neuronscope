@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added (newcomers)
+- An optional tour of Studio, offered once on the first visit (*Show me
+  around*, *Not now*, *Don't ask again*). It has eleven stops across
+  Studio, Setup, Jobs, Review, Projects, Workers, Connect and Settings,
+  each pointing at the real control.
+  - Back and Next (or the arrow keys), and Esc to end it.
+  - A ? button on every page restarts it, jumps to the current page's stop,
+    or opens the help pages.
+
 ### Added (installing)
 - A cross-platform installer wizard (`scripts/installer.py`, standard
   library only), opened by double-clicking `Install NeuronScope.bat`
