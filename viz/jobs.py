@@ -219,7 +219,7 @@ SPECS: dict[str, dict] = {
         "help": "Zero-shot classification at each suppression scale.",
         "fields": [F("model", req=True), F("dataset", req=True, multi=True, help="e.g. imagenetv2 imagenet_sketch"),
                    F("dataset_root", req=True), F("h_neurons", flag="--h_neurons"), F("scales", multi=True, default=["1"]),
-                   F("out", req=True)]},
+                   F("style", choices=["off", "auto", "pixel", "cartoon"], default="off", help="pixel art and cartoons: clean upscaling, padding, style prompts"), F("out", req=True)]},
 }
 
 def U(name, **kw):
@@ -350,7 +350,8 @@ SPECS.update({
                  "export": "A suppressed copy of the model."}[sub],
         "fields": fields} for sub, fields in {
         "collect": [U("model", req=True, help="e.g. openai/clip-vit-base-patch32"), U("images", help="image folder"),
-                    U("manifest"), U("labels"), U("out", req=True, help="e.g. runs/clip")],
+                    U("manifest"), U("labels"), U("style", choices=["off", "auto", "pixel", "cartoon"], default="off", help="pixel art and cartoons: clean upscaling, padding, style prompts; extract and evaluate use the same"),
+                    U("out", req=True, help="e.g. runs/clip")],
         "extract": [U("model", req=True), U("run", req=True), U("ids", req=True),
                     U("tower", choices=["vision", "text"], default="vision"), U("out", req=True)],
         "evaluate": [U("model", req=True), U("run", req=True), U("ids", req=True), U("h_neurons", req=True),

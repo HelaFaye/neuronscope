@@ -73,6 +73,8 @@ class H(BaseHTTPRequestHandler):
         text = f"model={a.alias} mmproj={'yes' if a.mmproj else 'no'} image={'yes' if has_img else 'no'}"
         if ctx:
             text += " ctx=yes"
+        if any(m.get("role") == "system" and str(m.get("content")).startswith("Summary of the first") for m in msgs):
+            text += f" summary=yes turns={sum(1 for m in msgs if m.get('role') != 'system')}"
         if body.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

@@ -93,6 +93,32 @@ or confidence AUROC without a large accuracy loss. As with text models,
 suppression trades confident errors for low-confidence ones; it does not add
 knowledge. Measure on held-out images, never on the training split.
 
+## Pixel art and cartoons
+
+CLIP learned mostly from photos, and its processor treats every image like
+one. It resizes with bicubic filtering, which turns a 32×32 sprite into a
+blur, and it centre-crops, which cuts off the edges of wide or tall art.
+`--style` fixes the input side without retraining (`scripts/clip_style.py`):
+
+| style | what happens |
+|---|---|
+| `off` (default) | the processor's own resize and crop |
+| `pixel` | finds the art's own pixel grid (sprites are often shared already scaled by 2, 3 or 4) and shrinks back to it; pads to a square with the background colour; scales up by a whole number with nearest neighbour, so each art pixel becomes a clean block |
+| `cartoon` | pads to a square instead of cropping |
+| `auto` | `pixel` for images with few colours and long runs of identical pixels, `cartoon` for flat-colour images, nothing for photos |
+
+The text side gets style prompts as well: "pixel art of a {}", "a 16-bit
+sprite of a {}", "a cartoon of a {}" and similar, averaged with the photo
+templates. `collect` records the style in `run.json`, and `extract` and
+`evaluate` reuse it unless told otherwise. `clip_bench.py eval --style`
+measures whether it helps on your images. Compare `off` and `auto` on the
+same set before you rely on it.
+
+```bash
+python scripts/clip_style.py inspect sprite.png --out sprite-224.png   # what auto sees, and the result
+python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --images data/sprites --style auto --out runs/clip-sprites
+```
+
 ## Benchmark it
 
 For standard numbers (ImageNetV2, ImageNet-Sketch, VTAB and the rest of CLIP_benchmark) at each suppression scale, see [BENCHMARKS.md](BENCHMARKS.md#clip_benchmark-imagenetv2-imagenet-sketch-vtab-).

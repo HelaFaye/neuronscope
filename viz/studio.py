@@ -65,6 +65,7 @@ import model_stats
 import jobs as ns_jobs
 import rag as ns_rag
 import mcp_client as ns_mcp
+import context_compress as ns_compress
 import ns_pairing
 try:
     from hostcheck import Host, check as host_check
@@ -1195,6 +1196,10 @@ def rag_context(req: dict, msgs: list) -> tuple[list, list]:
     hits = coll.search(query, max(1, min(int(spec.get("k", 4)), 12)), emb)
     if not hits:
         return msgs, []
+    if (req.get("compress") or {}).get("passages"):
+        # Keep the sentences that bear on the question, within about a fifth of the context window.
+        hits, info = ns_compress.compress_passages(query, hits, budget=max(300, (_ctx_size() or 8192) // 5))
+        req["_compressed_passages"] = info
     ctx = {"role": "system", "content": ns_rag.context_message(hits)}
     i = 1 if msgs and msgs[0].get("role") == "system" else 0
     return msgs[:i] + [ctx] + msgs[i:], hits
@@ -1243,6 +1248,45 @@ def count_tokens(texts: list) -> tuple[list, str]:
     return [round(len(t) / 4) if t else 0 for t in texts], "estimate"
 
 
+def compress_history(msgs: list, req: dict, reserve: int, upstream=None) -> tuple[list, dict | None]:
+    """Fit a long chat into the context window: drop the oldest turns ("cut"), or stand a model-written
+    summary in for them ("summarize"). The client keeps the summary and sends it back as
+    req["summary"] = {upto, text}, so earlier turns are summarized once. -> (messages, what was done)"""
+    mode = (req.get("compress") or {}).get("history") or "off"
+    n_ctx = _ctx_size()
+    if mode not in ("cut", "summarize") or not n_ctx:
+        return msgs, None
+    head = 0
+    while head < len(msgs) and msgs[head].get("role") == "system":
+        head += 1
+    fixed, conv = msgs[:head], msgs[head:]
+    upto, text = 0, None
+    sm = req.get("summary") or {}
+    if mode == "summarize" and isinstance(sm, dict) and sm.get("text") and 0 < int(sm.get("upto") or 0) <= len(conv):
+        upto, text = int(sm["upto"]), str(sm["text"])[:8000]
+    count = lambda t: int(ns_compress.est_tokens(t) * 1.15) + 1      # noqa: E731  # leave a margin: code tokenizes densely
+    budget = max(256, n_ctx - reserve - 64)
+    cur = fixed + ([ns_compress.summary_message(text, upto)] if text else []) + conv[upto:]
+    cut = ns_compress.fit_history(cur, budget, count)
+    if cut == 0:
+        return cur, ({"history": "summary", "upto": upto} if text else None)
+    lead = len(fixed) + (1 if text else 0)              # the summary counts as a leading system message
+    if mode == "cut":
+        return cur[:lead] + cur[lead + cut:], {"history": "cut", "dropped": upto + cut, "upto": upto + cut}
+    folded = conv[upto:upto + cut]
+    prompt = ns_compress.summary_prompt(folded, text)
+    r = proxy("/v1/chat/completions", {"messages": prompt, "max_tokens": 500, "temperature": 0.2, "stream": False},
+              upstream=upstream)
+    new = ((r.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    new = re.sub(r"(?s)<think>.*?</think>", "", new).strip()
+    if not new:
+        return cur[:lead] + cur[lead + cut:], {"history": "cut", "dropped": upto + cut, "upto": upto + cut,
+                                               "note": "the model gave no summary; the oldest turns were dropped"}
+    upto += cut
+    return fixed + [ns_compress.summary_message(new, upto)] + conv[upto:], \
+        {"history": "summarized", "upto": upto, "summary": new}
+
+
 def context_usage(req: dict, role: str) -> dict:
     """What the next chat request would put in the model's context, by part (the chat side panel)."""
     msgs = [m for m in req.get("messages") or [] if isinstance(m, dict)]
@@ -1260,6 +1304,12 @@ def context_usage(req: dict, role: str) -> dict:
                 tools = json.dumps(hub.openai_tools())
             except Exception:
                 tools = ""
+    summarized = 0
+    sm = req.get("summary") or {}
+    if ((req.get("compress") or {}).get("history") == "summarize" and isinstance(sm, dict) and sm.get("text")
+            and 0 < int(sm.get("upto") or 0) <= len(msgs)):
+        summarized = int(sm["upto"])
+        msgs = [ns_compress.summary_message(str(sm["text"]), summarized)] + msgs[summarized:]
     docs = str(req.get("documents") or "")[:200_000]
     convo = "\n".join(f"{m.get('role')}: {_msg_text(m)}" for m in msgs)
     (n_sys, n_docs, n_tools, n_msgs), method = count_tokens([system, docs, tools, convo])
@@ -1273,7 +1323,7 @@ def context_usage(req: dict, role: str) -> dict:
     return {"n_ctx": _ctx_size(), "model": m.get("id"), "trained_ctx": m.get("context"),
             "reply_reserve": int(preset.get("max_tokens", 2048) or 0), "parts": parts,
             "total": sum(p["tokens"] for p in parts), "images": images, "method": method,
-            "turns": len(msgs)}
+            "turns": len(msgs), "summarized": summarized}
 
 
 def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
@@ -4475,6 +4525,12 @@ class Handler(BaseHTTPRequestHandler):
                     msgs, sources = rag_context(req, msgs)
                 except (FileNotFoundError, ValueError, RuntimeError, OSError) as e:
                     return self._json(400, {"error": f"retrieval failed: {e}"})
+                if req.get("compress"):
+                    try:
+                        msgs, hist = compress_history(msgs, req, int(preset.get("max_tokens", 2048) or 0), upstream)
+                    except Exception as e:      # compression is a help, never the reason a chat fails
+                        hist = {"history": "failed", "error": str(e)[:200]}
+                    req["_compressed_history"] = hist
                 payload = {"messages": msgs,
                            "temperature": preset.get("temperature", 0.7),
                            "top_p": preset.get("top_p", 0.95),
@@ -4502,6 +4558,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_headers_sse()
                 if sources:
                     self.wfile.write(f"data: {json.dumps({'sources': sources})}\n\n".encode())
+                comp = {k: v for k, v in (("passages", req.get("_compressed_passages")),
+                                          ("history", req.get("_compressed_history"))) if v}
+                if comp:
+                    self.wfile.write(f"data: {json.dumps({'compressed': comp})}\n\n".encode())
                 touch(+1)
                 try:
                     # MCP tools run with the host owner's permissions: owner sessions only
@@ -4819,7 +4879,9 @@ section.chat{position:relative}
   <div id="side" hidden aria-label="Environment, context and outputs">
     <section><h3>Environment <span class="r" id="envState"></span></h3><dl class="kv" id="envKv"></dl></section>
     <section><h3>Context usage <span class="r" id="ctxPct"></span></h3>
-      <div class="cbar" id="ctxBar" role="img" aria-label="context usage"></div><div class="cleg" id="ctxLeg"></div><div class="note" id="ctxNote"></div></section>
+      <div class="cbar" id="ctxBar" role="img" aria-label="context usage"></div><div class="cleg" id="ctxLeg"></div><div class="note" id="ctxNote"></div>
+      <label style="margin-top:.5rem"><input type="checkbox" id="cmpPass"> Trim document passages to the sentences that match the question</label>
+      <label>When the chat no longer fits <select id="cmpHist" style="width:auto;margin-left:.3rem"><option value="off">do nothing</option><option value="summarize">summarize the oldest messages</option><option value="cut">drop the oldest messages</option></select></label></section>
     <section><h3>Outputs <span class="r" id="outN"></span></h3><div class="outs" id="outList"></div>
       <button id="outExport" style="margin-top:.4rem;font-size:12px;padding:.25rem .6rem">Export chat as .md</button></section>
   </div>
@@ -5224,12 +5286,12 @@ $('#f').onsubmit=async e=>{
 async function regenerate(){ if(busy) return; while(chat.messages.length && chat.messages.at(-1).role==='assistant') chat.messages.pop(); renderChat(); await stream(); }
 async function stream(){
   busy=true; $('#send').textContent='Stop'; ctrl=new AbortController();
-  const out=bubble('assistant','',{think:''}); const lp=[]; let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[], servedBy=null;
+  const out=bubble('assistant','',{think:''}); const lp=[]; let acc='', think='', t0=performance.now(), tFirst=0, usage=null, timings=null, routeNote='', sources=null, tools=[], servedBy=null, compressed=null;
   try{
     const r=await fetch('/api/chat',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({messages:chat.messages.map(m=>({role:m.role,content:m.content})),preset:$('#preset').value,model:$('#modelPick').value,
         rag:$('#ragPick').value?{collection:$('#ragPick').value,k:4}:undefined, tools:$('#toolsOn').checked||undefined,
-        confidence:$('#confOn').checked||undefined})});
+        confidence:$('#confOn').checked||undefined, ...cmpReq()})});
     if(!r.ok){ let e=await r.text(); try{e=JSON.parse(e).error||e}catch{} e=typeof e==='string'?e:(e.message||JSON.stringify(e)); out.body.innerHTML='error: '+linkify(esc(e)); throw 0; }
     try{ const rt=JSON.parse(r.headers.get('X-NeuronScope-Route')||'null');
       if(rt) servedBy=rt.model;
@@ -5246,6 +5308,9 @@ async function stream(){
         let j; try{ j=JSON.parse(d) }catch{ continue }
         if(j.error){ out.body.innerHTML='error: '+linkify(esc(j.error.message||j.error)); continue; }
         if(j.sources){ sources=j.sources; showSources(out.src,sources); continue; }
+        if(j.compressed){ compressed=j.compressed; const h=j.compressed.history;
+          if(h&&h.history==='summarized') chat.summary={upto:h.upto,text:h.summary};
+          out.stats.textContent=cmpNote(j.compressed); continue; }
         if(j.tool_call){ tools.push(j.tool_call); toolCard(out.tools,j.tool_call); $('#log').scrollTop=1e9; continue; }
         if(j.tool_result){ const t=tools.find(x=>x.key===j.tool_result.key); if(t){ t.result=j.tool_result; t.decided=true; toolCard(out.tools,t); } continue; }
         if(j.usage) usage=j.usage; if(j.timings) timings=j.timings;
@@ -5263,11 +5328,11 @@ async function stream(){
   const ntok=usage?.completion_tokens ?? timings?.predicted_n;
   const tps=timings?.predicted_per_second ?? (ntok?ntok/secs:null);
   const stats=[ntok?`${ntok} tokens`:null, tps?`${tps.toFixed(1)} tok/s`:null, tFirst?`first token ${((tFirst-t0)/1000).toFixed(2)}s`:null].filter(Boolean).join(' · ');
-  const fullStats=[routeNote,stats].filter(Boolean).join(' · ');
+  const fullStats=[routeNote,stats,compressed?cmpNote(compressed):''].filter(Boolean).join(' · ');
   out.stats.textContent=fullStats;
   let msg=null;
   const conf=lp.length?confidenceOf(lp):null; if(conf) showConfidence(out.root,conf);
-  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined,confidence:conf||undefined,usage:usage||undefined};
+  if(acc||think){ msg={role:'assistant',content:acc,model:servedBy||undefined,think:think||undefined,stats:fullStats,sources:sources||undefined,tools:tools.length?tools:undefined,confidence:conf||undefined,usage:usage||undefined,compressed:compressed||undefined};
     chat.messages.push(msg); out.root._msg=msg; await persist(); }
   status(); refresh();
   busy=false; $('#send').textContent='Send';
@@ -5298,7 +5363,7 @@ async function ctxRefresh(){
   const draft=$('#in').value.trim(); const msgs=chat.messages.map(m=>({role:m.role,content:m.content})); if(draft) msgs.push({role:'user',content:draft});
   const last=[...chat.messages].reverse().find(m=>m.role==='assistant'&&m.sources);
   const documents=$('#ragPick').value&&last?last.sources.map(h=>h.text).join('\n'):'';
-  let c; try{ c=await post('/api/context',{messages:msgs,preset:$('#preset').value,tools:$('#toolsOn').checked||undefined,documents}).then(r=>r.json()); }catch{ return; }
+  let c; try{ c=await post('/api/context',{messages:msgs,preset:$('#preset').value,tools:$('#toolsOn').checked||undefined,documents,...cmpReq()}).then(r=>r.json()); }catch{ return; }
   ctxLast=c; const cap=c.n_ctx||(models.find(x=>x.id===(status_||{}).id)?.settings?.ctx)||null;
   const used=c.total, rsv=c.reply_reserve||0, denom=Math.max(cap||0,used+rsv,1);
   $('#ctxBar').innerHTML=c.parts.map(p=>p.tokens?`<span style="width:${100*p.tokens/denom}%;background:${CTX_COL[p.key]}" title="${esc(p.label)}: ${p.tokens}"></span>`:'').join('')
@@ -5313,7 +5378,8 @@ async function ctxRefresh(){
   const notes=[c.method==='estimate'?'Estimated at about 4 characters a token; load the model for exact counts.':'Counted with the model\'s tokenizer; the chat template adds a little.',
     lastU?`The last reply used ${lastU.prompt_tokens?.toLocaleString?.()??'?'} prompt + ${lastU.completion_tokens?.toLocaleString?.()??'?'} reply tokens.`:'',
     c.images?`${c.images} image(s) also take context (how much depends on the vision projector).`:'',
-    pct!=null&&used+rsv>cap?'<b class="bad">The next request will not fit:</b> start a new chat, or raise the context in Model settings.':pct>=75?'<span class="warn">Getting full: older messages may soon be cut.</span>':''];
+    c.summarized?`The first ${c.summarized} messages count as their summary.`:'',
+    pct!=null&&used+rsv>cap?(cmpGet().history&&cmpGet().history!=='off'?`<span class="warn">Over the window: the oldest messages will be ${cmpGet().history==='cut'?'left out':'summarized'} on the next send.</span>`:'<b class="bad">The next request will not fit:</b> start a new chat, raise the context in Model settings, or choose what happens below.'):pct>=75?'<span class="warn">Getting full.</span>':''];
   $('#ctxNote').innerHTML=notes.filter(Boolean).join(' '); sideEnv(); }
 function sideOutputs(){ const out=[]; let n=0;
   chat.messages.forEach((m,i)=>{ if(m.role!=='assistant') return; n++;
@@ -5321,10 +5387,25 @@ function sideOutputs(){ const out=[]; let n=0;
     if(m.check&&m.check.review) out.push(`<a href="${esc(m.check.review)}">▦ Neuron review, reply ${n}</a>`);
     for(const t of m.tools||[]) out.push(`<div class="o">🔧 ${esc(t.name||t.server+'.'+t.tool||'tool call')}<span class="k">reply ${n}${t.result?.error?' · failed':''}</span></div>`);
     if(m.sources&&m.sources.length) out.push(`<div class="o">📄 ${m.sources.length} source(s): ${esc([...new Set(m.sources.map(h=>h.source))].slice(0,3).join(', '))}<span class="k">reply ${n}</span></div>`);
+    if(m.compressed&&m.compressed.history&&m.compressed.history.summary) out.push(`<details class="o" style="display:block"><summary>🗜 Summary of messages 1–${m.compressed.history.upto}<span class="k">reply ${n}</span></summary><div class="note" style="white-space:pre-wrap">${esc(m.compressed.history.summary)}</div></details>`);
     for(const pc of m.plugin_checks||[]) out.push(`<div class="o">🧩 ${esc(pc.title||pc.plugin||'plugin check')}<span class="k">reply ${n}</span></div>`); });
   $('#outN').textContent=out.length||''; $('#stripOut').textContent=out.length?`· ${out.length} output${out.length>1?'s':''}`:'';
   $('#outList').innerHTML=out.length?out.join(''):'<div class="note">Nothing yet. 3D views of checked replies, tool calls, cited sources and plugin checks from this chat collect here.</div>'; }
 $('#outExport').onclick=()=>$('#export').click();
+// contextual compression (scripts/context_compress.py): passages trimmed to matching sentences; old turns cut or summarized
+function cmpGet(){ try{ return JSON.parse(localStorage.getItem('ns-compress')||'{}'); }catch{ return {}; } }
+function cmpReq(){ const c=cmpGet(), o={};
+  if(c.passages||(c.history&&c.history!=='off')) o.compress={passages:!!c.passages,history:c.history||'off'};
+  if(c.history==='summarize'&&chat.summary) o.summary=chat.summary; return o; }
+function cmpNote(c){ const p=c.passages, h=c.history, out=[];
+  if(p&&p.before) out.push(`passages ${p.before}→${p.after} tokens`);
+  if(h&&h.history==='summarized') out.push(`summarized the first ${h.upto} messages`);
+  if(h&&h.history==='summary') out.push(`first ${h.upto} messages as a summary`);
+  if(h&&h.history==='cut') out.push(`left out the first ${h.dropped} messages`);
+  if(h&&h.history==='failed') out.push('compression failed: '+h.error);
+  return out.join(' · '); }
+{ const c=cmpGet(); $('#cmpPass').checked=!!c.passages; $('#cmpHist').value=c.history||'off'; }
+['#cmpPass','#cmpHist'].forEach(s=>$(s).addEventListener('change',()=>{ try{ localStorage.setItem('ns-compress',JSON.stringify({passages:$('#cmpPass').checked,history:$('#cmpHist').value})); }catch{} sideSoon(); }));
 $('#in').addEventListener('input',sideSoon); ['#preset','#ragPick','#toolsOn'].forEach(s=>$(s).addEventListener('change',sideSoon));
 try{ if(localStorage.getItem('ns-side')==='1') setTimeout(()=>sideSet(true),0); }catch{}
 sideSoon();

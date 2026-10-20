@@ -111,6 +111,16 @@ for three panes:
   when the next request would not fit, the strip says so. The last reply's
   measured prompt and reply tokens are shown next to it. `POST /api/context`
   returns the same counts.
+- **Compression** (two controls under the usage bar, kept in this browser):
+  *Trim document passages* keeps only the sentences of each retrieved chunk
+  that share the question's words (BM25-weighted, with the sentence on
+  either side), within about a fifth of the window. *When the chat no longer
+  fits* can **summarize the oldest messages**: the model writes a summary of
+  them once, the summary stands in for them, and it is kept with the chat
+  and extended when more messages fall out of the window. Or it can **drop
+  the oldest messages**. The newest four messages are always sent word for
+  word. Both are lossy: each reply's stats line says what was trimmed, and
+  summaries are listed under Outputs (`scripts/context_compress.py`).
 - **Outputs**: what this chat produced: 3D views and neuron review links of
   checked replies, tool calls, cited sources, plugin checks, and Export .md.
 
