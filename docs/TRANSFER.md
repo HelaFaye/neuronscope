@@ -180,13 +180,23 @@ python scripts/ns_transfer_mcp.py --http --token-file ~/.config/neuronscope/secr
   TLS proxy can reach the port. The same rule as Studio and the receivers.
 - **Health**: `GET /health` answers without the token, for monitors.
 
-**Windows with Tailscale** (a ready HTTPS name, no certificates to manage), in Command Prompt:
+**Windows with Tailscale** (a ready HTTPS name, no certificates to manage).
+Run these in the NeuronScope folder, the one that contains `scripts\`. The
+token goes to `%USERPROFILE%\.config\neuronscope\secrets\transfer-mcp-http.token`,
+where `--http` finds it without being told.
 
-```bat
-py -3 scripts\ns_security.py token --out %USERPROFILE%\.config\neuronscope\secrets\transfer-mcp-http.token
-py -3 scripts\ns_transfer_mcp.py --http --token-file %USERPROFILE%\.config\neuronscope\secrets\transfer-mcp-http.token
+PowerShell:
+
+```powershell
+cd C:\path\to\neuronscope
+py -3 scripts\ns_security.py token --out "$env:USERPROFILE\.config\neuronscope\secrets\transfer-mcp-http.token"
+py -3 scripts\ns_transfer_mcp.py --http
 tailscale serve --bg 8765        # https://<machine>.<tailnet>.ts.net -> 127.0.0.1:8765
 ```
+
+Command Prompt: the same, with `"%USERPROFILE%\.config\…"` in place of
+`"$env:USERPROFILE\.config\…"`. Skip the token line if you already have a
+token file there.
 
 The server stays on 127.0.0.1, and Tailscale terminates TLS and only admits
 your tailnet. To start it at log-on, add the second command to Task

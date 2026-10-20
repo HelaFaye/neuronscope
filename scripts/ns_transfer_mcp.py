@@ -351,7 +351,8 @@ def main(argv=None) -> None:
                    "such as tailscale serve in front)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--path", default="/mcp")
-    p.add_argument("--token-file", default="", help="file with the bearer token (or $NS_TRANSFER_MCP_TOKEN); "
+    p.add_argument("--token-file", default="", help="file with the bearer token (default: "
+                   "~/.config/neuronscope/secrets/transfer-mcp-http.token, else $NS_TRANSFER_MCP_TOKEN); "
                    "make one with: python scripts/ns_security.py token --out FILE")
     p.add_argument("--tls-cert", default="")
     p.add_argument("--tls-key", default="")
@@ -364,11 +365,15 @@ def main(argv=None) -> None:
     if not a.http:
         mcp.run("stdio")  # no network listener
         return
-    token = (Path(a.token_file).expanduser().read_text().strip() if a.token_file
-             else os.environ.get("NS_TRANSFER_MCP_TOKEN", "").strip())
+    default_tok = SECRETS / "transfer-mcp-http.token"
+    tf = Path(a.token_file).expanduser() if a.token_file else (default_tok if default_tok.is_file() else None)
+    if a.token_file and not tf.is_file():
+        raise SystemExit(f"no token file at {tf}")
+    token = tf.read_text().strip() if tf else os.environ.get("NS_TRANSFER_MCP_TOKEN", "").strip()
     if len(token) < sec.MIN_TOKEN_CHARS:
-        raise SystemExit("--http needs a token of at least %d characters (--token-file, or NS_TRANSFER_MCP_TOKEN). "
-                         "Make one: python scripts/ns_security.py token --out FILE" % sec.MIN_TOKEN_CHARS)
+        raise SystemExit("--http needs a token of at least %d characters: put one in %s (or give --token-file, "
+                         "or set NS_TRANSFER_MCP_TOKEN). Make one: python scripts/ns_security.py token --out \"%s\""
+                         % (sec.MIN_TOKEN_CHARS, default_tok, default_tok))
     tls = bool(a.tls_cert and a.tls_key)
     try:
         for w in sec.check_bind(a.host, token, tls=tls, allow_plaintext=a.allow_plaintext):
