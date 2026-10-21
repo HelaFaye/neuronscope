@@ -134,35 +134,51 @@ def split(n: int, frac: float, seed: int) -> tuple[list[int], list[int]]:
 
 
 def fit_layer(h, y, dim: int, seeds: list[int], shrink: float, test_frac: float, seed: int) -> dict:
-    """h [n, d] mean MLP outputs for one layer. Fits on a training split and scores the held-out
-    part, for each random projection; keeps the projection with the best held-out AUC."""
+    """h [n, d] mean MLP outputs for one layer, y 1 = wrong. Three splits: directions are fitted on
+    one, the single best projection is chosen on a second (validation), and every reported AUC is on
+    the third (test), which no choice has seen.
+
+    Besides the chosen projection it keeps the ensemble: the average of all projections' lifted
+    directions R w, which uses the redundancy instead of betting on one random draw. The "direction"
+    steering mode uses the ensemble; "subspace" uses the chosen projection."""
     import torch
-    tr, te = split(len(y), test_frac, seed)
-    tr_t, te_t = torch.tensor(tr), torch.tensor(te)
-    ytr, yte = y[tr_t], y[te_t]
-    if int(ytr.sum()) < 2 or int((1 - ytr).sum()) < 2:
-        raise SystemExit("need at least two right and two wrong answers in the training split")
-    best, aucs = None, []
-    for s in seeds:
-        R = random_basis(h.shape[1], dim, s)
+    rest, te = split(len(y), test_frac, seed)
+    fit_i, va_i = [rest[k] for k in split(len(rest), 0.25, seed + 1)[0]], \
+        [rest[k] for k in split(len(rest), 0.25, seed + 1)[1]]
+    F, V, T, TR = (torch.tensor(x) for x in (fit_i, va_i, te, rest))
+    yf, yv, yt = y[F], y[V], y[T]
+    if int(yf.sum()) < 2 or int((1 - yf).sum()) < 2:
+        raise SystemExit("need at least two right and two wrong answers in the fitting split")
+    runs = []
+    for s_ in seeds:
+        R = random_basis(h.shape[1], dim, s_)
         z = h @ R
-        w, mu0, mu1 = lda(z[tr_t], ytr, shrink)
-        a = auc((z[te_t] @ w).tolist(), yte.tolist())
-        aucs.append(a)
-        if best is None or a > best["auc"]:
-            score_tr = z[tr_t] @ w
-            c_right = float(score_tr[ytr == 0].mean())
-            c_wrong = float(score_tr[ytr == 1].mean())
-            best = {"seed": s, "R": R, "w": w, "mu_right": mu0, "mu_wrong": mu1, "auc": a,
-                    "c_right": c_right, "c_wrong": c_wrong,
-                    "tau": max(1e-3, float(score_tr.std()) / 2)}
-    # the same classifier on the full space, for comparison: is the projection losing anything?
-    wf, _, _ = lda(h[tr_t], ytr, shrink)
-    full = auc((h[te_t] @ wf).tolist(), yte.tolist())
-    finite = [a for a in aucs if not math.isnan(a)]
-    best.update(aucs=[round(a, 4) for a in aucs], auc_full=round(full, 4),
-                auc_spread=round(max(finite) - min(finite), 4) if finite else None)
-    return best
+        w, mu0, mu1 = lda(z[F], yf, shrink)
+        u = R @ w
+        runs.append({"seed": s_, "R": R, "w": w, "mu_right": mu0, "mu_wrong": mu1, "u": u / u.norm(),
+                     "auc_val": auc((z[V] @ w).tolist(), yv.tolist()), "auc_test": auc((z[T] @ w).tolist(), yt.tolist())})
+    best = max(runs, key=lambda r: -1 if math.isnan(r["auc_val"]) else r["auc_val"])
+    ens = torch.stack([r["u"] for r in runs]).mean(0)
+    ens = ens / ens.norm().clamp(min=1e-12)
+
+    def levels(score, yy):
+        return float(score[yy == 0].mean()), float(score[yy == 1].mean()), max(1e-3, float(score.std()) / 2)
+    zb = (h[TR] @ best["R"]) @ best["w"]
+    c_right, c_wrong, tau = levels(zb, y[TR])
+    eu = h[TR] @ ens
+    ec_right, ec_wrong, etau = levels(eu, y[TR])
+    wf, _, _ = lda(h[F], yf, shrink)
+    tests = [r["auc_test"] for r in runs if not math.isnan(r["auc_test"])]
+    return {"seed": best["seed"], "R": best["R"], "w": best["w"], "mu_right": best["mu_right"],
+            "mu_wrong": best["mu_wrong"], "c_right": c_right, "c_wrong": c_wrong, "tau": tau,
+            "u": ens, "u_c_right": ec_right, "u_c_wrong": ec_wrong, "u_tau": etau,
+            "auc": round(best["auc_test"], 4), "auc_val": round(best["auc_val"], 4),
+            "auc_ensemble": round(auc((h[T] @ ens).tolist(), yt.tolist()), 4),
+            "auc_mean": round(sum(tests) / len(tests), 4) if tests else None,
+            "auc_full": round(auc((h[T] @ wf).tolist(), yt.tolist()), 4),
+            "aucs": [round(r["auc_test"], 4) for r in runs],
+            "auc_spread": round(max(tests) - min(tests), 4) if tests else None,
+            "n_test": len(te), "n_test_right": int((yt == 0).sum())}
 
 
 # ---------------------------------------------------------------- model side
@@ -219,8 +235,12 @@ class Steerer:
                 continue
             R = p["R"].float().to(device)
             u = R @ p["w"].float().to(device)
-            self.parts[int(l)] = {"R": R, "u": u / u.norm().clamp(min=1e-12), "mu": p["mu_right"].float().to(device),
-                                  "c_right": p["c_right"], "c_mid": (p["c_right"] + p["c_wrong"]) / 2, "tau": p["tau"]}
+            part = {"R": R, "u": u / u.norm().clamp(min=1e-12), "mu": p["mu_right"].float().to(device),
+                    "c_right": p["c_right"], "c_mid": (p["c_right"] + p["c_wrong"]) / 2, "tau": p["tau"]}
+            if mode == "direction" and p.get("u") is not None:      # the ensemble of all projections
+                part.update(u=p["u"].float().to(device), c_right=p["u_c_right"],
+                            c_mid=(p["u_c_right"] + p["u_c_wrong"]) / 2, tau=p["u_tau"])
+            self.parts[int(l)] = part
         self.last = {}
         self.hooks = []
 
@@ -278,20 +298,23 @@ def cmd_fit(a) -> int:
     feats = collect(model, tok, pairs, layers)
     seeds = [a.seed + i for i in range(a.projections)]
     out = {"model": a.model, "dim": a.dim, "shrink": a.shrink, "n": len(pairs), "layers": {}}
-    lines = [f"{'layer':>5} {'AUC':>6} {'full-d':>7} {'spread':>7}  over {a.projections} random projections to {a.dim} dims"]
+    lines = [f"held-out test AUC, {a.projections} random projections to {a.dim} dims (0.5 = chance)",
+             f"{'layer':>5} {'chosen':>7} {'mean':>6} {'ensemble':>9} {'full-d':>7} {'spread':>7}  test n (right)"]
     for l in layers:
         r = fit_layer(feats[l], y, a.dim, seeds, a.shrink, a.test_frac, a.seed)
         out["layers"][l] = r
-        lines.append(f"{l:>5} {r['auc']:>6.3f} {r['auc_full']:>7.3f} {r['auc_spread']:>7.3f}")
+        lines.append(f"{l:>5} {r['auc']:>7.3f} {r['auc_mean']:>6.3f} {r['auc_ensemble']:>9.3f} {r['auc_full']:>7.3f} "
+                     f"{r['auc_spread']:>7.3f}  {r['n_test']} ({r['n_test_right']})")
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, a.out)
     summary = {k: v for k, v in out.items() if k != "layers"}
-    summary["layers"] = {l: {k: v for k, v in r.items() if k not in ("R", "w", "mu_right", "mu_wrong")}
+    summary["layers"] = {l: {k: v for k, v in r.items() if k not in ("R", "w", "mu_right", "mu_wrong", "u")}
                          for l, r in out["layers"].items()}
     Path(a.out).with_suffix(".json").write_text(json.dumps(summary, indent=1))
     print("\n".join(lines))
-    print("AUC 0.5 is chance. A small spread across projections means the signal is redundant, as the method "
-          "assumes; an AUC well below the full-d one means the projection is too small (raise --dim).")
+    print("chosen: the projection picked on a validation split; ensemble: all projections' directions averaged "
+          "(used by direction steering). A wide spread with few test answers means noise: get more labelled "
+          "answers before trusting a layer. Far below full-d: raise --dim.")
     print(f"wrote {a.out}")
     return 0
 
@@ -311,8 +334,11 @@ def cmd_export(a) -> int:
         if int(l) < 1:
             print(f"skipping layer {l}: llama.cpp control vectors start at layer 1")
             continue
-        u = p["R"].float() @ p["w"].float()
-        u = -(u / u.norm()) * float(p["c_wrong"] - p["c_right"])        # scale 1 = one class gap toward right
+        if p.get("u") is not None:
+            u, gap = p["u"].float(), float(p["u_c_wrong"] - p["u_c_right"])
+        else:
+            u, gap = p["R"].float() @ p["w"].float(), float(p["c_wrong"] - p["c_right"])
+        u = -(u / u.norm()) * gap                                       # scale 1 = one class gap toward right
         w.add_tensor(f"direction.{int(l)}", u.numpy().astype("float32"))
     w.write_header_to_file()
     w.write_kv_data_to_file()

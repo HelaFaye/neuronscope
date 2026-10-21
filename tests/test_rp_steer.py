@@ -30,7 +30,8 @@ def test_spread_out_signal_survives_projection():
     weak = rp.fit_layer(hw, yw, dim=16, seeds=[0], shrink=0.1, test_frac=0.25, seed=0)
     assert weak["auc_full"] - weak["auc"] > 0.15
     assert r["R"].shape == (256, 16) and torch.allclose(r["R"].T @ r["R"], torch.eye(16), atol=1e-4)
-    assert r["c_wrong"] > r["c_right"]
+    assert r["c_wrong"] > r["c_right"] and r["u_c_wrong"] > r["u_c_right"]
+    assert r["auc_ensemble"] > 0.9 and r["n_test"] == 100 and 0 < r["auc_val"] <= 1
     hn, yn, _ = data(signal=0.0, seed=3)                # no signal: chance
     assert abs(rp.fit_layer(hn, yn, 16, [0], 0.1, 0.25, 0)["auc"] - 0.5) < 0.15
 
@@ -55,8 +56,9 @@ def test_steering_pulls_back_only_past_the_right_side(tmp_path):
     wrong = h[y == 1][:20, None, :]                     # [20, 1, d]
     right = h[y == 0][:20, None, :]
     out_w, out_r = layer(wrong), layer(right)
-    assert ((out_w[:, 0] @ u) <= r["c_right"] + 1e-4).all()                 # pulled back to the right side
-    below = (right[:, 0] @ u) <= r["c_right"]
+    c = st.parts[0]["c_right"]
+    assert ((out_w[:, 0] @ u) <= c + 1e-4).all()                            # pulled back to the right side
+    below = (right[:, 0] @ u) <= c
     assert torch.allclose(out_r[below], right[below])                         # left alone when not drifting
     assert st.flagged() >= 0
     st.remove()
@@ -87,7 +89,10 @@ def test_fit_and_generate_with_a_tiny_model(tmp_path):
                     "--dim", "8", "--projections", "2", "--dtype", "float32", "--out", str(out)]) == 0
     summary = json.loads(out.with_suffix(".json").read_text())
     assert set(summary["layers"]) == {"1", "2"} and summary["n"] == 24
-    lab = dl.Lab(str(hf), {"plain": {}, "rp": {"rp": {"file": str(out), "alpha": 1.0}}}, "float32")
+    variants = dl.parse_variants(["plain={}", 'rp={"rp": {"file": "%s", "alpha": 1.0}}' % out])   # as the CLI does
+    with pytest.raises(SystemExit):
+        dl.parse_variants(['rp={"rp": {"alpha": 1.0}}'])
+    lab = dl.Lab(str(hf), variants, "float32")
     r = lab.generate([{"role": "user", "content": "What is 2 plus 2?"}], "rp", max_tokens=6)
     assert len(r["rp_drift"]) == len(r["spread"]) and all(x >= 0 for x in r["rp_drift"])
     assert "rp_drift" not in lab.generate([{"role": "user", "content": "hi"}], "plain", max_tokens=3)

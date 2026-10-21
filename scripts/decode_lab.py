@@ -332,10 +332,12 @@ def parse_variants(items: list) -> dict:
         if not name or not spec:
             raise SystemExit(f"--variant {it!r}: use name='{{json}}'")
         opt = json.loads(spec)
-        if set(opt) - {"sled", "steer"}:
-            raise SystemExit(f"--variant {name}: options are sled and steer")
+        if set(opt) - {"sled", "steer", "rp"}:
+            raise SystemExit(f"--variant {name}: options are sled, steer and rp")
         if opt.get("steer") and not ("vectors" in opt["steer"] and "layer" in opt["steer"]):
             raise SystemExit(f"--variant {name}: steer needs vectors and layer")
+        if opt.get("rp") and "file" not in opt["rp"]:
+            raise SystemExit(f"--variant {name}: rp needs file (from rp_steer.py fit)")
         out[name] = opt
     return out or {"plain": {}}
 
