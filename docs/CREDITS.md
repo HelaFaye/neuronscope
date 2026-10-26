@@ -11,7 +11,7 @@ Something missing or credited wrongly? Please open an issue.
 
 | Work | Used for |
 |---|---|
-| **H-Neurons**: Gao et al., [arXiv:2512.01797](https://arxiv.org/abs/2512.01797); code at [thunlp/H-Neurons](https://github.com/thunlp/H-Neurons) | The method NeuronScope grew from: CETT, sparse classifiers over MLP neurons, and suppressing the neurons tied to over-confident answers. What changed from upstream is listed in [RESEARCH_NOTES.md](RESEARCH_NOTES.md). |
+| **H-Neurons**: Gao et al. (2025), *H-Neurons: On the Existence, Impact, and Origin of Hallucination-Associated Neurons in LLMs*, [arXiv:2512.01797](https://arxiv.org/abs/2512.01797); code at [thunlp/H-Neurons](https://github.com/thunlp/H-Neurons) | The method NeuronScope grew from: CETT, sparse classifiers over MLP neurons, and suppressing the neurons tied to over-confident answers. What changed from upstream is listed in [RESEARCH_NOTES.md](RESEARCH_NOTES.md). |
 
 ## Reading what a model computes
 
@@ -20,6 +20,28 @@ Something missing or credited wrongly? Please open an issue.
 | nostalgebraist (2020), [*interpreting GPT: the logit lens*](https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens) | `logit_lens.py`; the per-layer logits SLED compares |
 | Belrose et al. (2023), *Eliciting Latent Predictions from Transformers with the Tuned Lens*, [arXiv:2303.08112](https://arxiv.org/abs/2303.08112) | Named in `logit_lens.py` and [CONFIDENCE.md](CONFIDENCE.md) as the more accurate lens for early layers |
 | Xiao et al. (2024), *Efficient Streaming Language Models with Attention Sinks* (StreamingLLM), ICLR, [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | `when.py` ignores the first position (the attention sink); the engine's "tokens to keep" with context shift |
+
+## Features, circuits and emotion concepts
+
+What [FEATURES.md](FEATURES.md) implements, and where it departs from these works, is described there.
+
+| Work | Used for |
+|---|---|
+| Elhage et al. (2022), *Toy Models of Superposition*, [arXiv:2209.10652](https://arxiv.org/abs/2209.10652) | Why neurons mix concepts and dictionaries are needed |
+| Bricken et al. (2023), [*Towards Monosemanticity: Decomposing Language Models With Dictionary Learning*](https://transformer-circuits.pub/2023/monosemantic-features/index.html), Transformer Circuits Thread; Cunningham et al. (2023), *Sparse Autoencoders Find Highly Interpretable Features in Language Models*, [arXiv:2309.08600](https://arxiv.org/abs/2309.08600) | Dictionary learning with sparse autoencoders: `sae.py`, `features.py` |
+| Templeton, Conerly et al. (2024), [*Scaling Monosemanticity: Extracting Interpretable Features from Claude 3 Sonnet*](https://transformer-circuits.pub/2024/scaling-monosemanticity/index.html), Transformer Circuits Thread | Residual-stream dictionaries; examples across activation buckets; the 0-3 specificity rubric for labels; logit effects; neighbours by decoder cosine; the feature-neuron correlation comparison; clamping features (error term kept, units of the maximum activation); attribution and ablation of a completion (`feature_circuits.py attribute`) |
+| Conerly, Templeton, Bricken, Marcus & Henighan (2024), [*Update on how we train SAEs*](https://transformer-circuits.pub/2024/april-update/index.html), Circuits Updates, April 2024 | The `relu` architecture's training: decoder-norm-weighted L1, √d input scaling, initialisation, schedules, folding decoder norms afterwards |
+| Gao et al. (2024), *Scaling and evaluating sparse autoencoders*, [arXiv:2406.04093](https://arxiv.org/abs/2406.04093) | The `topk` architecture and its auxiliary loss for dead features |
+| Rajamanoharan et al. (2024), *Jumping Ahead: Improving Reconstruction Fidelity with JumpReLU Sparse Autoencoders*, [arXiv:2407.14435](https://arxiv.org/abs/2407.14435); Lieberum et al. (2024), *Gemma Scope: Open Sparse Autoencoders Everywhere All At Once on Gemma 2*, [arXiv:2408.05147](https://arxiv.org/abs/2408.05147) | The `jumprelu` architecture; importing Gemma Scope's `params.npz` |
+| [SAELens](https://github.com/jbloomAus/SAELens) (Bloom et al.) | The folder format `features.py import` reads |
+| Dunefsky, Chlenski & Nanda (2024), *Transcoders Find Interpretable LLM Feature Circuits*, [arXiv:2406.11944](https://arxiv.org/abs/2406.11944) | Transcoders (`--site mlp_in --target-site mlp_out`) |
+| Ameisen et al. (2025), [*Circuit Tracing: Revealing Computational Graphs in Language Models*](https://transformer-circuits.pub/2025/attribution-graphs/methods.html); Lindsey et al. (2025), [*On the Biology of a Large Language Model*](https://transformer-circuits.pub/2025/attribution-graphs/biology.html), Transformer Circuits Thread | Attribution graphs: the local replacement model with error nodes, frozen attention patterns and norm denominators, edge weights, logit targets, influence-based pruning, replacement and completeness scores, interventions (`feature_circuits.py graph`, `intervene`) |
+| [circuit-tracer](https://github.com/safety-research/circuit-tracer) (Hanna, Piotrowski, Lindsey & Ameisen, 2025) | The open-source implementation of those graphs; read to check ours against (its pruning and influence computation) |
+| Marks et al. (2024), *Sparse Feature Circuits: Discovering and Editing Interpretable Causal Graphs in Language Models*, [arXiv:2403.19647](https://arxiv.org/abs/2403.19647); Nanda (2023), *Attribution Patching: Activation Patching At Industrial Scale* | Linear attribution with dictionary error terms; Scaling Monosemanticity's attribution is attribution patching with a zero baseline |
+| Bills et al. (2023), *Language models can explain neurons in language models*, OpenAI; Paulo et al. (2024), *Automatically Interpreting Millions of Features in Large Language Models*, [arXiv:2410.13928](https://arxiv.org/abs/2410.13928) | Labels written by a model, and the detection score (`interpret --score detection`) |
+| Sofroniew, Kauvar, Saunders, Chen et al. (2026), [*Emotion Concepts and their Function in a Large Language Model*](https://transformer-circuits.pub/2026/emotions/index.html), Transformer Circuits Thread | `emotions.py`: the 171 emotion words, the story and neutral-dialogue recipe, vectors from story means from the 50th token minus the mean over emotions, denoising by the neutral components explaining 50% of their variance, the two-thirds-depth layer, z-scored traces, corpus scans, the dose sweep, the valence-arousal map, steering in fractions of the residual norm |
+| Zou et al. (2023), *Representation Engineering: A Top-Down Approach to AI Transparency*, [arXiv:2310.01405](https://arxiv.org/abs/2310.01405) | Earlier linear emotion representations and steering, cited by the emotions paper |
+| Gao et al. (2020), *The Pile: An 800GB Dataset of Diverse Text for Language Modeling*, [arXiv:2101.00027](https://arxiv.org/abs/2101.00027), through [NeelNanda/pile-10k](https://huggingface.co/datasets/NeelNanda/pile-10k) | The example corpus in the docs and the Features page |
 
 ## Editing and steering
 

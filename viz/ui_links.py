@@ -66,7 +66,8 @@ const NS_ICON={chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9
   gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   more:'<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>',
   pulse:'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
-  find:'<circle cx="10" cy="10" r="6"/><path d="M19 19l-4.5-4.5M7.5 10h5"/>'};
+  find:'<circle cx="10" cy="10" r="6"/><path d="M19 19l-4.5-4.5M7.5 10h5"/>',
+  spark:'<circle cx="12" cy="12" r="2.2"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="6" r="1.6"/><circle cx="5" cy="18" r="1.6"/><circle cx="19" cy="18" r="1.6"/><path d="M6.3 7l3.9 3.6M17.7 7l-3.9 3.6M6.3 17l3.9-3.6M17.7 17l-3.9-3.6"/>'};
 // tab: the Studio-page tab the item opens. mobile: also on the phone bar.
 const NS_NAV=[
   {href:'/#chats',tab:'chats',label:'Chat',icon:'chat',tip:'Chat with your models',mobile:1},
@@ -80,6 +81,7 @@ const NS_NAV=[
   {href:'/workers',label:'Workers',icon:'cpu',tip:'Where tasks run; GPU temperatures'},
   {href:'/lab',label:'Lab',icon:'flask',tip:'Labs, live and 3D views'},
   {href:'/review',label:'Review',icon:'grid',tip:'How neurons behave across tests, by subject and over time'},
+  {href:'/features',label:'Features',icon:'spark',tip:'Feature dictionaries, what a reply was made of, circuits, emotion vectors, steering'},
   {sep:1},
   {href:'/remote',label:'Remote',icon:'globe',tip:'Models on other computers (NeuronScope Remote)'},
   {href:'/link',label:'Devices',icon:'link',tip:'Pair devices; link other Studios'},
@@ -170,7 +172,10 @@ const NS_SECTIONS=[
   ['Chats','/#chats','Studio'],['My Models: load, settings, accuracy','/#models','Studio'],['Discover and download models','/#hub','Studio'],
   ['Documents (RAG collections)','/#docs','Studio'],['Tools (MCP) in chat','/#tools','Studio'],['Pair a device, link Studios','/link','Devices'],
   ['Workers: where project tasks run, GPU temperatures','/workers','Workers'],['Projects','/projects','Projects'],['Lab and 3D views','/lab','Lab'],
-  ['Neuron review','/review','Review'],['Jobs','/jobs','Jobs']];
+  ['Neuron review','/review','Review'],['Jobs','/jobs','Jobs'],
+  ['Feature dictionaries (sparse autoencoders)','/features#dicts','Features'],['Read a reply: features, emotions, logit lens','/features#read','Features'],
+  ['Attribution graph (circuit tracing)','/features#circuits','Features'],['Emotion vectors','/features#emotions','Features'],
+  ['Steer with features and emotions','/features#steer','Features'],['Train a dictionary or transcoder','/jobs#kind=feat_train','Features']];
 let NS_FIND_EXTRA=null;
 async function nsFindIndex(){ const out=NS_SECTIONS.map(([t,h,d])=>({t,h,d}));
   NS_NAV.forEach(it=>{ if(it.href) out.push({t:it.label,h:it.href,d:it.tip}); });

@@ -50,6 +50,12 @@ rp       Steering through a low-dimensional random projection, fitted by
          The reply reports the drift per step ("rp_drift"), so you can see
          where the model leaned toward its wrong-answer pattern.
 
+feature  clamp or add feature-dictionary features (features.py) at every token
+emotion  add an emotion-vector mix (emotions.py)
+         See feature_lab.py. Both can also be given per request under
+         "neuronscope": {...}, and feature_lab's /ns/* endpoints (inspect,
+         compare, graph, intervene, attribute, sweep) serve Studio's Features page.
+
 Greedy unless the request sets temperature > 0. One request at a time.
 """
 from __future__ import annotations
@@ -163,11 +169,13 @@ class Lab:
         return [self.head(self.norm(hidden_states[i][0, -1])) for i in idx]
 
     def generate(self, messages: list, variant: str, max_tokens: int = 256, temperature: float = 0.0,
-                 top_p: float = 1.0, stop: list | None = None, on_text=None) -> dict:
+                 top_p: float = 1.0, stop: list | None = None, on_text=None, extra: dict | None = None) -> dict:
         import torch
+        import feature_lab
         if variant not in self.variants:
             raise KeyError(f"no variant {variant!r}; have {', '.join(self.variants)}")
         opt = self.variants[variant]
+        steer_opt = {k: v for k, v in {**opt, **(extra or {})}.items() if k in ("feature", "emotion")}
         sled, st = opt.get("sled"), opt.get("steer")
         tok = self.tok
         if getattr(tok, "chat_template", None):
@@ -197,8 +205,9 @@ class Lab:
                                        if isinstance(getattr(self.model.generation_config, "eos_token_id", None), list)
                                        else [])
         text_out, t0 = "", time.time()
+        steering = feature_lab.Steering(self.model, steer_opt)
         try:
-            with torch.no_grad():
+            with torch.no_grad(), steering:
                 for _ in range(max_tokens):
                     o = self.model(input_ids=cur, past_key_values=past, use_cache=True,
                                    output_hidden_states=bool(sled), output_attentions=want_att)
@@ -274,9 +283,19 @@ def make_handler(lab: Lab):
                                                                      "options": v} for n, v in lab.variants.items()]})
             if self.path == "/health":
                 return self._json(200, {"status": "ok"})
+            if self.path == "/ns/info":
+                import feature_lab
+                return self._json(*feature_lab.handle(lab, self.path, {}))
             return self._json(404, {"error": "not found"})
 
         def do_POST(self):
+            if self.path.startswith("/ns/"):
+                import feature_lab
+                try:
+                    req = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                except ValueError:
+                    return self._json(400, {"error": "body is not JSON"})
+                return self._json(*feature_lab.handle(lab, self.path, req))
             if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
                 return self._json(404, {"error": "not found"})
             try:
@@ -289,8 +308,12 @@ def make_handler(lab: Lab):
                         for m in req.get("messages") or []]
                 stop = req.get("stop")
                 stop = [stop] if isinstance(stop, str) else (stop or None)
+                extra = req.get("neuronscope") or None
+                if extra:
+                    import feature_lab
+                    feature_lab.validate(extra, "neuronscope")
                 args = dict(max_tokens=int(req.get("max_tokens") or 256), temperature=float(req.get("temperature") or 0),
-                            top_p=float(req.get("top_p") or 1), stop=stop)
+                            top_p=float(req.get("top_p") or 1), stop=stop, extra=extra)
                 cid = "decodelab-" + uuid.uuid4().hex[:10]
                 if req.get("stream"):
                     self.send_response(200)
@@ -332,8 +355,13 @@ def parse_variants(items: list) -> dict:
         if not name or not spec:
             raise SystemExit(f"--variant {it!r}: use name='{{json}}'")
         opt = json.loads(spec)
-        if set(opt) - {"sled", "steer", "rp"}:
-            raise SystemExit(f"--variant {name}: options are sled, steer and rp")
+        if set(opt) - {"sled", "steer", "rp", "feature", "emotion"}:
+            raise SystemExit(f"--variant {name}: options are sled, steer, rp, feature and emotion")
+        try:
+            import feature_lab
+            feature_lab.validate(opt, f"--variant {name}")
+        except ValueError as e:
+            raise SystemExit(str(e))
         if opt.get("steer") and not ("vectors" in opt["steer"] and "layer" in opt["steer"]):
             raise SystemExit(f"--variant {name}: steer needs vectors and layer")
         if opt.get("rp") and "file" not in opt["rp"]:

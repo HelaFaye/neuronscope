@@ -12,7 +12,7 @@ phone, with the rest under **More**):
 | Sidebar | What it is |
 |---|---|
 | Chat, My Models, Discover, Docs, Tools | Studio's main page: chats; the models in your folders (load, settings, measured accuracy); finding and downloading models from Hugging Face; document collections; MCP tool servers |
-| Jobs, Projects, Workers, Lab, Review | longer runs; tasks for worker models and where they run; labs and 3D views; neuron behaviour over time |
+| Jobs, Projects, Workers, Lab, Review, Features | longer runs; tasks for worker models and where they run; labs and 3D views; neuron behaviour over time; feature dictionaries, circuits, emotion vectors and steering |
 | Remote, Devices, Connect | models on other computers; pairing devices and linking Studios; using Studio from other apps |
 | Setup, Settings | paths, llama.cpp, hardware and health check; themes, workspaces, models per subject, tool approval, plugins |
 
@@ -88,6 +88,11 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Neuron review: which neurons go with wrong answers, by source, subject and time; 3D over time | **Review** | `python scripts/neuron_review.py` | `review_sources`, `review_summary`, `review_label` |
 | Add TestQA runs and other benchmarks to the review | **Jobs → Review** | `neuron_review.py ingest-testqa`, `ingest-items` | `start_job review_testqa`, `review_items` |
 | Mark a checked chat reply right or wrong | chat → check → *right / wrong* | `POST /api/review/label` | `review_label` |
+| Feature dictionaries: record activations, train, describe, map onto neurons | **Features → Start here** (each step opens its job) | `python scripts/features.py collect / train / import / interpret / neurons` | `start_job feat_*` |
+| What a reply was made of: features, emotions and logit lens per token | **Features → Read a reply** | decoding lab `POST /ns/inspect` | |
+| Attribution graph, interventions, what drives a completion | **Features → Circuits** | `python scripts/feature_circuits.py graph / intervene / attribute` | `start_job feat_graph` |
+| Emotion vectors: stories, vectors, trace, scan, sweep | **Features → Emotions** | `python scripts/emotions.py stories / build / trace / scan / sweep` | `start_job emo_*` |
+| Steer with features and emotions; as a decoding-lab variant; as a llama.cpp control vector | **Features → Steer** | `decode_lab.py --variant`, `emotions.py steer / cvec` | `start_job emo_steer`, `emo_cvec` |
 | A project's own requirements (toolchain, libraries, packages, hardware), inferred from its build files, checked before Start | **Projects → Requirements** | `python scripts/ns_requirements.py project <dir>` | `project_requirements`, `set_project_requirements`, `scan_project_requirements` |
 | Projects split by skill, worker models, review | **Projects** | `python scripts/director.py analyze`, `/api/projects` | `create_project`, `get_project`, `review_task`, … |
 

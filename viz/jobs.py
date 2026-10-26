@@ -122,9 +122,10 @@ SPECS: dict[str, dict] = {
             F("sandbox", choices=["none", "docker", "podman"], default="docker"),
             F("quant", default="Q4_K_M"), F("llama", help="llama.cpp checkout (default $NS_LLAMA)")]},
     "decode_lab": {
-        "title": "Decoding lab (SLED, adaptive steering)", "group": "Evaluate", "argv": [S / "decode_lab.py"],
+        "title": "Decoding lab (SLED, steering, features, emotions)", "group": "Evaluate", "argv": [S / "decode_lab.py"],
         "help": "Serve one Hugging Face model as several decoding variants on an OpenAI-compatible port, for TestQA "
-                "and the retrain gate to compare; runs until cancelled (docs/DECODING.md).",
+                "and the retrain gate to compare; it also answers Studio's Features page (reading replies, graphs, "
+                "steering). Runs until cancelled (docs/DECODING.md, docs/FEATURES.md).",
         "fields": [
             F("model", req=True, help="HF id or folder"),
             F("variant", repeat=True, help="name={json}, each in single quotes, e.g. 'plain={}' 'sled={\"sled\": {\"alpha\": 2}}'; "
@@ -251,6 +252,141 @@ SPECS: dict[str, dict] = {
                    F("dataset_root", req=True), F("h_neurons", flag="--h_neurons"), F("scales", multi=True, default=["1"]),
                    F("style", choices=["off", "auto", "pixel", "cartoon"], default="off", help="pixel art and cartoons: clean upscaling, padding, style prompts"), F("out", req=True)]},
 }
+
+# ---- interpretability: feature dictionaries, circuits and emotion vectors (docs/FEATURES.md)
+SITE_CHOICES = ["resid", "mlp_in", "mlp_out", "neurons"]
+DTYPES = ["auto", "float32", "bfloat16", "float16"]
+SPECS.update({
+    "feat_collect": {
+        "title": "Features 1: record activations", "group": "Interpret", "argv": [S / "features.py", "collect"],
+        "help": "Run a model over text and keep its activations at chosen layers, for training dictionaries. "
+                "Several hundred thousand tokens for a first look; millions for a good dictionary.",
+        "fields": [F("model", req=True, help="HF id or folder"),
+                   F("corpus", req=True, help="folder of .txt/.md, a .txt or .jsonl, or a Hub dataset id "
+                                              "(e.g. NeelNanda/pile-10k)"),
+                   F("field", help="text field of the rows (default: text, messages, prompt+reply)"),
+                   F("split", default="train"), F("config", help="dataset config"),
+                   F("site", multi=True, choices=SITE_CHOICES, default=["resid"],
+                     help="resid: residual stream after the layer; mlp_in / mlp_out: an MLP's input / output "
+                          "(both, for transcoders); neurons: the MLP's hidden neurons (H-Neuron space)"),
+                   F("layers", multi=True, help="decoder layers (default: the middle one)"),
+                   F("max_tokens", kind="int", default=400000), F("ctx", kind="int", default=256),
+                   F("batch", kind="int", default=8), F("dtype", choices=DTYPES, default="auto"),
+                   F("device", default="auto", help="auto, cpu, cuda, cuda:1, mps"),
+                   F("out", req=True, help="e.g. runs/features/acts-mymodel")]},
+    "feat_train": {
+        "title": "Features 2: train a dictionary", "group": "Interpret", "argv": [S / "features.py", "train"],
+        "help": "A sparse autoencoder on one site and layer, or a transcoder (site mlp_in, target mlp_out) for "
+                "attribution graphs. Reports held-out reconstruction and the model's loss with it spliced in.",
+        "fields": [F("acts", req=True, help="folder from step 1"), F("site", choices=SITE_CHOICES, default="resid"),
+                   F("layer", kind="int", req=True),
+                   F("target_site", choices=SITE_CHOICES, help="for a transcoder: what it reconstructs (mlp_out)"),
+                   F("arch", choices=["topk", "relu", "jumprelu"], default="topk",
+                     help="topk: k features per token (Gao et al.); relu: L1 with decoder norms (Anthropic); "
+                          "jumprelu: learned thresholds (Gemma Scope)"),
+                   F("k", kind="int", default=32), F("expansion", kind="float", default=8.0,
+                                                     help="features per dimension of the layer"),
+                   F("features", kind="int", default=0, help="or an exact size"),
+                   F("target_l0", kind="float", default=32.0, help="relu / jumprelu: active features per token"),
+                   F("lr", kind="float", default=2e-4), F("batch", kind="int", default=4096),
+                   F("epochs", kind="float", default=3.0), F("steps", kind="int", default=0),
+                   F("device", default="auto"), F("out", req=True, help="e.g. runs/features/mymodel-resid-12")]},
+    "feat_import": {
+        "title": "Features: import a dictionary", "group": "Interpret", "argv": [S / "features.py", "import"],
+        "help": "Use a dictionary trained elsewhere: SAELens folders, Gemma Scope params.npz, or safetensors with "
+                "W_enc / W_dec.",
+        "fields": [F("path", req=True), F("model", help="the model it belongs to"),
+                   F("site", choices=SITE_CHOICES), F("layer", kind="int"),
+                   F("target_site", choices=SITE_CHOICES), F("acts", help="activations to interpret it on"),
+                   F("out", req=True)]},
+    "feat_interpret": {
+        "title": "Features 3: describe and label", "group": "Interpret", "argv": [S / "features.py", "interpret"],
+        "help": "Top examples and examples across activation levels, logit effects, neighbours and a map for every "
+                "feature; optionally labels from a model, scored for specificity.",
+        "fields": [F("sae", req=True, help="dictionary folder"), F("acts", help="default: the training activations"),
+                   F("labeler", help="URL@model of an OpenAI-compatible endpoint that writes labels"),
+                   F("label", kind="int", default=100, help="how many features to label"),
+                   F("label_ids", help="or exactly these ids, comma-separated"),
+                   F("score", choices=["specificity", "detection", "none"], default="specificity"),
+                   F("top", kind="int", default=12), F("buckets", kind="int", default=5),
+                   F("keep_codes", kind="int", default=64, help="active features kept per token for browsing"),
+                   F("device", default="auto")]},
+    "feat_neurons": {
+        "title": "Features 4: map onto neurons", "group": "Interpret", "argv": [S / "features.py", "neurons"],
+        "help": "Which MLP neurons write and read each feature (weights), which correlate with it (when neurons were "
+                "recorded at that layer), and how much of it sits on H-Neurons.",
+        "fields": [F("sae", req=True), F("h_neurons", help="h_neurons.json from the classifier"),
+                   F("acts"), F("top", kind="int", default=12), F("device", default="auto")]},
+    "feat_graph": {
+        "title": "Features 5: attribution graph", "group": "Interpret", "argv": [S / "feature_circuits.py", "graph"],
+        "help": "Which features the model used for one output and how they connect: transcoders in place of MLPs, "
+                "attention and norms frozen, edges pruned by influence (Anthropic's circuit tracing).",
+        "fields": [F("transcoders", req=True, multi=True, help="transcoder folders (globs allowed)"),
+                   F("prompt", req=True), F("chat", kind="bool"), F("target", repeat=True, help="output tokens"),
+                   F("max_features", kind="int", default=400), F("node_threshold", kind="float", default=0.8),
+                   F("edge_threshold", kind="float", default=0.98), F("model"), F("device", default="auto"),
+                   F("out", req=True, help="e.g. runs/graphs/my-prompt.json")]},
+    "feat_attribute": {
+        "title": "Features: what drives a completion", "group": "Interpret",
+        "argv": [S / "feature_circuits.py", "attribute"],
+        "help": "Attribution of one completion (against a baseline) to a dictionary's features, checked by ablating "
+                "the top ones.",
+        "fields": [F("sae", req=True), F("prompt", req=True), F("token", req=True, help="e.g. ' Austin'"),
+                   F("baseline", help="a competing completion"), F("chat", kind="bool"),
+                   F("ablate", kind="int", default=10), F("model"), F("device", default="auto"),
+                   F("out", req=True)]},
+    "feat_intervene": {
+        "title": "Features: intervene", "group": "Interpret", "argv": [S / "feature_circuits.py", "intervene"],
+        "help": "Change transcoder features and compare the next-token predictions.",
+        "fields": [F("transcoders", req=True, multi=True), F("prompt", req=True), F("chat", kind="bool"),
+                   F("set", repeat=True, req=True, help="LAYER:FEATURE=VALUE, =xM to multiply, @POS for one position"),
+                   F("model"), F("device", default="auto"), F("out")]},
+    "emo_stories": {
+        "title": "Emotions 1: write stories", "group": "Interpret", "argv": [S / "emotions.py", "stories"],
+        "help": "A model writes short stories in which a character feels each emotion without naming it, and neutral "
+                "dialogues (the emotions paper's dataset recipe).",
+        "fields": [F("writer", help="URL@model of an OpenAI-compatible endpoint"),
+                   F("writer_model", help="or a local Hugging Face model"),
+                   F("preset", choices=["paper", "core"], default="paper", help="paper: 171 emotions; core: 24"),
+                   F("emotions", multi=True, help="or these emotions"),
+                   F("topics", kind="int", default=8), F("per_call", kind="int", default=3),
+                   F("neutral_topics", kind="int", default=20), F("topics_file"),
+                   F("out", req=True, help="e.g. runs/emotions/stories")]},
+    "emo_build": {
+        "title": "Emotions 2: build vectors", "group": "Interpret", "argv": [S / "emotions.py", "build"],
+        "help": "Residual stream means over each emotion's stories, minus the mean over emotions, with neutral "
+                "principal components projected out; held-out accuracy per layer.",
+        "fields": [F("model", req=True), F("stories", req=True), F("layers", multi=True, help="default: all"),
+                   F("start", kind="int", default=50), F("denoise", kind="float", default=0.5),
+                   F("judge", help="URL@model that rates valence and arousal, for the map"),
+                   F("dtype", choices=DTYPES, default="auto"), F("device", default="auto"),
+                   F("out", req=True, help="e.g. runs/emotions/mymodel")]},
+    "emo_scan": {
+        "title": "Emotions: scan a corpus", "group": "Interpret", "argv": [S / "emotions.py", "scan"],
+        "help": "The passages that activate each emotion vector most.",
+        "fields": [F("emotions", req=True), F("corpus", req=True), F("field"), F("split", default="train"),
+                   F("limit_docs", kind="int", default=500), F("layer", kind="int"), F("top", kind="int", default=5),
+                   F("device", default="auto"), F("out", req=True)]},
+    "emo_sweep": {
+        "title": "Emotions: sweep a quantity", "group": "Interpret", "argv": [S / "emotions.py", "sweep"],
+        "help": "Emotion activation just before the reply as one number in the prompt changes.",
+        "fields": [F("emotions", req=True), F("template", req=True, help="prompt with {x}"),
+                   F("values", multi=True, req=True), F("emotion", multi=True), F("layer", kind="int"),
+                   F("device", default="auto"), F("out")]},
+    "emo_steer": {
+        "title": "Emotions: steer one reply", "group": "Interpret", "argv": [S / "emotions.py", "steer"],
+        "help": "A reply with and without an emotion mix added (strength: a fraction of the residual stream's norm; "
+                "the paper sweeps -0.1 to 0.1).",
+        "fields": [F("emotions", req=True), F("prompt", req=True),
+                   F("mix", repeat=True, req=True, help="emotion=strength, e.g. calm=0.05"),
+                   F("layers", multi=True), F("max_tokens", kind="int", default=80), F("device", default="auto"),
+                   F("out")]},
+    "emo_cvec": {
+        "title": "Emotions: llama.cpp control vector", "group": "Interpret", "argv": [S / "emotions.py", "cvec"],
+        "help": "An emotion mix as a control vector GGUF for llama-server --control-vector.",
+        "fields": [F("emotions", req=True), F("mix", repeat=True, req=True), F("layers", multi=True),
+                   F("out", req=True, help="e.g. runs/emotions/calm.gguf")]},
+})
 
 def U(name, **kw):
     """A field whose flag keeps the underscores (--input_path), as the pipeline scripts spell them."""

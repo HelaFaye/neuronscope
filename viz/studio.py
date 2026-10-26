@@ -440,6 +440,21 @@ def _key(path):
     return hashlib.sha256(path.encode()).hexdigest()[:16]
 
 
+def features_lab_call(lab: str | None, op: str, body: dict | None, timeout: float = 1800):
+    """One call to the decoding lab's /ns/* endpoints (scripts/feature_lab.py). Loopback only, as the lab is."""
+    url = (lab or "http://127.0.0.1:8090").rstrip("/")
+    u = urllib.parse.urlsplit(url)
+    if u.scheme != "http" or u.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("the decoding lab listens on this computer only: http://127.0.0.1:PORT")
+    if not re.fullmatch(r"[a-z_]{2,20}", op or ""):
+        raise ValueError("bad lab endpoint")
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(f"{url}/ns/{op}", data=data, headers={"Content-Type": "application/json"},
+                                 method="GET" if body is None else "POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
 def load_settings():
     p = STATE["settings_path"]
     if p and os.path.exists(p):
@@ -3939,6 +3954,81 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(404, {"error": "no such job"})
         return self._json(404, {"error": "not found"})
 
+    # ---------------------------------------------------------------- features (docs/FEATURES.md)
+    def _features_ws(self):
+        ws = STATE.get("workspace") or {}
+        return (ws.get("root") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                list(load_settings().get("_features_dirs") or []))
+
+    def _features_get(self):
+        import features_api as FA
+        if self.path == "/features":
+            import features_page
+            return self._html(features_page.PAGE)
+        root, extra = self._features_ws()
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        arg = lambda k, d="": (q.get(k) or [d])[0]                              # noqa: E731
+        route = urllib.parse.urlsplit(self.path).path
+        try:
+            if route == "/api/features/list":
+                return self._json(200, FA.list_all(root, extra))
+            if route == "/api/features/lab/info":
+                return self._json(200, features_lab_call(arg("lab"), "info", None))
+            p = FA.allowed(arg("path"), root, extra)
+            if route == "/api/features/dict":
+                return self._json(200, FA.dictionary(p))
+            if route == "/api/features/feature":
+                return self._json(200, FA.feature(p, int(arg("id", "0"))))
+            if route == "/api/features/search":
+                return self._json(200, {"hits": FA.search(p, arg("q"))})
+            if route == "/api/features/emotions":
+                return self._json(200, FA.emotions(p))
+            if route == "/api/features/graph":
+                return self._json(200, FA.graph(p))
+        except (ValueError, KeyError) as e:
+            return self._json(400, {"error": str(e)})
+        except FileNotFoundError as e:
+            return self._json(404, {"error": f"not found: {e.filename or e}"})
+        except OSError as e:
+            return self._json(502, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
+    def _features_post(self, req):
+        import features_api as FA
+        root, extra = self._features_ws()
+        try:
+            if self.path == "/api/features/label":
+                return self._json(200, FA.set_label(FA.allowed(req.get("path"), root, extra), int(req.get("id")),
+                                                    str(req.get("label") or "")))
+            if self.path.startswith("/api/features/lab/"):
+                op = self.path.rsplit("/", 1)[-1]
+                body = {k: v for k, v in req.items() if k != "lab"}
+                for k in ("sae", "transcoders"):            # the lab reads these files: workspace runs/ only
+                    if isinstance(body.get(k), list):
+                        body[k] = [str(FA.allowed(x, root, extra)) for x in body[k]]
+                for k in ("emotions", "save"):
+                    if body.get(k):
+                        body[k] = str(FA.allowed(body[k], root, extra))
+                st = body.get("steer") or {}
+                if (st.get("feature") or {}).get("sae"):
+                    st["feature"]["sae"] = str(FA.allowed(st["feature"]["sae"], root, extra))
+                if (st.get("emotion") or {}).get("file"):
+                    st["emotion"]["file"] = str(FA.allowed(st["emotion"]["file"], root, extra))
+                if isinstance(body.get("sae"), str):
+                    body["sae"] = str(FA.allowed(body["sae"], root, extra))
+                return self._json(200, features_lab_call(req.get("lab"), op, body))
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read()).get("error")
+            except Exception:
+                msg = None
+            return self._json(e.code, {"error": msg or f"lab: HTTP {e.code}"})
+        except OSError as e:
+            return self._json(502, {"error": f"the decoding lab is not answering ({e}); start it from this page"})
+        return self._json(404, {"error": "not found"})
+
     def _jobs_post(self):
         runner = STATE.get("jobs")
         if runner is None:
@@ -4471,7 +4561,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     PAGES = {"/", "/setup", "/settings", "/lab", "/review", "/projects", "/workers", "/jobs", "/connect", "/remote",
-             "/link", "/system"}
+             "/link", "/system", "/features"}
 
     def do_GET(self):
         self._route = None
@@ -4657,6 +4747,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/projects", "/workers", "/api/workers", "/api/workers/overview") \
                 or self.path.startswith("/api/projects"):
             return self._projects_get()
+        if self.path == "/features" or self.path.startswith("/api/features/"):
+            if not self._owner_only():
+                return
+            return self._features_get()
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
             if self._role != "owner":
                 return self._json(403, {"error": "jobs need the owner"})
@@ -4936,6 +5030,11 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 ok, why, port = hub.acquire(name, "studio", req.get("cfg") or {})
                 return self._json(200 if ok else 400, {"ok": ok, "port": port, "message": why} if ok
                                   else {"error": why})
+
+            if self.path.startswith("/api/features/"):
+                if not self._owner_only():
+                    return
+                return self._features_post(self._read())
 
             if self.path.startswith("/api/automation/"):
                 if not self._owner_only():
