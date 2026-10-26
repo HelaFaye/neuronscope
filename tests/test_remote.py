@@ -617,3 +617,40 @@ def test_jobs_run_on_a_host_when_its_owner_allows(studio_srv, tmp_path, backend)
         assert st == 400 and "does not allow" in r["error"]
     finally:
         rt.close_api()
+
+
+def test_host_gives_the_computer_back_to_its_owner(tmp_path, backend):
+    ag, rt, url = make_agent(tmp_path, backend)
+    try:
+        snap = {"idle_s": 999, "gamepad": False, "vr": False}
+        g = nsr.PresenceGuard(ag, read=lambda: dict(snap))
+        ag.presence = g
+        g.check()
+        assert ag.busy is None                                         # off unless the owner turns it on
+        ag.cfg["yield"] = {"enabled": True, "idle_under": 60, "cooldown": 300}
+        snap["idle_s"] = 4
+        g.check()
+        assert ag.busy and ag.busy["source"] == "owner" and "keyboard or mouse" in ag.busy["why"]
+        r = ag.call_tool("chat", {"messages": [{"role": "user", "content": "hi"}]}, "t")
+        assert r["isError"] and r["content"][0]["text"].startswith(nsr.BUSY_PREFIX)
+        assert ag.call_tool("set_busy", {"busy": False}, "t")["structuredContent"]["busy"]      # not a controller's to end
+        snap["idle_s"] = 120
+        g.check()
+        assert ag.busy                                                 # quiet, but not for the cooldown yet
+        g.last_seen -= 400
+        g.check()
+        assert ag.busy is None
+        assert not ag.call_tool("chat", {"messages": [{"role": "user", "content": "hi"}]}, "t")["isError"]
+        snap.update(idle_s=None, vr=True)
+        g.check()
+        assert "VR" in ag.busy["why"]
+        # a controller's rule (power) can make it rest, for a while
+        ag.set_busy(None)
+        ag.cfg["yield"]["enabled"] = False
+        r = ag.call_tool("set_busy", {"busy": True, "minutes": 30, "reason": "monthly energy cap"}, "t")
+        assert not r["isError"] and ag.busy["until"] > time.time()
+        assert ag.call_tool("t" and "telemetry", {}, "t")["structuredContent"]["busy"]["why"] == "monthly energy cap"
+        ag.busy["until"] = time.time() - 1                                 # its time is up
+        assert not ag.call_tool("chat", {"messages": [{"role": "user", "content": "hi"}]}, "t")["isError"]
+    finally:
+        rt.close_api()

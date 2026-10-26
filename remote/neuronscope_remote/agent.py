@@ -88,7 +88,7 @@ MAX_ATTEMPTS = 5
 MAX_JSON = 32 * 1024 * 1024    # chat requests can carry images
 MAX_CHUNK = 64 * 1024 * 1024
 ALLOW_DEFAULT = {"chat": True, "load": True, "receive": True, "install": True, "delete": False, "trace": True,
-                 "jobs": False, "restart": True}
+                 "jobs": False, "restart": True, "busy": True}
 ALLOW_TEXT = {"chat": "chat with the models",
               "trace": "check replies with NeuronScope's tracer (runs a model file once more, for a 3D view)",
               "load": "load and unload models",
@@ -97,7 +97,8 @@ ALLOW_TEXT = {"chat": "chat with the models",
               "delete": "delete files in the incoming and models folders",
               "jobs": "run NeuronScope jobs (evaluations, benchmarks, training) with the NeuronScope folder on this "
                       "computer; they run Python code, so only for controllers you trust",
-              "restart": "restart this agent (it starts again by itself)"}
+              "restart": "restart this agent (it starts again by itself)",
+              "busy": "mark this computer busy or free and unload its models (Studio's automation rules)"}
 KNOWN_BACKENDS = (("lmstudio", "http://127.0.0.1:1234"), ("ollama", "http://127.0.0.1:11434"),
                   ("llama-server", "http://127.0.0.1:8080"), ("vllm", "http://127.0.0.1:8000"))
 ROLE_LINE = "This computer is the HOST: it runs the models. Controllers send it instructions over MCP."
@@ -732,6 +733,62 @@ def hottest(row: dict) -> float | None:
     return max(vals) if vals else None
 
 
+BUSY_PREFIX = "HOST BUSY:"            # controllers recognise a host that is busy, not broken, by this
+
+
+class PresenceGuard(threading.Thread):
+    """Gives the computer back to its owner: when someone uses its keyboard, mouse, a game controller or
+    VR (presence.py), unload the models and refuse new work until it has been quiet for a while."""
+
+    def __init__(self, agent: "Agent", read=None, every: float = 5.0):
+        super().__init__(daemon=True)
+        if read is None:
+            from . import presence
+            read = presence.snapshot
+        self.agent, self.read, self.every = agent, read, every
+        self.stop = threading.Event()
+        self.last = {}
+        self.last_seen = 0.0
+
+    def cfg(self) -> dict:
+        y = self.agent.cfg.get("yield") or {}
+        return {"enabled": bool(y.get("enabled", False)), "idle_under": float(y.get("idle_under", 60)),
+                "gamepad": bool(y.get("gamepad", True)), "vr": bool(y.get("vr", True)),
+                "cooldown": float(y.get("cooldown", 300)), "unload": bool(y.get("unload", True)),
+                "stop_jobs": bool(y.get("stop_jobs", False))}
+
+    def check(self) -> None:
+        c = self.cfg()
+        self.last = self.read()
+        if not c["enabled"]:
+            if (self.agent.busy or {}).get("source") == "owner":
+                self.agent.set_busy(None)
+            return
+        why = []
+        if c["vr"] and self.last.get("vr"):
+            why.append("a VR session is running")
+        if c["gamepad"] and self.last.get("gamepad"):
+            why.append("a game controller is in use")
+        if self.last.get("idle_s") is not None and self.last["idle_s"] < c["idle_under"]:
+            why.append(f"keyboard or mouse used {int(self.last['idle_s'])} s ago")
+        now = time.time()
+        if why:
+            self.last_seen = now
+            if (self.agent.busy or {}).get("source") != "owner":
+                self.agent.set_busy({"why": "the host's owner is using this computer (" + "; ".join(why) + ")",
+                                     "source": "owner", "since": now}, unload=c["unload"], stop_jobs=c["stop_jobs"])
+        elif (self.agent.busy or {}).get("source") == "owner" and now - self.last_seen >= c["cooldown"]:
+            self.agent.set_busy(None)
+
+    def run(self):
+        while not self.stop.is_set():
+            try:
+                self.check()
+            except Exception:
+                pass
+            self.stop.wait(self.every)
+
+
 class ThermalGuard(threading.Thread):
     """Watches the GPUs. Above the limit, the host refuses new chats and traces and unloads
     what its LLM servers can unload; below the limit minus the margin it resumes. GPUs
@@ -832,6 +889,8 @@ class Agent:
         self._backends = (0.0, [])
         self.callhome: dict = {}         # url -> CallHome thread
         self.guard = None                # ThermalGuard, started by the runtime
+        self.presence = None             # PresenceGuard, started by the runtime
+        self.busy = None                 # {why, source: owner|controller, since, until} while it takes no work
         cfg = self.store.read("config.json", {})
         self.cfg = {"name": socket.gethostname()[:40] or "host", "mode": "", "port": DEFAULT_PORT, "bind": "",
                     "backends": [], "detect": True, "models_dir": "", "incoming_dir": "", **cfg}
@@ -965,6 +1024,7 @@ class Agent:
         return info
 
     def t_run_job(self, a):
+        self.not_busy()
         mod, runner = self._jobs()
         try:
             return runner.start(str(a["kind"]), dict(a.get("values") or {}))
@@ -997,6 +1057,51 @@ class Agent:
         threading.Thread(target=later, daemon=True).start()
         return {"ok": True, "note": "the agent restarts now and is back in a few seconds"}
 
+    # -- busy: the owner is using the computer, or a controller's rule (power) asked it to rest
+    def set_busy(self, b: dict | None, unload: bool = False, stop_jobs: bool = False) -> None:
+        was = self.busy
+        self.busy = b
+        if b and not was:
+            self.note(b.get("source", "busy"), "busy: no new work", True, b.get("why", ""))
+        elif was and not b:
+            self.note(was.get("source", "busy"), "free again", True, "")
+        if b and unload:
+            for bk in self.backends():
+                try:
+                    for m in bk.models():
+                        if m.get("loaded"):
+                            bk.unload(m["id"])
+                except Exception:
+                    pass
+        if b and stop_jobs and getattr(self, "_jobs_cache", None):
+            runner = self._jobs_cache[2]
+            for j in runner.list(30):
+                if j.get("status") == "running":
+                    try:
+                        runner.cancel(j["id"])
+                    except Exception:
+                        pass
+
+    def not_busy(self) -> None:
+        b = self.busy
+        if b and b.get("until") and time.time() >= b["until"]:
+            self.set_busy(None)
+            b = None
+        if b:
+            until = f" until {time.strftime('%Y-%m-%d %H:%M', time.localtime(b['until']))}" if b.get("until") else ""
+            raise ToolError(f"{BUSY_PREFIX} {b.get('why') or 'busy'}{until}; use another host for now")
+
+    def t_set_busy(self, a):
+        self.need("busy")
+        if a.get("busy"):
+            mins = float(a.get("minutes") or 0)
+            self.set_busy({"why": str(a.get("reason") or "a controller's automation rule")[:300], "source": "controller",
+                           "since": time.time(), "until": time.time() + mins * 60 if mins > 0 else
+                           (float(a["until"]) if a.get("until") else None)}, unload=bool(a.get("unload")))
+        elif (self.busy or {}).get("source") != "owner":          # the owner's own use is not a controller's to end
+            self.set_busy(None)
+        return {"busy": self.busy}
+
     def t_list_backends(self, a):
         out = []
         for b in self.backends(refresh=True):
@@ -1027,11 +1132,15 @@ class Agent:
     def t_telemetry(self, a):
         g = self.guard
         rows = g.last if g is not None and g.last else gpu_telemetry()
-        return {"gpus": rows, "thermal": {**(g.cfg() if g else {}), "tripped": g.tripped if g else None}}
+        p = self.presence
+        return {"gpus": rows, "thermal": {**(g.cfg() if g else {}), "tripped": g.tripped if g else None},
+                "presence": (p.last if p is not None and p.last else None), "busy": self.busy,
+                "yield": p.cfg() if p is not None else None}
 
     def t_chat(self, a):
         self.need("chat")
         self.too_hot()
+        self.not_busy()
         if not a.get("messages"):
             raise ToolError("messages are needed: [{\"role\": \"user\", \"content\": \"...\"}]")
         b = self.backend_for(a.get("model", ""), a.get("backend", ""))
@@ -1117,6 +1226,7 @@ class Agent:
     def t_trace_reply(self, a):
         self.need("trace")
         self.too_hot()
+        self.not_busy()
         tr = self.tracer()
         if not tr["available"]:
             raise ToolError("this host has no NeuronScope tracer: install NeuronScope here and build llama.cpp with "
@@ -1140,6 +1250,7 @@ class Agent:
 
     def t_load_model(self, a):
         self.need("load")
+        self.not_busy()
         b = self.backend_for("", a.get("backend", "")) if a.get("backend") else self.backend_for(a["model"])
         return b.load(a["model"], a.get("context_length"), a.get("gpu"), a.get("keep_alive"))
 
@@ -1322,6 +1433,11 @@ class Agent:
          {"readOnlyHint": True}, ["id"]),
         ("cancel_job", "Stop a running job on this host.", {"id": {"type": "string"}},
          {"readOnlyHint": False, "destructiveHint": True}, ["id"]),
+        ("set_busy", "Mark this host busy (no new work, optionally unload its models) or free again. While its "
+         "owner uses it, it stays busy whatever a controller says.",
+         {"busy": {"type": "boolean"}, "minutes": {"type": "number"}, "until": {"type": "number"},
+          "reason": {"type": "string"}, "unload": {"type": "boolean"}},
+         {"readOnlyHint": False, "destructiveHint": False}, ["busy"]),
         ("restart_agent", "Restart this agent (the host comes back by itself in a few seconds).", {},
          {"readOnlyHint": False, "destructiveHint": False}),
     ]
@@ -1405,6 +1521,8 @@ class Agent:
                             "link": self.pair_link(p["code"])} if p else None,
                 "controllers": self.controllers.list(), "allow": self.cfg["allow"], "allow_text": ALLOW_TEXT,
                 "neuronscope_dir": str(self.neuronscope_dir() or ""), "neuronscope_dir_set": self.cfg.get("neuronscope_dir", ""),
+                "yield": self.presence.cfg() if self.presence is not None else dict(self.cfg.get("yield") or {}),
+                "presence": self.presence.last if self.presence is not None else None, "busy": self.busy,
                 "backends": [b.describe() for b in self.backends()], "configured_backends": self.cfg["backends"],
                 "callhome": [{"url": c.url, "controller": c.entry.get("controller", ""), "status": c.status}
                              for c in self.callhome.values()],
@@ -1703,6 +1821,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 ag.cfg["thermal"] = t
                 ag.save_config()
                 ag.note("host owner", "thermal guard settings", True, json.dumps(t))
+            elif self.path == "/api/yield":
+                y = dict(ag.cfg.get("yield") or {})
+                for k in ("enabled", "gamepad", "vr", "unload", "stop_jobs"):
+                    if k in req:
+                        y[k] = bool(req[k])
+                for k, lo, hi in (("idle_under", 5, 3600), ("cooldown", 0, 86400)):
+                    if k in req:
+                        y[k] = min(hi, max(lo, float(req[k])))
+                ag.cfg["yield"] = y
+                ag.save_config()
+                if req.get("free_now"):
+                    ag.set_busy(None)
+                    if ag.presence is not None:
+                        ag.presence.last_seen = 0
             elif self.path == "/api/neuronscope-dir":
                 d = str(req.get("dir", "")).strip()
                 if d and not (Path(d).expanduser() / "viz" / "jobs.py").is_file():
@@ -2138,6 +2270,8 @@ def serve(a) -> int:
     rt = Runtime(ag)
     ag.guard = ThermalGuard(ag)
     ag.guard.start()
+    ag.presence = PresenceGuard(ag)
+    ag.presence.start()
     try:
         urls = rt.listen(mode, a.bind or ag.cfg.get("bind", ""), a.port or ag.cfg.get("port") or DEFAULT_PORT,
                          tls=a.tls, allow_plaintext=a.allow_plaintext,
@@ -2332,6 +2466,16 @@ table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .4
  <div style="margin-top:.5rem"><button class="pri" id="apply">Use this link</button> <span id="linkNow" class="mut"></span></div></div>
 <div class="card" id="pairCard"><h2>2. Pair a controller</h2><div id="pair"></div></div>
 <div class="card"><h2>Controllers allowed to control this host</h2><div id="ctls"></div></div>
+<div class="card"><h2>When I use this computer</h2>
+<label style="display:block"><input type="checkbox" id="yon"> Give it back to me: unload the models and take no new work while I use it</label>
+<div id="ybox" style="margin:.4rem 0 0 1.4rem">
+<label>Counts as in use when the keyboard or mouse was used in the last <input id="yidle" type="number" min="5" style="width:5rem"> s</label>
+<label style="display:block"><input type="checkbox" id="ypad"> or a game controller is used</label>
+<label style="display:block"><input type="checkbox" id="yvr"> or a VR session runs (SteamVR, Oculus, Monado…)</label>
+<label>Take work again after <input id="ycool" type="number" min="0" style="width:5rem"> s of quiet</label>
+<label style="display:block"><input type="checkbox" id="yjobs"> also stop NeuronScope jobs running here</label>
+<div class="note" id="ystate" style="margin-top:.3rem"></div>
+<button id="yfree" style="margin-top:.3rem">I am done: take work again now</button></div></div>
 <div class="card"><h2>What controllers may do</h2><div id="allow"></div>
 <div style="margin-top:.6rem"><label>NeuronScope folder for jobs <input id="nsdir" placeholder="found automatically when the agent runs from one" style="width:100%"></label>
 <button id="nsdirsave" style="margin-top:.3rem">Save</button> <span id="nsdirmsg" class="note"></span></div></div>
@@ -2360,6 +2504,10 @@ const MODES=[
 let S=null, pick=null;
 async function api(p,b){ const r=await fetch(p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json','X-Console-Key':key},body:b?JSON.stringify(b):undefined});
   const j=await r.json(); if(!r.ok){ $('#err').textContent=j.error||r.status; throw new Error(j.error); } $('#err').textContent=''; return j; }
+const ysend=async(extra)=>{ try{ S=await api('/api/yield',{enabled:$('#yon').checked,idle_under:+$('#yidle').value||60,gamepad:$('#ypad').checked,
+  vr:$('#yvr').checked,cooldown:+$('#ycool').value||0,stop_jobs:$('#yjobs').checked,...(extra||{})}); render(); }catch(e){} };
+['#yon','#ypad','#yvr','#yjobs','#yidle','#ycool'].forEach(s=>$(s).onchange=()=>ysend());
+$('#yfree').onclick=()=>ysend({free_now:true});
 $('#nsdirsave').onclick=async()=>{ try{ S=await api('/api/neuronscope-dir',{dir:$('#nsdir').value.trim()}); render(); }catch(e){} };
 function extra(){ const m=pick; let h='';
   if(m==='vpn') h=`VPN address of this computer: <input id="xbind" value="${esc(S.link.mode==='vpn'?S.link.bind:(S.addresses.find(a=>a.kind.startsWith('vpn'))||{}).address||'')}" placeholder="100.x.y.z"> <span class="mut">Tailscale: <code>tailscale ip -4</code></span>`;
@@ -2395,6 +2543,11 @@ function render(){ const s=S; $('#hname').textContent='“'+s.name+'”'; $('#ho
   if(document.activeElement?.id?.startsWith('th')!==true){ $('#thOn').checked=!!th.enabled; $('#thLim').value=th.limit_c??95; $('#thMar').value=th.margin_c??10; $('#thUnl').checked=th.unload!==false; }
   ['thOn','thLim','thMar','thUnl'].forEach(id=>$('#'+id).onchange=async()=>{ S=await api('/api/thermal',{enabled:$('#thOn').checked,limit_c:+$('#thLim').value,margin_c:+$('#thMar').value,unload:$('#thUnl').checked}); render(); });
   if(document.activeElement!==$('#nsdir')) $('#nsdir').value=s.neuronscope_dir_set||'';
+  { const y=s.yield||{}; if(!['yidle','ycool'].includes(document.activeElement&&document.activeElement.id)){ $('#yidle').value=y.idle_under??60; $('#ycool').value=y.cooldown??300; }
+    $('#yon').checked=!!y.enabled; $('#ypad').checked=y.gamepad!==false; $('#yvr').checked=y.vr!==false; $('#yjobs').checked=!!y.stop_jobs; $('#ybox').style.opacity=y.enabled?1:.55;
+    const p=s.presence||{}; const known=p.idle_s!=null||p.gamepad!=null||p.vr!=null;
+    $('#ystate').textContent=(s.busy?'Busy now: '+s.busy.why+'. ':'Taking work. ')+(known?`Last input ${p.idle_s!=null?Math.round(p.idle_s)+' s ago':'unknown'}${p.vr?', VR running':''}${p.gamepad?', controller in use':''}.`:'This computer cannot tell when it is in use (no desktop session visible to the agent).');
+    $('#yfree').hidden=!(s.busy&&s.busy.source==='owner'); }
   $('#nsdirmsg').textContent=s.neuronscope_dir?('jobs run from '+s.neuronscope_dir):'no NeuronScope folder found';
   $('#allow').innerHTML=Object.keys(s.allow).map(k=>`<label style="display:block"><input type="checkbox" data-al="${k}" ${s.allow[k]?'checked':''}> ${esc(s.allow_text[k])}</label>`).join('');
   document.querySelectorAll('[data-al]').forEach(c=>c.onchange=async()=>{ S=await api('/api/allow',{allow:{[c.dataset.al]:c.checked}}); render(); });
