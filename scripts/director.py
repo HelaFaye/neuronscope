@@ -696,6 +696,19 @@ def start_attempt(plan: dict, t: dict) -> dict:
     return a
 
 
+def yield_attempt(plan: dict, t: dict, reason: str) -> dict:
+    """The computer the attempt ran on was taken back (its owner came back, a power limit): the task goes
+    back to the queue at once, for another worker, and the attempt does not count as a failure."""
+    a = t["attempts"][-1]
+    a["finished"] = _now()
+    a["yielded"] = str(reason)[:300]
+    t["status"] = "todo"
+    t["not_before"] = 0
+    t["avoid"] = sorted(set(t.get("avoid") or []) | ({a["model"]} if a.get("model") else set()))
+    plan["updated"] = _now()
+    return a
+
+
 def finish_attempt(plan: dict, t: dict, text: str | None, check: dict | None = None,
                    error: str | None = None, clf: sc.SubjectClassifier | None = None, fatal: bool = False) -> dict:
     """Record a worker's answer and decide where it goes: review, done (when

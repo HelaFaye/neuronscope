@@ -48,6 +48,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import collections
 import threading
 import time
 import urllib.error
@@ -868,6 +869,297 @@ def remote():
         import remote_hosts
         REMOTE["obj"] = remote_hosts.Remote(load_links, save_links)
     return REMOTE["obj"]
+
+
+# ---- system monitor, busy computers and automation rules (System page; scripts/automation.py)
+
+import automation as ns_auto  # noqa: E402
+
+SYSMON = {"lock": threading.Lock(), "want": 0.0, "thread": None, "local": collections.deque(maxlen=1800),
+          "hosts": {}, "presence": {}, "cpu_prev": None, "t_presence": 0.0, "t_hosts": 0.0}
+BUSY: dict = {}            # target ("local" or "host:<name>") -> {why, since, until, source, actions}
+AUTO = {"lock": threading.Lock(), "results": {}, "applied": {}, "log": collections.deque(maxlen=300),
+        "samples": {}, "history_at": {}, "throttled": {}, "thread": None}
+BUSY_PREFIX = "HOST BUSY:"
+
+
+def worker_target(wid: str | None) -> str | None:
+    """Which computer a worker runs on: "local", "host:<name>", or None (an endpoint)."""
+    if not wid or wid.startswith("ep:"):
+        return None
+    if worker_kind(wid) == "remote":
+        return "host:" + wid.partition(LINK_SEP)[0]
+    return "local"
+
+
+def target_busy(target: str | None) -> dict | None:
+    b = BUSY.get(target) if target else None
+    if b and b.get("until") and time.time() >= b["until"] and b.get("source") == "api":
+        BUSY.pop(target, None)
+        return None
+    return b
+
+
+def _cpu_percent():
+    try:
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+        idle, total = v[3] + (v[4] if len(v) > 4 else 0), sum(v)
+        prev, SYSMON["cpu_prev"] = SYSMON["cpu_prev"], (idle, total)
+        if prev is None or total == prev[1]:
+            return None
+        return round(100 * (1 - (idle - prev[0]) / (total - prev[1])), 1)
+    except (OSError, ValueError, IndexError):
+        try:
+            import psutil
+            return psutil.cpu_percent(None)
+        except Exception:
+            return None
+
+
+def _ram():
+    if Host is None:
+        return None, None
+    try:
+        h = Host()
+        if h.ram:
+            return round((h.ram - (h.ram_available or 0)) / 2**30, 2), round(h.ram / 2**30, 2)
+    except Exception:
+        pass
+    return None, None
+
+
+def sample_local() -> dict:
+    import remote_hosts
+    used, total = _ram()
+    gpus = [{k: g.get(k) for k in ("id", "name", "vendor", "util", "temp_c", "junction_c", "vram_used_mb", "vram_total_mb",
+                                   "power_w")} for g in remote_hosts.nsr.gpu_telemetry()]
+    return {"t": time.time(), "cpu": _cpu_percent(), "ram_used_gb": used, "ram_total_gb": total, "gpus": gpus}
+
+
+def _sysmon_loop():
+    """While the System page is open or automation rules are on: this computer every 2 s, its presence every
+    5 s, every host every 10 s."""
+    import remote_hosts  # noqa: F401  (puts the agent package on the path)
+    from neuronscope_remote import presence as ns_presence
+    while True:
+        wanted = time.time() - SYSMON["want"] < 60 or any(r.get("enabled") for r in automation_config()["rules"])
+        if not wanted:
+            time.sleep(2)
+            continue
+        try:
+            row = sample_local()
+            with SYSMON["lock"]:
+                SYSMON["local"].append(row)
+            now = time.time()
+            if now - SYSMON["t_presence"] >= 5:
+                SYSMON["t_presence"] = now
+                SYSMON["presence"]["local"] = ns_presence.snapshot()
+            if now - SYSMON["t_hosts"] >= 10:
+                SYSMON["t_hosts"] = now
+                try:
+                    hosts = remote().hosts()
+                except Exception:
+                    hosts = []
+                for h in hosts:
+                    try:
+                        tel = remote().call(h["name"], "telemetry", timeout=8)
+                        rowh = {"t": now, "gpus": tel.get("gpus") or [], "busy": tel.get("busy")}
+                        SYSMON["presence"]["host:" + h["name"]] = tel.get("presence") or {}
+                        b = tel.get("busy")
+                        if b and b.get("source") == "owner":
+                            BUSY["host:" + h["name"]] = {"why": b.get("why"), "since": b.get("since"), "source": "host",
+                                                         "until": None, "actions": ["busy"]}
+                        elif (BUSY.get("host:" + h["name"]) or {}).get("source") == "host":
+                            BUSY.pop("host:" + h["name"], None)
+                    except Exception as e:
+                        rowh = {"t": now, "error": str(e)[:200]}
+                    with SYSMON["lock"]:
+                        SYSMON["hosts"].setdefault(h["name"], collections.deque(maxlen=360)).append(rowh)
+        except Exception as e:
+            print(f"[studio] monitor: {e}", file=sys.stderr)
+        time.sleep(2)
+
+
+def sysmon_start():
+    SYSMON["want"] = time.time()
+    if SYSMON["thread"] is None:
+        SYSMON["thread"] = threading.Thread(target=_sysmon_loop, daemon=True)
+        SYSMON["thread"].start()
+    if AUTO["thread"] is None:
+        AUTO["thread"] = threading.Thread(target=automation_loop, daemon=True)
+        AUTO["thread"].start()
+
+
+def sysmon_view(points: int = 300) -> dict:
+    with SYSMON["lock"]:
+        loc = list(SYSMON["local"])
+        hosts = {k: list(v) for k, v in SYSMON["hosts"].items()}
+    step = max(1, len(loc) // points)
+    return {"local": loc[::step][-points:], "hosts": {k: v[-points:] for k, v in hosts.items()},
+            "presence": SYSMON["presence"], "busy": BUSY, "computer": socket.gethostname()}
+
+
+def _auto_path() -> str:
+    return os.path.join(os.path.dirname(os.path.expanduser(STATE.get("settings_path") or "~/.neuronscope/studio.json")),
+                        "automation.json")
+
+
+def automation_config() -> dict:
+    try:
+        with open(_auto_path()) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        d = {}
+    return {"rules": d.get("rules") or [], "ha": d.get("ha") or {}, "manual": d.get("manual") or {}}
+
+
+def automation_save(cfg: dict) -> None:
+    p = _auto_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.chmod(tmp, 0o600)                     # the Home Assistant token lives here
+    os.replace(tmp, p)
+
+
+def _ha():
+    ha = automation_config()["ha"]
+    tok = ha.get("token") or ""
+    if ha.get("token_file"):
+        try:
+            tok = open(os.path.expanduser(ha["token_file"])).read().strip()
+        except OSError:
+            tok = ""
+    return ns_auto.HomeAssistant(ha["url"], tok) if ha.get("url") and tok else None
+
+
+def _power_inputs(rules: list, now: float) -> dict:
+    """Readings for each power rule's sensor: Home Assistant's history since the period began (refreshed
+    every minute), plus its current state every pass."""
+    ha = _ha()
+    out = {}
+    if ha is None:
+        return out
+    for r in rules:
+        w = r["when"]
+        if w["kind"] != "power" or not r.get("enabled"):
+            continue
+        ent = w["entity"]
+        start, _ = ns_auto.period_bounds(w["period"], now, w.get("reset_day", 1), w.get("week_start", 0))
+        buf = AUTO["samples"].setdefault(ent, [])
+        try:
+            if w["period"] not in ("second", "minute") and now - AUTO["history_at"].get(ent, 0) > 60:
+                AUTO["history_at"][ent] = now
+                hist = ha.history(ent, start - 3600)
+                buf[:] = sorted(set(buf) | set(hist))
+            st = ha.state(ent)
+            if st["value"] is not None:
+                buf.append((now, st["value"]))
+            out[ent] = {"value": st["value"], "unit": st["unit"], "samples": buf}
+        except Exception as e:
+            out[ent] = {"error": str(e)[:200], "samples": buf}
+        del buf[:-5000]
+    return out
+
+
+def _throttle(target: str, on: bool) -> None:
+    reg = workers_registry()
+    wids = [w["id"] for w in all_workers() if worker_target(w["id"]) == target]
+    for wid in wids:
+        if on:
+            AUTO["throttled"].setdefault(wid, reg.control(wid).get("max_parallel"))
+            reg.set_control(wid, max_parallel=1)
+        elif wid in AUTO["throttled"]:
+            prev = AUTO["throttled"].pop(wid)
+            reg.set_control(wid, max_parallel=prev or 99)
+
+
+def apply_target(target: str, want: dict | None, source: str = "rule") -> None:
+    """Make `target` match what the rules (or the API) want; only changes are acted on."""
+    have = AUTO["applied"].get(target)
+    acts = set((want or {}).get("actions") or [])
+    why = "; ".join((want or {}).get("reasons") or []) or (want or {}).get("why") or ""
+    if want and not have:
+        if acts & {"busy", "requeue", "unload"}:
+            BUSY[target] = {"why": why, "since": time.time(), "until": want.get("until"), "source": source,
+                            "actions": sorted(acts)}
+        if "throttle" in acts:
+            _throttle(target, True)
+        if target == "local" and "unload" in acts:
+            stop_server()
+            POOL.stop()
+        if target.startswith("host:") and acts & {"busy", "unload", "requeue"}:
+            try:
+                remote().call(target[5:], "set_busy", {"busy": True, "reason": why[:300], "until": want.get("until"),
+                                                       "unload": "unload" in acts}, timeout=15)
+            except Exception as e:
+                AUTO["log"].appendleft({"t": time.time(), "target": target, "what": "could not tell the host", "detail": str(e)[:200]})
+        AUTO["applied"][target] = {"actions": sorted(acts), "why": why, "since": time.time(), "until": want.get("until")}
+        AUTO["log"].appendleft({"t": time.time(), "target": target, "what": "applied " + ", ".join(sorted(acts)), "detail": why})
+    elif have and not want:
+        if (BUSY.get(target) or {}).get("source") in (source, "rule", "api"):
+            BUSY.pop(target, None)
+        if "throttle" in have["actions"]:
+            _throttle(target, False)
+        if target.startswith("host:"):
+            try:
+                remote().call(target[5:], "set_busy", {"busy": False}, timeout=15)
+            except Exception:
+                pass
+        AUTO["applied"].pop(target, None)
+        AUTO["log"].appendleft({"t": time.time(), "target": target, "what": "released", "detail": have.get("why", "")})
+
+
+def automation_tick(now: float | None = None) -> dict:
+    now = now or time.time()
+    cfg = automation_config()
+    rules = [r for r in cfg["rules"] if r.get("enabled")]
+    inputs = {"presence": dict(SYSMON["presence"]), "power": _power_inputs(rules, now), "manual": cfg["manual"]}
+    with AUTO["lock"]:
+        prev = AUTO["results"]
+        res = {r["id"]: ns_auto.evaluate(r, inputs, now, prev.get(r["id"])) for r in rules}
+        AUTO["results"] = res
+        combined = ns_auto.combine(rules, res)
+        targets = set(combined) | {t for t, a in AUTO["applied"].items() if a.get("source", "rule") == "rule"}
+        for t in targets:
+            if (AUTO["applied"].get(t) or {}).get("source") == "api":
+                continue                                  # set by hand through the API: released by hand
+            apply_target(t, combined.get(t))
+    return res
+
+
+def automation_loop():
+    while True:
+        try:
+            if any(r.get("enabled") for r in automation_config()["rules"]):
+                automation_tick()
+        except Exception as e:
+            print(f"[studio] automation: {e}", file=sys.stderr)
+        time.sleep(10)
+
+
+def automation_action(target: str, action: str, minutes: float = 0, reason: str = "") -> dict:
+    """The automation API: what Home Assistant automations, scripts or the System page ask for directly."""
+    if target != "local" and not target.startswith("host:"):
+        raise ValueError("target: local or host:<name>")
+    reason = reason or f"set through the automation API ({action})"
+    until = time.time() + minutes * 60 if minutes and minutes > 0 else None
+    with AUTO["lock"]:
+        if action in ("busy", "unload", "throttle"):
+            cur = AUTO["applied"].get(target)
+            if cur:
+                apply_target(target, None)
+            apply_target(target, {"actions": [action] if action != "unload" else ["unload", "busy"], "why": reason,
+                                  "until": until}, source="api")
+            AUTO["applied"][target]["source"] = "api"
+        elif action in ("free", "unthrottle"):
+            apply_target(target, None, source="api")
+            BUSY.pop(target, None)
+        else:
+            raise ValueError("action: busy, unload, throttle, free or unthrottle")
+    return {"busy": BUSY.get(target), "applied": AUTO["applied"].get(target)}
 
 
 # ---- setting profiles: any number of named settings per tool, and one saved default
@@ -2289,6 +2581,8 @@ def work_queue():
 
 
 def worker_alive(wid):
+    if target_busy(worker_target(wid)):
+        return False
     if wid.startswith("ep:"):
         h = TELEMETRY["health"].get(wid)
         return h is None or h["ok"]
@@ -2870,8 +3164,10 @@ def assign_fn_for(plan):
         if r:
             reg.event(r["model"], "assigned", f"{t.get('id')}: {r['reason']}")
             return r
-        ok = [c for c in cands if reg.takes(c["id"], labels) and not reg.control(c["id"])["paused"]]
-        out = dr.assign(t, ok, sums, plan["policy"], STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"])
+        ok = [c for c in cands if reg.takes(c["id"], labels) and not reg.control(c["id"])["paused"]
+              and not target_busy(worker_target(c["id"]))]
+        out = dr.assign(t, ok, sums, plan["policy"], STATE["min_graded"], STATE["min_subject"], STATE["halluc_cost"],
+                        exclude=tuple(t.get("avoid") or ()))
         if out.get("model"):
             reg.event(out["model"], "assigned", f"{t.get('id')}: {out['reason']}")
         return out
@@ -2938,11 +3234,20 @@ def run_task(pid, tid, wid=None, t0=None):
                 # Down now, not at the next health check: its other tasks wait instead of failing too.
                 with TELEMETRY["lock"]:
                     TELEMETRY["health"][wid] = {"ok": False, "error": err[:200]}
+        taken = err and (BUSY_PREFIX in err or target_busy(worker_target(wid)))
+        if taken and BUSY_PREFIX in (err or "") and worker_target(wid) and not target_busy(worker_target(wid)):
+            BUSY[worker_target(wid)] = {"why": err.split(BUSY_PREFIX, 1)[1].strip()[:300], "since": time.time(),
+                                        "until": None, "source": "host", "actions": ["busy"]}
         with store.lock(pid):
             plan = store.load(pid)
             t = dr.task(plan, tid)
             if t["status"] == "running":
-                dr.finish_attempt(plan, t, text, check=check, error=err, fatal=fatal)
+                if taken:
+                    why = (target_busy(worker_target(wid)) or {}).get("why") or "the computer was taken back"
+                    dr.yield_attempt(plan, t, why)
+                    reg.event(wid, "requeued", f"{label}: {why}"[:300])
+                else:
+                    dr.finish_attempt(plan, t, text, check=check, error=err, fatal=fatal)
                 store.save(plan)
         with DIRECTOR["lock"]:
             DIRECTOR["running"].discard((pid, tid))
@@ -2974,6 +3279,15 @@ def director_loop():
                         if len(started) >= max(0, slots):
                             break
                         wid = (t.get("assignee") or {}).get("model") or ""
+                        if wid and target_busy(worker_target(wid)):
+                            # its computer is taken: hand the task to another worker, if one can take it
+                            new = assign_fn_for(plan)(t)
+                            if new.get("model") and not target_busy(worker_target(new["model"])):
+                                reg.event(new["model"], "reassigned", f"{t['id']}: {worker_target(wid)} is busy")
+                                t["assignee"] = new
+                                wid = new["model"]
+                            else:
+                                continue
                         # A paused, draining, full or overheated worker holds its tasks back.
                         if wid and not (reg.has_slot(wid) and worker_alive(wid)):
                             continue
@@ -4476,6 +4790,28 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._json(200, {"services": services(), "stale": code_stale()})
+        if self.path.startswith("/api/system/monitor"):
+            if not self._owner_only():
+                return
+            sysmon_start()
+            return self._json(200, sysmon_view())
+        if self.path == "/api/automation":
+            if not self._owner_only():
+                return
+            sysmon_start()
+            cfg = automation_config()
+            ha = cfg["ha"]
+            try:
+                hosts = [h["name"] for h in remote().hosts()]
+            except Exception:
+                hosts = []
+            return self._json(200, {"rules": cfg["rules"], "manual": cfg["manual"],
+                                    "ha": {"url": ha.get("url", ""), "token_file": ha.get("token_file", ""),
+                                           "has_token": bool(ha.get("token") or ha.get("token_file"))},
+                                    "results": AUTO["results"], "applied": AUTO["applied"], "busy": BUSY,
+                                    "log": list(AUTO["log"])[:60], "targets": ["local"] + ["host:" + h for h in hosts],
+                                    "computer": socket.gethostname(), "periods": ns_auto.PERIODS,
+                                    "actions": ns_auto.ACTIONS})
         if self.path.startswith("/api/profiles"):
             if not self._owner_only():
                 return
@@ -4601,6 +4937,55 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 return self._json(200 if ok else 400, {"ok": ok, "port": port, "message": why} if ok
                                   else {"error": why})
 
+            if self.path.startswith("/api/automation/"):
+                if not self._owner_only():
+                    return
+                req = self._read()
+                try:
+                    cfg = automation_config()
+                    if self.path == "/api/automation/rules":
+                        cfg["rules"] = [ns_auto.clean_rule(r) for r in req.get("rules") or []]
+                        seen = set()
+                        for r in cfg["rules"]:                  # every rule its own id, even if a client repeated one
+                            if r["id"] in seen:
+                                r["id"] = ns_auto.clean_rule({**r, "id": None})["id"]
+                            seen.add(r["id"])
+                        automation_save(cfg)
+                        sysmon_start()
+                        return self._json(200, {"rules": cfg["rules"], "results": automation_tick()})
+                    if self.path == "/api/automation/ha":
+                        url = str(req.get("url", "")).strip().rstrip("/")
+                        if url and not re.match(r"^https?://[^\s/]+", url):
+                            raise ValueError("Home Assistant address: http(s)://host:8123")
+                        ha = dict(cfg["ha"])
+                        ha["url"] = url
+                        if req.get("token"):
+                            ha["token"], ha["token_file"] = str(req["token"]).strip(), ""
+                        if req.get("token_file") is not None and str(req.get("token_file")).strip():
+                            ha["token_file"], ha["token"] = str(req["token_file"]).strip(), ""
+                        cfg["ha"] = ha
+                        automation_save(cfg)
+                        out = {"ok": True}
+                        if req.get("test_entity"):
+                            h = _ha()
+                            if h is None:
+                                raise ValueError("set the address and a token first")
+                            out["reading"] = h.state(str(req["test_entity"]))
+                        return self._json(200, out)
+                    if self.path == "/api/automation/action":
+                        return self._json(200, automation_action(str(req.get("target", "local")),
+                                                                 str(req.get("action", "")),
+                                                                 float(req.get("minutes") or 0),
+                                                                 str(req.get("reason") or "")))
+                    if self.path == "/api/automation/manual":
+                        cfg["manual"][str(req.get("rule", ""))] = bool(req.get("on"))
+                        automation_save(cfg)
+                        return self._json(200, {"manual": cfg["manual"], "results": automation_tick()})
+                except (ValueError, KeyError, OSError) as e:
+                    return self._json(400, {"error": str(e)[:300]})
+                except Exception as e:
+                    return self._json(502, {"error": f"{type(e).__name__}: {e}"[:300]})
+                return self._json(404, {"error": "not found"})
             if self.path == "/api/profiles":
                 if not self._owner_only():
                     return

@@ -33,6 +33,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timedelta
 
 PERIODS = ("second", "minute", "hour", "day", "week", "month", "year")
@@ -173,7 +174,7 @@ def clean_rule(r: dict) -> dict:
     then = [a for a in r.get("then") or [] if a in ACTIONS]
     if not then:
         raise ValueError(f"then: at least one of {', '.join(ACTIONS)}")
-    out = {"id": str(r.get("id") or f"r{int(time.time() * 1000) % 10**9}"), "name": str(r.get("name") or kind)[:80],
+    out = {"id": str(r.get("id") or "r" + uuid.uuid4().hex[:10]), "name": str(r.get("name") or kind)[:80],
            "enabled": bool(r.get("enabled", True)), "target": target, "then": then}
     if kind == "activity":
         out["when"] = {"kind": kind, "idle_under": max(5.0, float(when.get("idle_under", 60))),
