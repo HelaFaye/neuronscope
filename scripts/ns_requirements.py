@@ -49,6 +49,7 @@ PACKAGES = {
     "safetensors": ("safetensors", "reading model weights"),
     "scikit-learn": ("sklearn", "the hallucination classifier and the subject classifier"),
     "pandas": ("pandas", "reading benchmark parquet files"),
+    "datasets": ("datasets", "Hugging Face datasets (optional: Hub datasets are also read without it, via pandas)"),
     "pyarrow": ("pyarrow", "parquet support for pandas"),
     "openai": ("openai", "TestQA and answer collection through OpenAI-compatible servers"),
     "gguf": ("gguf", "GGUF metadata, expert sweeps, LoRA export"),

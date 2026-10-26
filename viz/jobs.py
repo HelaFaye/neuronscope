@@ -581,6 +581,92 @@ def build_argv(kind: str, values: dict) -> list[str]:
     return argv
 
 
+# ---- progress and plain-language hints, read from a job's log
+
+PROG_LINE = re.compile(r"^PROGRESS\s+(\d+)\s*/\s*(\d+)\s*(.*)$")
+TQDM = re.compile(r"(?:(?P<label>[^\r\n|]*?):\s*)?(?P<pct>\d{1,3})%\|[^|]*\|\s*(?P<done>\d+)/(?P<total>\d+)"
+                  r"\s*\[(?P<el>[^<\]]*)<(?P<eta>[^,\]]*)(?:,\s*(?P<rate>[^\]]*))?\]")
+BRACKET = re.compile(r"\[(\d+)\s*/\s*(\d+)\]")
+PLAIN = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\b")
+# module name -> catalog package (scripts/ns_requirements.py), for an Install button
+MODULE_PACKAGE = {"datasets": "datasets", "sklearn": "scikit-learn", "PIL": "pillow", "pandas": "pandas",
+                  "pyarrow": "pyarrow", "openai": "openai", "gguf": "gguf", "transformers": "transformers",
+                  "safetensors": "safetensors", "accelerate": "accelerate", "peft": "peft", "mcp": "mcp",
+                  "requests": "requests", "tqdm": "tqdm", "jinja2": "jinja2", "aiohttp": "aiohttp", "numpy": "numpy"}
+
+
+def _secs(t: str) -> float | None:
+    """tqdm's 01:23 or 1:02:03 -> seconds."""
+    try:
+        parts = [float(x) for x in t.strip().split(":")]
+    except ValueError:
+        return None
+    s = 0.0
+    for x in parts:
+        s = s * 60 + x
+    return s
+
+
+def parse_progress(text: str) -> dict | None:
+    """The newest progress a log shows: PROGRESS lines, tqdm bars, [n/m] or "n/m" counters.
+    -> {done, total, pct, label, eta_s, rate} or None."""
+    lines = [l for l in re.split(r"[\r\n]+", text[-65536:]) if l.strip()]
+    for line in reversed(lines[-400:]):
+        m = PROG_LINE.match(line.strip())
+        if m:
+            d, t = int(m.group(1)), int(m.group(2))
+            return {"done": d, "total": t, "pct": round(100 * d / t, 1) if t else None, "label": m.group(3).strip()}
+        m = TQDM.search(line)
+        if m:
+            d, t = int(m.group("done")), int(m.group("total"))
+            return {"done": d, "total": t, "pct": round(100 * d / t, 1) if t else None,
+                    "label": (m.group("label") or "").strip()[-80:], "eta_s": _secs(m.group("eta") or ""),
+                    "rate": (m.group("rate") or "").strip() or None}
+        m = BRACKET.search(line) or PLAIN.match(line)
+        if m and 0 < int(m.group(2)) < 10 ** 9 and int(m.group(1)) <= int(m.group(2)):
+            d, t = int(m.group(1)), int(m.group(2))
+            return {"done": d, "total": t, "pct": round(100 * d / t, 1), "label": ""}
+    return None
+
+
+def last_line(text: str) -> str:
+    for l in reversed(re.split(r"[\r\n]+", text[-8192:])):
+        l = l.strip()
+        if l and not PROG_LINE.match(l):
+            return l[-240:]
+    return ""
+
+
+def explain_failure(text: str) -> dict | None:
+    """A plain-language reason and, where one exists, a fix for the commonest ways a job fails."""
+    t = text[-20000:]
+    m = re.search(r"ModuleNotFoundError: No module named '([\w.]+)'", t)
+    if m:
+        mod = m.group(1).split(".")[0]
+        pkg = MODULE_PACKAGE.get(mod)
+        return {"reason": f"The Python package for '{mod}' is not installed in Studio's Python.",
+                "fix": f"Install {pkg}" if pkg else f"pip install {mod}", "install": pkg}
+    rules = [
+        (r"CUDA out of memory|out of memory|OutOfMemoryError|failed to allocate", "The GPU (or RAM) ran out of memory.",
+         "Use a smaller model or quantization, lower the context or batch size, or offload fewer layers."),
+        (r"Address already in use|port \d+ .*in use", "A port the job needs is already taken.",
+         "Stop what uses it (System page), or choose another port."),
+        (r"Connection refused|Failed to establish a new connection|ConnectionRefusedError",
+         "The job could not reach a server it needs (an endpoint, Studio, or a host).",
+         "Check the endpoint address and that the server is running."),
+        (r"FileNotFoundError|No such file or directory", "A file or folder the job was given does not exist.",
+         "Check the paths in the form (Browse… picks existing ones)."),
+        (r"401|403|Unauthorized|gated repo|Access to model .* is restricted", "Access was refused (token or gated model).",
+         "Set HF_TOKEN for gated Hugging Face repos, or check the endpoint's token."),
+        (r"CONNECT tunnel failed|Temporary failure in name resolution|Name or service not known|timed out",
+         "The network request failed or timed out.", "Check the internet connection, proxy or firewall."),
+    ]
+    for rx, reason, fix in rules:
+        if re.search(rx, t, re.I):
+            return {"reason": reason, "fix": fix}
+    return None
+
+
 class JobRunner:
     on_finish = None          # callable(job meta), run when a job ends (Studio: automatic score submission)
 
@@ -653,7 +739,28 @@ class JobRunner:
                 m["status"] = "lost"        # Studio restarted while it ran
             out.append(m)
         out.sort(key=lambda m: -m.get("started", 0))
+        for m in out[:limit]:
+            if m.get("status") in ("running", "failed", "lost"):
+                self._annotate(m)
         return out[:limit]
+
+    def _annotate(self, m: dict) -> None:
+        """progress, the current step and elapsed time for a running job; a reason and fix for a failed one."""
+        try:
+            text = self.log(m["id"], 65536)
+        except (OSError, ValueError):
+            return
+        now = m.get("ended") or time.time()
+        m["elapsed_s"] = round(now - m.get("started", now))
+        if m.get("status") == "running":
+            pr = parse_progress(text)
+            if pr and pr.get("eta_s") is None and pr.get("done") and pr.get("total") and m["elapsed_s"] > 3:
+                pr["eta_s"] = round(m["elapsed_s"] * (pr["total"] - pr["done"]) / pr["done"])
+            m["progress"] = pr
+            m["step"] = last_line(text)
+        else:
+            m["hint"] = explain_failure(text)
+            m["step"] = last_line(text)
 
     def log(self, jid: str, tail: int = 20000) -> str:
         meta = self._meta_path(jid)
@@ -707,7 +814,14 @@ input[type=checkbox]{width:auto;margin-right:.3rem}
 button{font:500 13px ui-sans-serif,system-ui;padding:.4rem .8rem;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;cursor:pointer}
 button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 .note{font-size:12px;color:var(--mut)}.err{color:var(--no);font-size:12px;white-space:pre-wrap}
-.job{border-bottom:1px solid var(--line);padding:.45rem 0;cursor:pointer;display:flex;gap:.6rem;align-items:baseline}
+.job{border-bottom:1px solid var(--line);padding:.45rem .3rem;cursor:pointer;display:grid;grid-template-columns:auto 1fr auto;gap:.15rem .6rem;align-items:baseline}
+.job.sel{background:var(--code)}.job .jt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job .jp{grid-column:1/-1}.job .jstep{grid-column:1/-1;font:11.5px ui-monospace,monospace;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pbar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;position:relative}.pbar>i{display:block;height:100%;background:var(--acc);border-radius:3px;transition:width .4s}
+.pbar.ind>i{width:30%!important;animation:ind 1.4s ease-in-out infinite}@keyframes ind{0%{margin-left:-30%}100%{margin-left:100%}}
+.pstat{display:flex;gap:.9rem;flex-wrap:wrap;font-size:12px;color:var(--mut);margin-top:.25rem}.pstat b{color:var(--fg);font-weight:600}
+.hint{border:1px solid var(--no);border-radius:8px;padding:.55rem .7rem;margin:.5rem 0;background:color-mix(in srgb,var(--no) 8%,transparent)}
+.hint b{color:var(--no)}
 .job:hover{background:var(--code)}.st{font-size:11px;padding:0 .4rem;border-radius:4px;border:1px solid var(--line)}
 .st.running{color:var(--acc)}.st.done{color:var(--ok)}.st.failed,.st.lost{color:var(--no)}
 pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;margin:.5rem 0 0}
@@ -724,7 +838,9 @@ pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overf
   <div id="detail" style="display:none;margin-top:.8rem">
    <div style="display:flex;gap:.5rem;align-items:center"><b id="dtitle"></b><span id="dst" class="st"></span>
     <button id="cancel" style="margin-left:auto">Cancel</button></div>
-   <div class="note" id="dargv" style="word-break:break-all;margin-top:.3rem"></div>
+   <div id="dprog" style="margin-top:.5rem"></div>
+   <div id="dhint"></div>
+   <details style="margin-top:.3rem"><summary class="note" style="cursor:pointer">Command</summary><div class="note" id="dargv" style="word-break:break-all;margin-top:.3rem"></div></details>
    <pre id="dlog"></pre></div>
  </section>
 </main>
@@ -773,12 +889,34 @@ $('#run').onclick=async()=>{const k=$('#kind').value, v={}; $('#ferr').textConte
  try{const j=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k,values:v})});cur=j.id;refresh()}
  catch(e){$('#ferr').textContent=e.message}};
 $('#cancel').onclick=async()=>{if(cur){await api('/api/jobs/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cur})});refresh()}};
+// Progress, time and the current step for running jobs; a reason and a fix for failed ones.
+const fmtS=x=>x==null?'':x<60?Math.round(x)+' s':x<3600?Math.floor(x/60)+' min '+Math.round(x%60)+' s':Math.floor(x/3600)+' h '+Math.round(x%3600/60)+' min';
+function bar(p){ return p&&p.total?`<div class="pbar" role="progressbar" aria-valuemin="0" aria-valuemax="${p.total}" aria-valuenow="${p.done}"><i style="width:${Math.min(100,p.pct||0)}%"></i></div>`
+  :'<div class="pbar ind" role="progressbar" aria-label="working"><i></i></div>'; }
+function stats(j){ const p=j.progress, out=[];
+  if(p&&p.total) out.push(`<span><b>${p.done.toLocaleString()} / ${p.total.toLocaleString()}</b> (${p.pct}%)</span>`);
+  if(j.elapsed_s!=null) out.push(`<span>running ${fmtS(j.elapsed_s)}</span>`);
+  if(p&&p.eta_s!=null) out.push(`<span>about ${fmtS(p.eta_s)} left</span>`);
+  if(p&&p.rate) out.push(`<span>${esc(p.rate)}</span>`);
+  if(p&&p.label) out.push(`<span title="${esc(p.label)}">${esc(p.label.slice(0,60))}</span>`);
+  return `<div class="pstat">${out.join('')}</div>`; }
+function hintBox(j){ const h=j.hint; if(!h) return j.status==='lost'?'<div class="hint"><b>Lost.</b> Studio restarted while this job ran, so its result is unknown. Run it again.</div>':'';
+  return `<div class="hint"><b>Why it failed:</b> ${esc(h.reason)}<div style="margin-top:.3rem">${h.install?`<button data-install="${esc(h.install)}">Install ${esc(h.install)}</button> then run the job again.`:esc(h.fix||'')}</div></div>`; }
 async function refresh(){const js=await api('/api/jobs');
- $('#jobs').innerHTML=js.length?js.map(j=>`<div class="job" data-id="${j.id}"><span class="st ${j.status}">${j.status}</span><span>${esc(j.title)}</span><span class="note" style="margin-left:auto">${new Date(j.started*1000).toLocaleString()}</span></div>`).join(''):'none yet';
+ $('#jobs').innerHTML=js.length?js.map(j=>`<div class="job${j.id===cur?' sel':''}" data-id="${j.id}"><span class="st ${j.status}">${j.status}</span><span class="jt" title="${esc(j.title)}">${esc(j.title)}</span><span class="note">${new Date(j.started*1000).toLocaleTimeString()}</span>
+   ${j.status==='running'?`<div class="jp">${bar(j.progress)}</div>${j.step?`<div class="jstep" title="${esc(j.step)}">${esc(j.step)}</div>`:''}`:''}
+   ${j.status==='failed'&&j.hint?`<div class="jstep" style="color:var(--no)" title="${esc(j.hint.reason)}">${esc(j.hint.reason)}</div>`:''}</div>`).join(''):'none yet';
  document.querySelectorAll('.job').forEach(e=>e.onclick=()=>{cur=e.dataset.id;refresh()});
  if(cur){const j=js.find(x=>x.id===cur); if(j){$('#detail').style.display='';$('#dtitle').textContent=j.title;$('#dst').textContent=j.status;$('#dst').className='st '+j.status;
-  $('#dargv').textContent=j.argv.join(' ');$('#cancel').disabled=j.status!=='running';
-  const l=await api('/api/jobs/'+cur+'/log');const pre=$('#dlog'),atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;pre.textContent=l.log||'(no output yet)';if(atEnd)pre.scrollTop=pre.scrollHeight}}}
+  $('#dargv').textContent=j.argv.join(' ');$('#cancel').disabled=j.status!=='running';$('#cancel').hidden=j.status!=='running';
+  $('#dprog').innerHTML=j.status==='running'?bar(j.progress)+stats(j)+(j.step?`<div class="note" style="font-family:ui-monospace,monospace;margin-top:.2rem;word-break:break-all">now: ${esc(j.step)}</div>`:'')
+    :(j.elapsed_s!=null?`<div class="pstat"><span>${j.status} after ${fmtS(j.elapsed_s)}</span></div>`:'');
+  $('#dhint').innerHTML=j.status==='running'||j.status==='done'?'':hintBox(j);
+  document.querySelectorAll('[data-install]').forEach(b=>b.onclick=async()=>{ b.disabled=true; b.textContent='installing…';
+    try{ const r=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'install_package',values:{package:b.dataset.install}})}); cur=r.id; refresh(); }
+    catch(e){ b.textContent=e.message; } });
+  const l=await api('/api/jobs/'+cur+'/log');const pre=$('#dlog'),atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;
+  pre.textContent=(l.log||'(no output yet)').split(/\r?\n/).filter(x=>!/^PROGRESS \d+\/\d+/.test(x)).map(x=>x.split('\r').pop()).join('\n');if(atEnd)pre.scrollTop=pre.scrollHeight}}}
 setInterval(()=>refresh().catch(()=>{}),2000);
 load().catch(e=>{$('#ferr').textContent=e.message});
 </script>"""

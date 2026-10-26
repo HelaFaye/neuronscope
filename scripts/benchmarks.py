@@ -208,9 +208,11 @@ def swebench_predict(a) -> int:
                                request_timeout=a.request_timeout)
     name = a.model_name or model or label
     n_patch = 0
-    for r in rows:
-        if r["instance_id"] in done:
-            continue
+    todo = [r for r in rows if r["instance_id"] not in done]
+    print(f"{len(rows)} instances, {len(rows) - len(todo)} already answered in {out}; asking {name} for {len(todo)}",
+          flush=True)
+    for i, r in enumerate(todo):
+        print(f"PROGRESS {i}/{len(todo)} {r['instance_id']}", flush=True)
         # *_bm25_* and *_oracle variants carry a ready prompt with retrieved code in "text";
         # the plain datasets only have the issue, which rarely suffices.
         prompt = r.get("text") or (SWE_INSTRUCTIONS + "Repository: " + r["repo"] + "\n\nIssue:\n" + r["problem_statement"])
@@ -224,7 +226,8 @@ def swebench_predict(a) -> int:
         with out.open("a") as f:
             f.write(json.dumps({"instance_id": r["instance_id"], "model_name_or_path": name,
                                 "model_patch": patch}) + "\n")
-        print(f"{r['instance_id']}: {'patch' if patch else 'no patch'}")
+        print(f"{r['instance_id']}: {'patch' if patch else 'no patch'} ({len(reply)} characters of reply)", flush=True)
+    print(f"PROGRESS {len(todo)}/{len(todo)} done", flush=True)
     print(f"wrote {out}; {n_patch} patches this run")
     return 0
 

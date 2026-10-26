@@ -48,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -496,8 +497,17 @@ def run_endpoint(label: str, url: str, model: str | None, tasks: list[dict], a, 
         return {"id": t["id"], "kind": t["kind"], "subject": t["subject"], "verdict": verdict, "note": note,
                 "seconds": round(time.time() - t0, 2), "text": strip_think(text).strip()[:600]}
 
+    lock, n = threading.Lock(), [0]
+
+    def counted(t):
+        r = one(t)
+        with lock:
+            n[0] += 1
+            # Studio's Jobs page reads this as a progress bar
+            print(f"PROGRESS {n[0]}/{len(tasks)} {label}: {t['id']} {r['verdict']}", flush=True)
+        return r
     with ThreadPoolExecutor(max_workers=max(1, a.concurrency)) as pool:
-        return list(pool.map(one, tasks))
+        return list(pool.map(counted, tasks))
 
 
 # ---------------------------------------------------------------- report
