@@ -131,6 +131,27 @@ The host's tools are:
 - `model_file`: where a model's GGUF is on the host, its size and SHA-256
 - `trace_reply`: run a reply through NeuronScope's tracer on the host
 
+## Running Studio's jobs on a host
+
+Any job on the Jobs page (TestQA, benchmarks, SWE-bench, retraining, the
+H-Neuron pipeline…) can run on a host instead: pick the host under **Run on**.
+That needs two things on the host:
+
+1. **A NeuronScope folder** with its requirements installed. Starting the
+   agent from inside one is enough (`remote/` is part of it). Otherwise set
+   the folder in the agent's console under *What controllers may do*.
+2. **Its owner's permission:** tick *run NeuronScope jobs* in the console.
+   It is off by default, because jobs run Python code on that computer.
+
+The host builds the command with its own copy of NeuronScope, so only the
+job kinds and fields it knows can run, never an arbitrary command. Paths in
+the form are paths on the host. Remote jobs appear in the same list with
+their progress, log and failure reason, and Cancel stops them on the host.
+
+The agent can also be restarted from Studio's **System** page (*Remote
+agent: name → Restart*). The host's owner can turn that off with *restart
+this agent*.
+
 ## Thermal guard
 
 The host's console has *GPUs and thermal guard*:

@@ -570,3 +570,49 @@ def test_check_a_hosts_reply_here_or_on_the_host(studio_srv, tmp_path, backend):
         studio.STATE.update(cett=None)
         for t in ag.callhome.values():
             t.stop.set()
+
+
+def test_jobs_run_on_a_host_when_its_owner_allows(studio_srv, tmp_path, backend):
+    ag, rt, url = make_agent(tmp_path, backend, mode="lan", bind="127.0.0.1")
+    try:
+        code = ag.pairing.open()["code"]
+        st, out = call(studio_srv, "/api/remote/pair", {"method": "lan", "address": url, "code": code})
+        assert st == 200, out
+        _, targets = call(studio_srv, "/api/jobs/targets")
+        host = next(t for t in targets if t["id"] == "host:gpu-box")
+        assert targets[0]["id"] == "local" and not host["ok"] and "not allowed" in host["why"]
+        st, r = call(studio_srv, "/api/jobs", {"kind": "split", "values": {}, "target": "host:gpu-box"})
+        assert st == 502 and "does not run jobs" in r["error"]
+        # the host's owner allows jobs; the agent finds the NeuronScope folder it runs from
+        ag.cfg["allow"]["jobs"] = True
+        ag.cfg["jobs_cwd"] = str(tmp_path)
+        import studio
+        studio._RCACHE.clear()
+        _, targets = call(studio_srv, "/api/jobs/targets")
+        host = next(t for t in targets if t["id"] == "host:gpu-box")
+        assert host["ok"] and "split" in host["kinds"]
+        st, j = call(studio_srv, "/api/jobs", {"kind": "split", "target": "host:gpu-box",
+                                               "values": {"input_path": str(tmp_path / "missing.jsonl"),
+                                                          "output_path": str(tmp_path / "ids.json")}})
+        assert st == 200 and j["host"] == "gpu-box" and j["status"] == "running"
+        for _ in range(100):
+            studio._RCACHE.pop("jobs:gpu-box", None)
+            _, js = call(studio_srv, "/api/jobs")
+            mine = [x for x in js if x.get("host") == "gpu-box" and x["id"] == j["id"]]
+            if mine and mine[0]["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert mine[0]["status"] == "failed" and mine[0]["hint"]          # a reason, from the host's own runner
+        st, log = call(studio_srv, f"/api/jobs/host/gpu-box/{j['id']}/log")
+        assert st == 200 and "missing.jsonl" in log["log"]
+        # bad job kinds are refused by the host's own checks
+        st, r = call(studio_srv, "/api/jobs", {"kind": "rm -rf", "values": {}, "target": "host:gpu-box"})
+        assert st == 502 and "unknown job kind" in r["error"]
+        # the System page lists the host's agent; restarting is up to the host's owner
+        _, sv = call(studio_srv, "/api/services")
+        assert any(s["id"] == "host:gpu-box" and "restart" in s["actions"] for s in sv["services"])
+        ag.cfg["allow"]["restart"] = False
+        st, r = call(studio_srv, "/api/services", {"id": "host:gpu-box", "action": "restart"})
+        assert st == 400 and "does not allow" in r["error"]
+    finally:
+        rt.close_api()

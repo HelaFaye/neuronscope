@@ -831,7 +831,10 @@ pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overf
  <section class="card"><h2>New job</h2>
   <select id="kind"></select><div id="khelp" class="note" style="margin-top:.3rem"></div>
   <form id="form"></form>
-  <button class="pri" id="run" style="margin-top:.7rem;width:100%">Run</button>
+  <label for="target" style="margin-top:.7rem">Run on</label>
+  <select id="target" title="This computer, or a linked host whose owner allows jobs (Remote page)"><option value="local">This computer</option></select>
+  <div class="note" id="tnote"></div>
+  <button class="pri" id="run" style="margin-top:.5rem;width:100%">Run</button>
   <div id="ferr" class="err"></div>
  </section>
  <section class="card"><h2>Jobs</h2><div id="jobs" class="note">none yet</div>
@@ -884,11 +887,22 @@ function openFromHash(){ const h=decodeURIComponent(location.hash.slice(1)); if(
   else renderForm(); }
 addEventListener('hashchange',()=>{ if(specs) openFromHash(); });
 $('#kind').onchange=()=>{renderForm();history.replaceState(null,'','#'+$('#kind').value)};
+// Where jobs can run: this computer, or linked hosts whose owner allows jobs.
+let TARGETS=[], curHost='';
+async function loadTargets(){ try{ TARGETS=await api('/api/jobs/targets'); }catch(e){ return; }
+  const was=$('#target').value; $('#target').innerHTML=TARGETS.map(t=>`<option value="${esc(t.id)}" ${t.ok?'':'disabled'} title="${esc(t.why||'')}">${esc(t.label)}${t.ok?'':' (not available)'}</option>`).join('');
+  if(TARGETS.some(t=>t.id===was&&t.ok)) $('#target').value=was; targetNote(); }
+function targetNote(){ const t=TARGETS.find(x=>x.id===$('#target').value)||{}; const off=TARGETS.filter(x=>!x.ok&&x.id!=='local');
+  $('#tnote').innerHTML=(t.id&&t.id!=='local'?`Runs on <b>${esc(t.id.slice(5))}</b> with its own NeuronScope; paths are paths on that computer.`:'')
+    +(off.length?`<div>${off.map(x=>`${esc(x.label)}: ${esc(x.why||'not available')}`).join('<br>')}</div>`:''); }
+$('#target').onchange=targetNote;
 $('#run').onclick=async()=>{const k=$('#kind').value, v={}; $('#ferr').textContent='';
  for(const f of specs[k].fields){const el=$('#f_'+f.name); v[f.name]=f.kind==='bool'?el.checked:el.value.trim()}
- try{const j=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k,values:v})});cur=j.id;refresh()}
+ const target=$('#target').value;
+ try{const j=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k,values:v,target})});cur=j.id;curHost=j.host||'';refresh()}
  catch(e){$('#ferr').textContent=e.message}};
-$('#cancel').onclick=async()=>{if(cur){await api('/api/jobs/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cur})});refresh()}};
+$('#cancel').onclick=async()=>{if(cur){await api('/api/jobs/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cur,host:curHost||undefined})});refresh()}};
+loadTargets(); setInterval(loadTargets,30000);
 // Progress, time and the current step for running jobs; a reason and a fix for failed ones.
 const fmtS=x=>x==null?'':x<60?Math.round(x)+' s':x<3600?Math.floor(x/60)+' min '+Math.round(x%60)+' s':Math.floor(x/3600)+' h '+Math.round(x%3600/60)+' min';
 function bar(p){ return p&&p.total?`<div class="pbar" role="progressbar" aria-valuemin="0" aria-valuemax="${p.total}" aria-valuenow="${p.done}"><i style="width:${Math.min(100,p.pct||0)}%"></i></div>`
@@ -903,11 +917,11 @@ function stats(j){ const p=j.progress, out=[];
 function hintBox(j){ const h=j.hint; if(!h) return j.status==='lost'?'<div class="hint"><b>Lost.</b> Studio restarted while this job ran, so its result is unknown. Run it again.</div>':'';
   return `<div class="hint"><b>Why it failed:</b> ${esc(h.reason)}<div style="margin-top:.3rem">${h.install?`<button data-install="${esc(h.install)}">Install ${esc(h.install)}</button> then run the job again.`:esc(h.fix||'')}</div></div>`; }
 async function refresh(){const js=await api('/api/jobs');
- $('#jobs').innerHTML=js.length?js.map(j=>`<div class="job${j.id===cur?' sel':''}" data-id="${j.id}"><span class="st ${j.status}">${j.status}</span><span class="jt" title="${esc(j.title)}">${esc(j.title)}</span><span class="note">${new Date(j.started*1000).toLocaleTimeString()}</span>
+ $('#jobs').innerHTML=js.length?js.map(j=>`<div class="job${j.id===cur?' sel':''}" data-id="${j.id}" data-host="${esc(j.host||'')}"><span class="st ${j.status}">${j.status}</span><span class="jt" title="${esc(j.title)}">${esc(j.title)}${j.host?` <span class="note">on ${esc(j.host)}</span>`:''}</span><span class="note">${new Date(j.started*1000).toLocaleTimeString()}</span>
    ${j.status==='running'?`<div class="jp">${bar(j.progress)}</div>${j.step?`<div class="jstep" title="${esc(j.step)}">${esc(j.step)}</div>`:''}`:''}
    ${j.status==='failed'&&j.hint?`<div class="jstep" style="color:var(--no)" title="${esc(j.hint.reason)}">${esc(j.hint.reason)}</div>`:''}</div>`).join(''):'none yet';
- document.querySelectorAll('.job').forEach(e=>e.onclick=()=>{cur=e.dataset.id;refresh()});
- if(cur){const j=js.find(x=>x.id===cur); if(j){$('#detail').style.display='';$('#dtitle').textContent=j.title;$('#dst').textContent=j.status;$('#dst').className='st '+j.status;
+ document.querySelectorAll('.job').forEach(e=>e.onclick=()=>{cur=e.dataset.id;curHost=e.dataset.host;refresh()});
+ if(cur){const j=js.find(x=>x.id===cur&&(x.host||'')===(curHost||'')); if(j){$('#detail').style.display='';$('#dtitle').textContent=j.title;$('#dst').textContent=j.status;$('#dst').className='st '+j.status;
   $('#dargv').textContent=j.argv.join(' ');$('#cancel').disabled=j.status!=='running';$('#cancel').hidden=j.status!=='running';
   $('#dprog').innerHTML=j.status==='running'?bar(j.progress)+stats(j)+(j.step?`<div class="note" style="font-family:ui-monospace,monospace;margin-top:.2rem;word-break:break-all">now: ${esc(j.step)}</div>`:'')
     :(j.elapsed_s!=null?`<div class="pstat"><span>${j.status} after ${fmtS(j.elapsed_s)}</span></div>`:'');
@@ -915,7 +929,7 @@ async function refresh(){const js=await api('/api/jobs');
   document.querySelectorAll('[data-install]').forEach(b=>b.onclick=async()=>{ b.disabled=true; b.textContent='installing…';
     try{ const r=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'install_package',values:{package:b.dataset.install}})}); cur=r.id; refresh(); }
     catch(e){ b.textContent=e.message; } });
-  const l=await api('/api/jobs/'+cur+'/log');const pre=$('#dlog'),atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;
+  const l=await api(curHost?`/api/jobs/host/${encodeURIComponent(curHost)}/${cur}/log`:'/api/jobs/'+cur+'/log');const pre=$('#dlog'),atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-20;
   pre.textContent=(l.log||'(no output yet)').split(/\r?\n/).filter(x=>!/^PROGRESS \d+\/\d+/.test(x)).map(x=>x.split('\r').pop()).join('\n');if(atEnd)pre.scrollTop=pre.scrollHeight}}}
 setInterval(()=>refresh().catch(()=>{}),2000);
 load().catch(e=>{$('#ferr').textContent=e.message});

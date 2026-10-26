@@ -870,6 +870,60 @@ def remote():
     return REMOTE["obj"]
 
 
+# ---- jobs on remote hosts (the agent's run_job / jobs / job_log / cancel_job tools)
+
+_RCACHE: dict = {}
+_RLOCK = threading.Lock()
+
+
+def _cached(key: str, ttl: float, fn, fail_ttl: float = 30):
+    """fn() at most every ttl seconds; a failure is remembered for fail_ttl, so an offline host does not stall
+    every page refresh. -> (value, error)"""
+    now = time.time()
+    with _RLOCK:
+        hit = _RCACHE.get(key)
+    if hit and now - hit[0] < (ttl if hit[2] is None else fail_ttl):
+        return hit[1], hit[2]
+    try:
+        val, err = fn(), None
+    except Exception as e:
+        val, err = None, str(e)[:300]
+    with _RLOCK:
+        _RCACHE[key] = (now, val, err)
+    return val, err
+
+
+def job_targets() -> list[dict]:
+    """Where a job can run: this computer, and every linked host whose owner allows jobs."""
+    out = [{"id": "local", "label": f"This computer ({socket.gethostname()})", "ok": STATE.get("jobs") is not None}]
+    try:
+        hosts = remote().hosts()
+    except Exception:
+        hosts = []
+    for rec in hosts:
+        name = rec["name"]
+        info, err = _cached("jobs_info:" + name, 30, lambda: remote().call(name, "jobs_info", {}, timeout=8))
+        ok = bool(info and info.get("allowed") and info.get("neuronscope_dir"))
+        why = err and ("unreachable: " + err) or (None if ok else "its owner has not allowed jobs (agent console → "
+                                                  "What controllers may do)" if info and not info.get("allowed")
+                                                  else "no NeuronScope folder on that host")
+        out.append({"id": "host:" + name, "label": f"{name} (remote host)", "ok": ok, "why": why,
+                    "kinds": (info or {}).get("kinds")})
+    return out
+
+
+def remote_jobs() -> list[dict]:
+    out = []
+    for t in job_targets()[1:]:
+        if not t["ok"]:
+            continue
+        name = t["id"][5:]
+        res, err = _cached("jobs:" + name, 3, lambda: remote().call(name, "jobs", {}, timeout=6), fail_ttl=15)
+        for j in (res or {}).get("jobs", []):
+            out.append({**j, "host": name})
+    return out
+
+
 def link_models(refresh: bool = False) -> list[dict]:
     """Models of every linked Studio and remote host, as '<link>:<remote id>' (cached 30 s)."""
     out = []
@@ -2630,6 +2684,17 @@ def services() -> list[dict]:
     labs = list(_HUB["m"].RUNNING) if "m" in _HUB else []
     out.append({"id": "labs", "name": "Labs", "state": f"{len(labs)} running" if labs else "none",
                 "detail": ", ".join(labs), "actions": ["stop"] if labs else []})
+    try:
+        hosts = remote().hosts()
+    except Exception:
+        hosts = []
+    for rec in hosts:
+        info, err = _cached("jobs_info:" + rec["name"], 30, lambda: remote().call(rec["name"], "jobs_info", {}, timeout=8))
+        out.append({"id": "host:" + rec["name"], "name": f"Remote agent: {rec['name']}",
+                    "state": "unreachable" if err else "connected", "warn": bool(err),
+                    "detail": err or ("runs jobs from " + info["neuronscope_dir"] if info and info.get("allowed")
+                                      and info.get("neuronscope_dir") else "jobs not allowed by its owner"),
+                    "actions": ["restart"]})
     runner = STATE.get("jobs")
     running = [j for j in runner.list(20) if j.get("status") == "running"] if runner else []
     out.append({"id": "jobs", "name": "Jobs", "state": f"{len(running)} running" if running else "idle",
@@ -2670,6 +2735,11 @@ def service_action(sid: str, action: str) -> str:
             raise ValueError("no MCP connectors configured")
         hub.connect(timeout=30)
         return "connectors reconnected"
+    if sid.startswith("host:") and action == "restart":
+        res = remote().call(sid[5:], "restart_agent", {}, timeout=15)
+        with _RLOCK:
+            _RCACHE.pop("jobs_info:" + sid[5:], None)
+        return res.get("note") or "the agent restarts"
     if sid == "labs" and action == "stop":
         stop_labs()
         return "labs stopped"
@@ -3460,10 +3530,20 @@ class Handler(BaseHTTPRequestHandler):
                                     "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
                                     "workspace": STATE.get("workspace_name"), "root": ws.get("root"),
                                     "ggufs": [m["path"] for m in scan_models()][:200]})
-        if runner is None:
+        if runner is None and self.path not in ("/api/jobs/targets",):
             return self._jobs_off()
         if self.path == "/api/jobs":
-            return self._json(200, runner.list())
+            mine = runner.list() if self._role == "owner" else []
+            return self._json(200, sorted(mine + remote_jobs(), key=lambda m: -m.get("started", 0)))
+        if self.path == "/api/jobs/targets":
+            return self._json(200, job_targets())
+        m = re.fullmatch(r"/api/jobs/host/([^/]+)/([0-9a-f]{12})/log", self.path)
+        if m:
+            try:
+                return self._json(200, remote().call(urllib.parse.unquote(m.group(1)), "job_log",
+                                                     {"id": m.group(2)}, timeout=15))
+            except Exception as e:
+                return self._json(502, {"error": f"host: {e}"})
         m = re.fullmatch(r"/api/jobs/([0-9a-f]{12})/log", self.path)
         if m:
             try:
@@ -3479,6 +3559,19 @@ class Handler(BaseHTTPRequestHandler):
         if "application/json" not in self.headers.get("Content-Type", ""):
             return self._json(415, {"error": "JSON only"})     # no cross-site form posts
         req = self._read()
+        host = str(req.get("host") or "") or (str(req.get("target") or "")[5:] if str(req.get("target") or "").startswith("host:") else "")
+        if host:
+            try:
+                if self.path == "/api/jobs/cancel":
+                    out = remote().call(host, "cancel_job", {"id": str(req.get("id", ""))}, timeout=15)
+                else:
+                    out = remote().call(host, "run_job", {"kind": str(req.get("kind", "")),
+                                                         "values": dict(req.get("values") or {})}, timeout=30)
+                with _RLOCK:
+                    _RCACHE.pop("jobs:" + host, None)
+                return self._json(200, {**out, "host": host})
+            except Exception as e:
+                return self._json(502, {"error": f"{host}: {e}"})
         try:
             if self.path == "/api/jobs/cancel":
                 return self._json(200, runner.cancel(str(req.get("id", ""))))
@@ -4430,8 +4523,8 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 req = self._read()
                 try:
                     note = service_action(str(req.get("id", "")), str(req.get("action", "")))
-                except (ValueError, RuntimeError) as e:
-                    return self._json(400, {"error": str(e)})
+                except Exception as e:          # includes a host's refusal (remote agents)
+                    return self._json(400, {"error": str(e)[:400]})
                 return self._json(200, {"ok": True, "note": note, "services": services()})
             if self.path in ("/api/setup", "/api/hardware", "/api/restart"):
                 if not self._owner_only():

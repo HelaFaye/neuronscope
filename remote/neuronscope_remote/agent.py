@@ -87,13 +87,17 @@ PAIR_TTL = 600
 MAX_ATTEMPTS = 5
 MAX_JSON = 32 * 1024 * 1024    # chat requests can carry images
 MAX_CHUNK = 64 * 1024 * 1024
-ALLOW_DEFAULT = {"chat": True, "load": True, "receive": True, "install": True, "delete": False, "trace": True}
+ALLOW_DEFAULT = {"chat": True, "load": True, "receive": True, "install": True, "delete": False, "trace": True,
+                 "jobs": False, "restart": True}
 ALLOW_TEXT = {"chat": "chat with the models",
               "trace": "check replies with NeuronScope's tracer (runs a model file once more, for a 3D view)",
               "load": "load and unload models",
               "receive": "send files to this computer (into the incoming folder)",
               "install": "install received models into LM Studio or Ollama",
-              "delete": "delete files in the incoming and models folders"}
+              "delete": "delete files in the incoming and models folders",
+              "jobs": "run NeuronScope jobs (evaluations, benchmarks, training) with the NeuronScope folder on this "
+                      "computer; they run Python code, so only for controllers you trust",
+              "restart": "restart this agent (it starts again by itself)"}
 KNOWN_BACKENDS = (("lmstudio", "http://127.0.0.1:1234"), ("ollama", "http://127.0.0.1:11434"),
                   ("llama-server", "http://127.0.0.1:8080"), ("vllm", "http://127.0.0.1:8000"))
 ROLE_LINE = "This computer is the HOST: it runs the models. Controllers send it instructions over MCP."
@@ -913,7 +917,85 @@ class Agent:
                 "backends": [b.describe() for b in self.backends(refresh=True)],
                 "incoming_dir": str(inc), "incoming_free_gb": round(free / 2**30, 1),
                 "models_dir": str(mdir) if mdir else None, "allowed": self.cfg["allow"], "link": self.link["mode"],
+                "jobs": bool(self.cfg["allow"].get("jobs") and self.neuronscope_dir()),
                 "tracer": self.tracer()}
+
+    # -- NeuronScope jobs on this host (off unless the host owner allows "jobs")
+    def neuronscope_dir(self) -> Path | None:
+        """The NeuronScope folder jobs run from: configured, or the one this agent was started from."""
+        cand = [self.cfg.get("neuronscope_dir")] if self.cfg.get("neuronscope_dir") else []
+        cand.append(str(Path(__file__).resolve().parents[2]))
+        for c in cand:
+            p = Path(c).expanduser()
+            if (p / "viz" / "jobs.py").is_file() and (p / "scripts").is_dir():
+                return p
+        return None
+
+    def _jobs(self):
+        if not self.cfg["allow"].get("jobs"):
+            raise ToolError("this host does not run jobs: its owner can allow them in the agent's console "
+                            "(Allow: run NeuronScope jobs)")
+        root = self.neuronscope_dir()
+        if root is None:
+            raise ToolError("no NeuronScope folder on this host: set one in the agent's console, or start the agent "
+                            "from inside a NeuronScope folder")
+        with self.lock:
+            cached = getattr(self, "_jobs_cache", None)
+            if cached and cached[0] == root:
+                return cached[1], cached[2]
+            import importlib.util
+            for sub in ("scripts", "viz"):
+                if str(root / sub) not in sys.path:
+                    sys.path.insert(0, str(root / sub))
+            spec = importlib.util.spec_from_file_location("ns_host_jobs", root / "viz" / "jobs.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            runner = mod.JobRunner(self.store.home / "jobs", int(self.cfg.get("max_jobs") or 1),
+                                   cwd=self.cfg.get("jobs_cwd") or root)
+            self._jobs_cache = (root, mod, runner)
+            return mod, runner
+
+    def t_jobs_info(self, a):
+        root = self.neuronscope_dir()
+        info = {"allowed": bool(self.cfg["allow"].get("jobs")), "neuronscope_dir": str(root) if root else None,
+                "python": sys.executable}
+        if info["allowed"] and root:
+            mod, _ = self._jobs()
+            info["kinds"] = sorted(mod.all_specs())
+        return info
+
+    def t_run_job(self, a):
+        mod, runner = self._jobs()
+        try:
+            return runner.start(str(a["kind"]), dict(a.get("values") or {}))
+        except RuntimeError as e:
+            raise ToolError(str(e))
+
+    def t_jobs(self, a):
+        _, runner = self._jobs()
+        return {"jobs": runner.list(30)}
+
+    def t_job_log(self, a):
+        _, runner = self._jobs()
+        return {"log": runner.log(str(a["id"]), max(1000, min(int(a.get("tail") or 20000), 200000)))}
+
+    def t_cancel_job(self, a):
+        _, runner = self._jobs()
+        return runner.cancel(str(a["id"]))
+
+    def t_restart_agent(self, a):
+        if not self.cfg["allow"].get("restart", True):
+            raise ToolError("the host owner does not allow restarting this agent")
+
+        def later():
+            time.sleep(0.7)                     # let the reply reach the controller
+            argv = [sys.executable] + sys.argv
+            if os.name == "nt":                 # Windows: a fresh process, then this one exits
+                subprocess.Popen(argv, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+                os._exit(0)
+            os.execv(sys.executable, argv)
+        threading.Thread(target=later, daemon=True).start()
+        return {"ok": True, "note": "the agent restarts now and is back in a few seconds"}
 
     def t_list_backends(self, a):
         out = []
@@ -1228,6 +1310,20 @@ class Agent:
         ("delete_file", "Delete a file from the incoming or models folder. Off unless the host owner allows it.",
          {"file": {"type": "string"}, "where": {"type": "string", "enum": ["incoming", "models"]}},
          {"readOnlyHint": False, "destructiveHint": True}, ["file"]),
+        ("jobs_info", "Whether this host runs NeuronScope jobs, from which NeuronScope folder, and the job kinds it has.",
+         {}, {"readOnlyHint": True}),
+        ("run_job", "Start a NeuronScope job on this host: the same job kinds and fields as Studio's Jobs page, "
+         "checked by the host's own copy of NeuronScope. Paths in values are paths on this host.",
+         {"kind": {"type": "string"}, "values": {"type": "object"}},
+         {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True}, ["kind"]),
+        ("jobs", "Jobs on this host, newest first, with progress for running ones and a reason for failed ones.",
+         {}, {"readOnlyHint": True}),
+        ("job_log", "The end of one job's log.", {"id": {"type": "string"}, "tail": {"type": "integer"}},
+         {"readOnlyHint": True}, ["id"]),
+        ("cancel_job", "Stop a running job on this host.", {"id": {"type": "string"}},
+         {"readOnlyHint": False, "destructiveHint": True}, ["id"]),
+        ("restart_agent", "Restart this agent (the host comes back by itself in a few seconds).", {},
+         {"readOnlyHint": False, "destructiveHint": False}),
     ]
 
     def tool_list(self) -> list[dict]:
@@ -1308,6 +1404,7 @@ class Agent:
                 "pairing": {"code": fmt_code(p["code"]), "expires": p["expires"],
                             "link": self.pair_link(p["code"])} if p else None,
                 "controllers": self.controllers.list(), "allow": self.cfg["allow"], "allow_text": ALLOW_TEXT,
+                "neuronscope_dir": str(self.neuronscope_dir() or ""), "neuronscope_dir_set": self.cfg.get("neuronscope_dir", ""),
                 "backends": [b.describe() for b in self.backends()], "configured_backends": self.cfg["backends"],
                 "callhome": [{"url": c.url, "controller": c.entry.get("controller", ""), "status": c.status}
                              for c in self.callhome.values()],
@@ -1606,6 +1703,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 ag.cfg["thermal"] = t
                 ag.save_config()
                 ag.note("host owner", "thermal guard settings", True, json.dumps(t))
+            elif self.path == "/api/neuronscope-dir":
+                d = str(req.get("dir", "")).strip()
+                if d and not (Path(d).expanduser() / "viz" / "jobs.py").is_file():
+                    raise ValueError(f"{d} is not a NeuronScope folder (no viz/jobs.py in it)")
+                ag.cfg["neuronscope_dir"] = d
+                ag._jobs_cache = None
+                ag.save_config()
             elif self.path == "/api/name":
                 ag.cfg["name"] = re.sub(r"[^\w .-]+", "", str(req.get("name", "")))[:40] or ag.cfg["name"]
                 ag.save_config()
@@ -2228,7 +2332,9 @@ table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .4
  <div style="margin-top:.5rem"><button class="pri" id="apply">Use this link</button> <span id="linkNow" class="mut"></span></div></div>
 <div class="card" id="pairCard"><h2>2. Pair a controller</h2><div id="pair"></div></div>
 <div class="card"><h2>Controllers allowed to control this host</h2><div id="ctls"></div></div>
-<div class="card"><h2>What controllers may do</h2><div id="allow"></div></div>
+<div class="card"><h2>What controllers may do</h2><div id="allow"></div>
+<div style="margin-top:.6rem"><label>NeuronScope folder for jobs <input id="nsdir" placeholder="found automatically when the agent runs from one" style="width:100%"></label>
+<button id="nsdirsave" style="margin-top:.3rem">Save</button> <span id="nsdirmsg" class="note"></span></div></div>
 <div class="card"><h2>GPUs and thermal guard</h2><div id="gpus" class="mut"></div>
 <label style="display:block;margin-top:.4rem"><input type="checkbox" id="thOn"> Stop taking work when a GPU reaches <input id="thLim" type="number" min="50" max="110" style="width:4.5em"> °C (the hottest sensor: junction, edge or memory), and resume <input id="thMar" type="number" min="2" max="30" style="width:3.5em"> °C below</label>
 <label style="display:block"><input type="checkbox" id="thUnl"> Unload models when it trips (LM Studio and Ollama; llama-server and vLLM stay up but get no work)</label>
@@ -2254,6 +2360,7 @@ const MODES=[
 let S=null, pick=null;
 async function api(p,b){ const r=await fetch(p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json','X-Console-Key':key},body:b?JSON.stringify(b):undefined});
   const j=await r.json(); if(!r.ok){ $('#err').textContent=j.error||r.status; throw new Error(j.error); } $('#err').textContent=''; return j; }
+$('#nsdirsave').onclick=async()=>{ try{ S=await api('/api/neuronscope-dir',{dir:$('#nsdir').value.trim()}); render(); }catch(e){} };
 function extra(){ const m=pick; let h='';
   if(m==='vpn') h=`VPN address of this computer: <input id="xbind" value="${esc(S.link.mode==='vpn'?S.link.bind:(S.addresses.find(a=>a.kind.startsWith('vpn'))||{}).address||'')}" placeholder="100.x.y.z"> <span class="mut">Tailscale: <code>tailscale ip -4</code></span>`;
   if(m==='ssh') h=`<div class="mut">On the controller: <code>ssh -N -L 47871:127.0.0.1:${S.link.port||47871} you@${esc((S.addresses[0]||{}).address||'this-computer')}</code>, then add the host at <code>http://127.0.0.1:47871</code>. NeuronScope Studio can run the tunnel for you.</div>`;
@@ -2287,6 +2394,8 @@ function render(){ const s=S; $('#hname').textContent='“'+s.name+'”'; $('#ho
   $('#gpus').innerHTML=(th.tripped?`<div class="bad" style="color:#c0392b"><b>Paused: ${esc(th.tripped.gpu)} reached ${f(th.tripped.temp)}°C</b></div>`:'')+(T.gpus.length?T.gpus.map(g=>g.error?esc(g.error):`<div><b>${esc(g.name)}</b> · edge ${f(g.temp_c)}°C · junction ${f(g.junction_c)}°C · memory ${f(g.mem_c)}°C · VRAM ${g.vram_used_mb==null?'?':(g.vram_used_mb/1024).toFixed(1)}/${g.vram_total_mb==null?'?':(g.vram_total_mb/1024).toFixed(1)} GB · load ${f(g.util)}%${g.power_w!=null?' · '+f(g.power_w)+' W':''} <span class="mut">(${esc(g.source)})</span></div>`).join(''):'No GPU sensors found (nvidia-smi, rocm-smi or Linux amdgpu sensors).');
   if(document.activeElement?.id?.startsWith('th')!==true){ $('#thOn').checked=!!th.enabled; $('#thLim').value=th.limit_c??95; $('#thMar').value=th.margin_c??10; $('#thUnl').checked=th.unload!==false; }
   ['thOn','thLim','thMar','thUnl'].forEach(id=>$('#'+id).onchange=async()=>{ S=await api('/api/thermal',{enabled:$('#thOn').checked,limit_c:+$('#thLim').value,margin_c:+$('#thMar').value,unload:$('#thUnl').checked}); render(); });
+  if(document.activeElement!==$('#nsdir')) $('#nsdir').value=s.neuronscope_dir_set||'';
+  $('#nsdirmsg').textContent=s.neuronscope_dir?('jobs run from '+s.neuronscope_dir):'no NeuronScope folder found';
   $('#allow').innerHTML=Object.keys(s.allow).map(k=>`<label style="display:block"><input type="checkbox" data-al="${k}" ${s.allow[k]?'checked':''}> ${esc(s.allow_text[k])}</label>`).join('');
   document.querySelectorAll('[data-al]').forEach(c=>c.onchange=async()=>{ S=await api('/api/allow',{allow:{[c.dataset.al]:c.checked}}); render(); });
   $('#bks').innerHTML=s.backends.length?'<table>'+s.backends.map(b=>`<tr><td>${esc(b.kind)}</td><td><code>${esc(b.url)}</code></td><td class="ok">running</td><td>${b.source==='configured'?`<button data-rb="${esc(b.url)}">Remove</button>`:''}</td></tr>`).join('')+'</table>':'<span class="err">No LLM server found. Start LM Studio\'s server (Developer → Start server), Ollama, or llama-server.</span>';
