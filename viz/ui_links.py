@@ -64,7 +64,8 @@ const NS_ICON={chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9
   share:'<circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.3 10.9l7.4-3.7M8.3 13.1l7.4 3.7"/>',
   wrench:'<path d="M14.5 4.5a4.5 4.5 0 0 0 5 6L11 19a2.1 2.1 0 0 1-3-3l8.5-8.5a4.5 4.5 0 0 1-2-3z"/>',
   gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
-  more:'<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>'};
+  more:'<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>',
+  pulse:'<path d="M3 12h4l2-6 4 12 2-6h6"/>'};
 // tab: the Studio-page tab the item opens. mobile: also on the phone bar.
 const NS_NAV=[
   {href:'/#chats',tab:'chats',label:'Chat',icon:'chat',tip:'Chat with your models',mobile:1},
@@ -83,6 +84,7 @@ const NS_NAV=[
   {href:'/link',label:'Devices',icon:'link',tip:'Pair devices; link other Studios'},
   {href:'/connect',label:'Connect',icon:'share',tip:'Use these models and tools from Cline, Claude and other apps'},
   {sep:1,bottom:1},
+  {href:'/system',label:'System',icon:'pulse',tip:'What is running, restart any part, monitor the hardware, automation rules',bottom:1},
   {href:'/setup',label:'Setup',icon:'wrench',tip:'Paths, building llama.cpp, hardware, health check',bottom:1},
   {href:'/settings',label:'Settings',icon:'gear',tip:'Themes, workspaces, models per subject, tool approval, plugins',bottom:1}];
 function nsSvg(n){ return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NS_ICON[n]||''}</svg>`; }
@@ -129,6 +131,27 @@ body.ns-railed aside>.tabs{display:none}
   addEventListener('hashchange',nsRailDraw); document.addEventListener('ns-tab',e=>{ window.NS_TAB=e.detail; nsRailDraw(); });
   nsRailDraw(); }
 (function(){ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',nsRail); else nsRail(); })();
+// ---- restarting Studio: ask, then wait until it answers again and reload the page
+async function nsRestart(what){ const o=document.createElement('div');
+  o.style.cssText='position:fixed;inset:0;z-index:9800;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;font:15px ui-sans-serif,system-ui;color:#ececea';
+  o.innerHTML='<div style="background:#1d1d1b;border:1px solid #33332f;border-radius:12px;padding:1.2rem 1.6rem;max-width:90vw;text-align:center"><b>Restarting Studio…</b><div data-r style="margin-top:.4rem;color:#9a9a94">Stopping models and starting again.</div></div>';
+  document.body.appendChild(o); const msg=o.querySelector('[data-r]');
+  try{ const r=await fetch('/api/restart',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); if(!r.ok){ msg.textContent='Could not restart: '+((await r.json().catch(()=>({}))).error||r.status); return; } }catch(e){}
+  const t0=Date.now(); await new Promise(r=>setTimeout(r,1500));
+  while(Date.now()-t0<90000){ try{ const r=await fetch('/api/status',{cache:'no-store'}); if(r.ok){ const j=await r.json(); if(!j.started||j.started*1000>t0-2000){ msg.textContent='Back. Reloading…'; location.reload(); return; } } }catch(e){}
+    msg.textContent=`Waiting for Studio to come back… ${Math.round((Date.now()-t0)/1000)} s`; await new Promise(r=>setTimeout(r,1000)); }
+  msg.innerHTML='Studio has not come back after 90 s. Check the terminal or log it was started from, or start it again (<code>./neuronscope</code>).'; }
+// When the code on disk is newer than the running Studio, say so once per page.
+(function(){ if(window.self!==window.top||/^\/(pair|login)/.test(location.pathname)) return;
+  const go=()=>fetch('/api/status',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(j=>{ if(!j||!j.stale||j.role!=='owner') return;
+    try{ if(sessionStorage.getItem('ns-stale-later')) return; }catch(e){}
+    const b=document.createElement('div'); b.id='ns-stale'; b.setAttribute('role','status');
+    b.style.cssText='position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9600;max-width:min(680px,calc(100vw - 24px));background:var(--panel,#1d1d1b);color:var(--fg,#ececea);border:1px solid var(--warn,#e7b65c);border-radius:10px;padding:.55rem .8rem;font:13.5px/1.45 ui-sans-serif,system-ui;box-shadow:0 6px 24px rgba(0,0,0,.35);display:flex;gap:.6rem;align-items:center;flex-wrap:wrap';
+    b.innerHTML='<span style="flex:1;min-width:14rem">NeuronScope was updated after this Studio started. Pages and fixes added since then are missing until it restarts.</span><button data-s="go" style="background:var(--acc,#6f93ff);color:var(--accfg,#0b0b0a);border:1px solid var(--acc,#6f93ff);border-radius:6px;padding:.3rem .8rem;font-weight:600;cursor:pointer">Restart Studio</button><button data-s="later" style="background:none;border:1px solid var(--line,#33332f);color:inherit;border-radius:6px;padding:.3rem .7rem;cursor:pointer">Later</button>';
+    b.querySelector('[data-s=go]').onclick=()=>{ b.remove(); nsRestart(); };
+    b.querySelector('[data-s=later]').onclick=()=>{ try{ sessionStorage.setItem('ns-stale-later','1'); }catch(e){} b.remove(); };
+    document.body.appendChild(b); }).catch(()=>{});
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',go); else go(); })();
 // ---- files and folders on Studio's computer: a browse dialog, path fields, per-entry lists
 function nsEsc(x){ return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function nsRecent(kind){ try{ return JSON.parse(localStorage.getItem('ns-recent-'+kind)||'[]'); }catch(e){ return []; } }

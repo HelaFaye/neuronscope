@@ -187,17 +187,9 @@ def extract_patch(text: str) -> str:
 
 
 def load_rows(spec: str, split: str) -> list[dict]:
-    p = Path(spec)
-    if p.exists():
-        if p.suffix == ".jsonl":
-            return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
-        if p.suffix == ".json":
-            return json.loads(p.read_text())
-        if p.suffix == ".parquet":
-            import pandas as pd
-            return pd.read_parquet(p).to_dict("records")
-    from datasets import load_dataset
-    return list(load_dataset(spec, split=split))
+    """A local file or a Hub dataset; works without the `datasets` package (hf_rows.py)."""
+    import hf_rows
+    return hf_rows.load(spec, split)
 
 
 def swebench_predict(a) -> int:

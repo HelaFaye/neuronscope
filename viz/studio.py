@@ -2575,6 +2575,107 @@ def stop_labs():
             _HUB["m"].stop(name)
 
 
+# ---------------------------------------------------------------- services (System page)
+
+_CODE_DIRS = [os.path.dirname(os.path.abspath(__file__)),
+              os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")]
+
+
+def code_stamp() -> float:
+    """Newest modification time of Studio's own code: if it moved since Studio started, the running
+    process is out of date (pages or features added since then answer "not found")."""
+    newest = 0.0
+    for d in _CODE_DIRS:
+        try:
+            for e in os.scandir(d):
+                if e.name.endswith(".py"):
+                    newest = max(newest, e.stat().st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
+STARTED = {"t": time.time(), "code": code_stamp(), "checked": 0.0, "stale": False}
+
+
+def code_stale() -> bool:
+    if time.time() - STARTED["checked"] > 10:
+        STARTED["checked"] = time.time()
+        STARTED["stale"] = code_stamp() > STARTED["code"] + 1
+    return STARTED["stale"]
+
+
+def services() -> list[dict]:
+    """Each part of the harness this Studio runs, with what can be done to it."""
+    out = [{"id": "studio", "name": "Studio", "state": "running", "detail":
+            f"up {int(time.time() - STARTED['t'])} s, pid {os.getpid()}"
+            + (" · its code changed on disk since it started" if code_stale() else ""),
+            "warn": code_stale(), "actions": ["restart"]}]
+    m = PROC.get("model")
+    out.append({"id": "chat", "name": "Chat model server", "state": "running" if server_running() else "stopped",
+                "detail": (m or {}).get("id") or "no model loaded", "actions": ["reload", "stop"] if m else []})
+    ws = POOL.list()
+    out.append({"id": "workers", "name": "Worker models", "state": f"{len(ws)} running" if ws else "none",
+                "detail": ", ".join(w["model"] for w in ws)[:200], "actions": ["stop"] if ws else []})
+    ep = EMBED.get("proc")
+    out.append({"id": "embed", "name": "Embedding server (documents)",
+                "state": "running" if ep is not None and ep.poll() is None else "stopped",
+                "detail": STATE.get("rag_embed") or STATE.get("rag_embed_gguf") or "not configured",
+                "actions": ["restart"] if STATE.get("rag_embed_gguf") else []})
+    hub = STATE.get("mcp")
+    st = hub.status() if hub else []
+    out.append({"id": "mcp", "name": "MCP connectors", "state": f"{sum(x['connected'] for x in st)} of {len(st)} connected"
+                if st else "none", "detail": ", ".join(x["name"] + ("" if x["connected"] else " (down)") for x in st)[:200],
+                "warn": any(not x["connected"] and not x.get("disabled") for x in st), "actions": ["reconnect"] if st else []})
+    labs = list(_HUB["m"].RUNNING) if "m" in _HUB else []
+    out.append({"id": "labs", "name": "Labs", "state": f"{len(labs)} running" if labs else "none",
+                "detail": ", ".join(labs), "actions": ["stop"] if labs else []})
+    runner = STATE.get("jobs")
+    running = [j for j in runner.list(20) if j.get("status") == "running"] if runner else []
+    out.append({"id": "jobs", "name": "Jobs", "state": f"{len(running)} running" if running else "idle",
+                "detail": ", ".join(j["title"] for j in running)[:200], "actions": []})
+    return out
+
+
+def service_action(sid: str, action: str) -> str:
+    if sid == "studio" and action == "restart":
+        threading.Thread(target=restart_studio, daemon=True).start()
+        return "Studio restarts in a moment"
+    if sid == "chat" and action == "stop":
+        stop_server()
+        return "chat model stopped"
+    if sid == "chat" and action == "reload":
+        m = PROC.get("model")
+        if not m:
+            raise ValueError("no model loaded")
+        stop_server()
+        with LOCK:
+            ok, why = ensure_loaded(m, own=0)
+        if not ok:
+            raise RuntimeError(f"reload failed: {why}")
+        return f"{m['id']} reloaded"
+    if sid == "workers" and action == "stop":
+        POOL.stop()
+        return "worker models stopped"
+    if sid == "embed" and action == "restart":
+        with EMBED["lock"]:
+            p = EMBED.get("proc")
+            if p is not None and p.poll() is None:
+                p.terminate()
+            EMBED["proc"] = None
+        return "embedding server stopped; it starts again on the next document search"
+    if sid == "mcp" and action == "reconnect":
+        hub = mcp_hub()
+        if hub is None:
+            raise ValueError("no MCP connectors configured")
+        hub.connect(timeout=30)
+        return "connectors reconnected"
+    if sid == "labs" and action == "stop":
+        stop_labs()
+        return "labs stopped"
+    raise ValueError(f"cannot {action} {sid}")
+
+
 def restart_studio():
     """Re-exec Studio with the same arguments, after stopping the model servers it
     started (an orphaned llama-server would hold their ports)."""
@@ -3642,9 +3743,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------ neuron review
 
-    def _html(self, page):
+    def _html(self, page, code=200):
         body = page.encode()
-        self.send_response(200)
+        self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -3889,8 +3990,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)})
         return self._json(404, {"error": "not found"})
 
+    PAGES = {"/", "/setup", "/settings", "/lab", "/review", "/projects", "/workers", "/jobs", "/connect", "/remote",
+             "/link", "/system"}
+
     def do_GET(self):
         self._route = None
+        base = self.path.split("?", 1)[0].split("#", 1)[0]
+        if base != "/" and base.rstrip("/") in self.PAGES:       # /workers/ and /workers?x are /workers
+            self.path = base.rstrip("/")
+        elif base == "/" and self.path != "/":
+            self.path = "/"
         if self.path.startswith(("/api/remote/next", "/api/remote/file/")):
             return self._remote_public("GET")
         if self.path.split("?")[0] == "/pair":
@@ -4170,6 +4279,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(502, {"error": f"hub unreachable: {e}"})
         if self.path == "/api/status":
             return self._json(200, {
+                "started": STARTED["t"], "stale": code_stale(),
                 "computer": socket.gethostname(),
                 "roles": "this Studio runs the tools and models; whoever calls its API or MCP is the controller",
                 "running": server_running(),
@@ -4189,7 +4299,31 @@ class Handler(BaseHTTPRequestHandler):
                 # What this caller may do: "owner" (everything) or "device" (models, chat, checks).
                 "role": self._role, "workspace": STATE.get("workspace_name"),
             })
+        if self.path == "/system":
+            import system_page
+            return self._html(system_page.PAGE)
+        if self.path == "/api/services":
+            if not self._owner_only():
+                return
+            return self._json(200, {"services": services(), "stale": code_stale()})
+        if not self.path.startswith(("/api/", "/v1/")) and "text/html" in (self.headers.get("Accept") or ""):
+            return self._not_found_page()
         self._json(404, {"error": "not found"})
+
+    def _not_found_page(self):
+        """A page this Studio does not have: say why, most often an update that needs a restart."""
+        import html as _h
+        from ui_links import js as _ui_js
+        stale = code_stale()
+        page = f"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Not in this Studio</title><style>body{{margin:0;font:15px/1.6 ui-sans-serif,system-ui;background:#151514;color:#ececea}}
+main{{max-width:620px;margin:12vh auto;padding:0 16px}}a{{color:#6f93ff}}button{{font:600 14px ui-sans-serif,system-ui;padding:.45rem 1rem;
+border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;cursor:pointer}}code{{background:#262624;padding:0 .3rem;border-radius:4px}}</style>
+<main><h1>This page is not in the running Studio</h1>
+<p><code>{_h.escape(self.path[:200])}</code> {"exists in NeuronScope's files, which changed after this Studio started. Restart it to load the new version." if stale else "is not a Studio page. If you updated NeuronScope recently, restarting Studio loads the new pages."}</p>
+<p><button onclick="nsRestart()">Restart Studio</button> &nbsp; <a href="/">Back to Studio</a> · <a href="/system">System</a></p></main>
+<script>{_ui_js()}</script>"""
+        return self._html(page, 404)
 
     def do_POST(self):
         self._route = None
@@ -4290,6 +4424,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200 if ok else 400, {"ok": ok, "port": port, "message": why} if ok
                                   else {"error": why})
 
+            if self.path == "/api/services":
+                if not self._owner_only():
+                    return
+                req = self._read()
+                try:
+                    note = service_action(str(req.get("id", "")), str(req.get("action", "")))
+                except (ValueError, RuntimeError) as e:
+                    return self._json(400, {"error": str(e)})
+                return self._json(200, {"ok": True, "note": note, "services": services()})
             if self.path in ("/api/setup", "/api/hardware", "/api/restart"):
                 if not self._owner_only():
                     return
