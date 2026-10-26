@@ -118,6 +118,9 @@ python scripts/clip_neurons.py collect --model openai/clip-vit-base-patch32 --im
 
 More in [docs/RESEARCH_NOTES.md](docs/RESEARCH_NOTES.md).
 
+The research, datasets and software NeuronScope uses are credited in
+[docs/CREDITS.md](docs/CREDITS.md).
+
 ## Security
 
 Every network service follows one policy. Loopback binds work without

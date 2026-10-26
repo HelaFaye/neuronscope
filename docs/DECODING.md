@@ -124,6 +124,32 @@ the retrain gate before trusting it.
 (`llama-server --control-vector-scaled rp-cvec.gguf 0.5`) for GGUF models.
 That one is fixed: llama.cpp adds it at every step, without the gate.
 
+### Measured once: no gain on a small model
+
+One run, on Qwen2.5-0.5B-Instruct with Natural Questions (NQ-open) short
+answers:
+
+- **Fit**: 599 labelled answers, `--dim 48`, 8 projections, layers 6, 12
+  and 18.
+  - Held-out AUC of the chosen projection was 0.55 to 0.67 by layer, and
+    the mean over projections 0.55 to 0.62. The same classifier on the full
+    space scored 0.64 to 0.69.
+  - Across projections the AUC spread by 0.18 to 0.27.
+- **Steer**: layers 12 and 18 at `alpha` 1 and 2, on 300 other questions.
+  - Right answers went from 12% (plain) to 11% and 11%.
+  - At alpha 1, 0 answers became right and 2 became wrong; at alpha 2, 1
+    became right and 4 became wrong. Both are too few changes to call.
+
+The method needs a wrong-answer signal that is strong and spread over many
+directions, so that any random projection keeps it. Here it was neither:
+AUC stayed well under 0.7, and the result depended on which projection was
+drawn. A model that gets 88% of these questions wrong also has little
+right-answer behaviour to steer toward.
+
+Before steering, read the fit's numbers. A full-space AUC near 0.5, or a
+wide spread across projections, means steering has little to work with on
+that model and layer. Try a larger model, or other layers.
+
 ## Reading the result
 
 The gate compares the variants item by item on the same TestQA bank, and
