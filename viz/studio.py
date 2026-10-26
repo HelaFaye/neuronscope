@@ -870,6 +870,74 @@ def remote():
     return REMOTE["obj"]
 
 
+# ---- setting profiles: any number of named settings per tool, and one saved default
+
+PROFILE_SCOPE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,120}$")
+PROFILE_NAME = re.compile(r"^[^\x00-\x1f/\\]{1,80}$")
+_PLOCK = threading.Lock()
+
+
+def _profiles_path() -> str:
+    return os.path.join(os.path.dirname(os.path.expanduser(STATE.get("settings_path") or "~/.neuronscope/studio.json")),
+                        "profiles.json")
+
+
+def profiles_load() -> dict:
+    try:
+        with open(_profiles_path()) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def profiles_get(scope: str) -> dict:
+    sc = profiles_load().get(scope) or {}
+    return {"scope": scope, "profiles": sc.get("profiles") or {}, "default": sc.get("default")}
+
+
+def profiles_change(scope: str, action: str, name: str = "", values=None, new_name: str = "") -> dict:
+    if not PROFILE_SCOPE.match(scope):
+        raise ValueError("bad scope")
+    if action != "clear_default" and not PROFILE_NAME.match(name or ""):
+        raise ValueError("a profile needs a name (up to 80 characters, no slashes)")
+    with _PLOCK:
+        allp = profiles_load()
+        sc = allp.setdefault(scope, {"profiles": {}, "default": None})
+        prof = sc.setdefault("profiles", {})
+        if action == "save":
+            if not isinstance(values, dict):
+                raise ValueError("values must be an object")
+            if len(json.dumps(values)) > 200_000:
+                raise ValueError("profile too large")
+            prof[name] = values
+        elif action == "delete":
+            prof.pop(name, None)
+            if sc.get("default") == name:
+                sc["default"] = None
+        elif action == "rename":
+            if name not in prof or not PROFILE_NAME.match(new_name or ""):
+                raise ValueError("rename needs an existing profile and a new name")
+            prof[new_name] = prof.pop(name)
+            if sc.get("default") == name:
+                sc["default"] = new_name
+        elif action == "default":
+            if name not in prof:
+                raise ValueError(f"no profile {name!r}")
+            sc["default"] = name
+        elif action == "clear_default":
+            sc["default"] = None
+        else:
+            raise ValueError("action: save, delete, rename, default or clear_default")
+        p = _profiles_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(allp, f, indent=1)
+        os.replace(tmp, p)
+    return profiles_get(scope)
+
+
 # ---- jobs on remote hosts (the agent's run_job / jobs / job_log / cancel_job tools)
 
 _RCACHE: dict = {}
@@ -3530,13 +3598,18 @@ class Handler(BaseHTTPRequestHandler):
                                     "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
                                     "workspace": STATE.get("workspace_name"), "root": ws.get("root"),
                                     "ggufs": [m["path"] for m in scan_models()][:200]})
-        if runner is None and self.path not in ("/api/jobs/targets",):
+        if runner is None and not self.path.startswith(("/api/jobs/targets", "/api/jobs/options")):
             return self._jobs_off()
         if self.path == "/api/jobs":
             mine = runner.list() if self._role == "owner" else []
             return self._json(200, sorted(mine + remote_jobs(), key=lambda m: -m.get("started", 0)))
         if self.path == "/api/jobs/targets":
             return self._json(200, job_targets())
+        if self.path.startswith("/api/jobs/options"):
+            kind = urllib.parse.parse_qs(self.path.split("?", 1)[-1]).get("kind", [""])[0]
+            if kind not in ns_jobs.all_specs():
+                return self._json(404, {"error": "no such job kind"})
+            return self._json(200, ns_jobs.script_options(kind))
         m = re.fullmatch(r"/api/jobs/host/([^/]+)/([0-9a-f]{12})/log", self.path)
         if m:
             try:
@@ -4250,6 +4323,10 @@ class Handler(BaseHTTPRequestHandler):
                                                (q.get("hidden") or ["0"])[0] == "1"))
         if self.path == "/api/plugins" or self.path.startswith("/plugins/"):
             return self._plugins_get()
+        if self.path == "/api/help/index":
+            import help_page
+            docs = sorted(p for p in help_page.DOCS.glob("*.md") if help_page.NAME.match(p.stem))
+            return self._json(200, {"pages": [{"name": p.stem, "title": p.stem.replace("_", " ").title()} for p in docs]})
         if self.path.startswith("/help"):
             import help_page
             name = self.path.split("?")[0].split("#")[0][len("/help"):].strip("/") or "GETTING_STARTED"
@@ -4399,6 +4476,13 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._json(200, {"services": services(), "stale": code_stale()})
+        if self.path.startswith("/api/profiles"):
+            if not self._owner_only():
+                return
+            scope = urllib.parse.parse_qs(self.path.split("?", 1)[-1]).get("scope", [""])[0]
+            if not PROFILE_SCOPE.match(scope):
+                return self._json(400, {"error": "scope required"})
+            return self._json(200, profiles_get(scope))
         if not self.path.startswith(("/api/", "/v1/")) and "text/html" in (self.headers.get("Accept") or ""):
             return self._not_found_page()
         self._json(404, {"error": "not found"})
@@ -4517,6 +4601,16 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 return self._json(200 if ok else 400, {"ok": ok, "port": port, "message": why} if ok
                                   else {"error": why})
 
+            if self.path == "/api/profiles":
+                if not self._owner_only():
+                    return
+                req = self._read(400_000)
+                try:
+                    return self._json(200, profiles_change(str(req.get("scope", "")), str(req.get("action", "")),
+                                                           str(req.get("name", "")), req.get("values"),
+                                                           str(req.get("new_name", ""))))
+                except ValueError as e:
+                    return self._json(400, {"error": str(e)})
             if self.path == "/api/services":
                 if not self._owner_only():
                     return
@@ -5130,6 +5224,7 @@ section.chat{position:relative}
   <div id="list">scanning…</div>
   <div id="panel" style="display:none">
     <hr style="border:none;border-top:1px solid var(--line);margin:.7rem 0">
+    <div id="mprof" style="margin-bottom:.4rem"></div>
     <label>Engine</label><select id="engine"><option value="llama">llama.cpp (llama-server)</option><option value="vllm">vLLM</option></select>
     <div class="row2">
       <div><label>GPU layers</label><input id="ngl" value="99"></div>
@@ -5380,7 +5475,7 @@ $('#filter').oninput=renderModels;
 function fitBadge(f){ const t={gpu:['okc','Full GPU offload'],partial:['warn','Partial GPU offload'],cpu:['','Runs on the CPU'],no:['bad','Likely too large']}[f&&f.level];
   return t?`<span class="tag ${t[0]}" title="${esc(f.note||'')}">${t[1]}</span>`:''; }
 function pick(i){
-  sel=models[i]; renderModels(); $('#panel').style.display='block';
+  sel=models[i]; renderModels(); $('#panel').style.display='block'; modelProfiles();
   const s=sel.settings||{};
   F.forEach(k=>{ if($('#'+k)) $('#'+k).value = s[k] ?? ''; });
   $('#moebox').style.display = sel.n_experts?'block':'none';
@@ -5403,11 +5498,19 @@ async function quantBox(){ const m=sel, box=$('#quantbox'); box.innerHTML=''; if
   box.innerHTML=`<b>Quantizations</b> ${sib.length>1?chips:''}<div>${best?`★ <b>${esc(best.quant)}</b> was measured the best fit for this computer (${best.speed&&best.speed.gen_tps?best.speed.gen_tps.toFixed(1)+' tok/s':''}${best.fidelity&&best.fidelity.kld!=null?', KLD '+best.fidelity.kld.toFixed(3):best.fidelity&&best.fidelity.agreement!=null?', '+Math.round(best.fidelity.agreement*100)+'% agreement':''}).`:''}
     ${sib.length>1?`<a href="${jobs}">Measure which suits this computer</a>`:`Only ${esc(m.quant||'this file')} is here. <a href="/jobs#kind=quant_select&from=${encodeURIComponent(m.path)}&make=Q8_0,Q6_K,Q4_K_M&out=${encodeURIComponent('runs/qsel-'+m.family)}">Make others and measure</a> (from a high-precision file works best).`}</div>`;
   box.querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{ const i=models.findIndex(x=>x.id===b.dataset.q); if(i>=0) pick(i); }); }
+// The model settings form as values, and back: what Load sends, and what setting profiles keep.
+function readModelForm(){ const s={}; F.forEach(k=>{ const el=$('#'+k); if(!el) return; s[k] = TEXT_FIELDS.includes(k) ? el.value : (parseFloat(el.value)||0); });
+  if($('#main_gpu').value.trim()==='' || isNaN(parseFloat($('#main_gpu').value))) s.main_gpu=-1; else s.main_gpu=parseInt($('#main_gpu').value);
+  s.lora_scale=1.0; s.vision=$('#vision').checked; s.engine=$('#engine').value; Object.assign(s, readEO()); return s; }
+function fillModelForm(v){ F.forEach(k=>{ if($('#'+k)&&k in v) $('#'+k).value=v[k]??''; }); if('vision' in v) $('#vision').checked=v.vision!==false;
+  const eng=v.engine||$('#engine').value; $('#engine').value=eng; const fa=v.flash_attn===true?'on':v.flash_attn===false?'off':v.flash_attn; loadEO(eng,{...v,flash_attn:fa}); }
+const MODEL_DEFAULTS=__MODEL_DEFAULTS__;   // DEFAULTS in studio.py: what a model gets before anyone changes it
+let MPROF=null;
+function modelProfiles(){ if(MPROF) return; MPROF=nsProfiles($('#mprof'),{scope:'model-settings',get:readModelForm,set:fillModelForm,
+  system:()=>fillModelForm({...MODEL_DEFAULTS})}); }
 $('#load').onclick=async()=>{
   if(!sel) return;
-  const s={}; F.forEach(k=>{ const el=$('#'+k); if(!el) return; s[k] = TEXT_FIELDS.includes(k) ? el.value : (parseFloat(el.value)||0); });
-  if($('#main_gpu').value.trim()==='' || isNaN(parseFloat($('#main_gpu').value))) s.main_gpu=-1; else s.main_gpu=parseInt($('#main_gpu').value);
-  s.lora_scale=1.0; s.vision=$('#vision').checked; s.engine=$('#engine').value; Object.assign(s, readEO());
+  const s=readModelForm();
   $('#load').disabled=true; $('#loadmsg').textContent=s.engine==='vllm'?'starting vLLM…':'starting llama-server…';
   const r=await (await post('/api/load',{path:sel.path,settings:s})).json();
   $('#load').disabled=false; sel.settings=s;
@@ -5845,7 +5948,7 @@ fetch('/api/setup').then(r=>r.ok?r.json():null).then(s=>{ if(!s||(s.ready.server
   document.querySelector('header').after(d); }).catch(()=>{});
 </script>"""
 from ui_links import inject as _inject_links  # noqa: E402
-PAGE = _inject_links(PAGE)
+PAGE = _inject_links(PAGE).replace("__MODEL_DEFAULTS__", json.dumps(DEFAULTS))
 LINK_PAGE = _inject_links(LINK_PAGE)
 
 

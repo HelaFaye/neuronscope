@@ -540,6 +540,103 @@ def all_specs() -> dict:
     return {**SPECS, **(EXTRA() if EXTRA else {})}
 
 
+# ---- every option a job's script has, read from its own --help (the form's fields are the common ones)
+
+_OPT_CACHE: dict = {}
+_OPT_LINE = re.compile(r"^  (-\S.*?)(?:\s{2,}(\S.*))?$")
+
+
+def _parse_help(text: str) -> list[dict]:
+    """argparse --help -> [{flag, takes_value, multi, choices, metavar, help}] for optional arguments."""
+    out, cur, in_opts = [], None, False
+    for line in text.splitlines():
+        if re.match(r"^\S.*:$", line):                    # a section heading: "options:", "positional arguments:"
+            in_opts = not line.lower().startswith("positional")
+            cur = None
+            continue
+        m = _OPT_LINE.match(line) if in_opts else None
+        if m:
+            inv = m.group(1).strip()
+            variants = [v.strip() for v in inv.split(", ")]
+            longs = [v for v in variants if v.startswith("--")]
+            if not longs:
+                cur = None
+                continue
+            first = longs[0].split(" ", 1)
+            flag, rest = first[0], (first[1] if len(first) > 1 else "")
+            if flag in ("--help",):
+                cur = None
+                continue
+            neg = any(v.startswith("--no-") for v in variants)
+            choices = re.findall(r"\{([^}]*)\}", rest)
+            cur = {"flag": flag, "takes_value": bool(rest), "multi": "..." in rest,
+                   "choices": choices[0].split(",") if choices else None,
+                   "metavar": None if choices else (rest.split(" ")[0].strip("[]") or None), "help": (m.group(2) or "").strip(),
+                   "boolean_optional": neg}
+            out.append(cur)
+        elif cur is not None and line.startswith("    ") and line.strip() and not line.strip().startswith("-"):
+            cur["help"] = (cur["help"] + " " + line.strip()).strip()
+    return out
+
+
+def script_options(kind: str) -> list[dict]:
+    """The options of a job's script that its form does not show yet (cached until the script changes)."""
+    spec = all_specs()[kind]
+    script = next((Path(x) for x in spec["argv"] if str(x).endswith(".py")), None)
+    stamp = script.stat().st_mtime if script and script.exists() else 0
+    hit = _OPT_CACHE.get(kind)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    argv = [*(spec.get("interp") or [sys.executable]), *[str(x) for x in spec["argv"]], "--help"]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=dict(os.environ, COLUMNS="200"))
+        opts = _parse_help(r.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        opts = []
+    known = {f["flag"] for f in spec["fields"]} | {"--" + f["name"].replace("_", "-") for f in spec["fields"]} \
+        | {"--" + f["name"] for f in spec["fields"]}
+    opts = [o for o in opts if o["flag"] not in known]
+    _OPT_CACHE[kind] = (stamp, opts)
+    return opts
+
+
+def _extra_argv(kind: str, extra: dict) -> list[str]:
+    """Values for options from script_options(): only flags the script itself lists."""
+    if not extra:
+        return []
+    if not isinstance(extra, dict):
+        raise ValueError("extra options must be an object")
+    opts = {o["flag"]: o for o in script_options(kind)}
+    out = []
+    for flag, v in extra.items():
+        o = opts.get(flag)
+        if o is None:
+            raise ValueError(f"{flag} is not an option of this job's script")
+        if not o["takes_value"]:
+            if o.get("boolean_optional") and v in (False, "false", "off", "0", 0):
+                out.append("--no-" + flag[2:])
+            elif v in (True, "true", "on", "1", 1):
+                out.append(flag)
+            continue
+        if v is None or v == "" or v == []:
+            continue
+        vals = v if isinstance(v, list) else (shlex.split(v) if o["multi"] and isinstance(v, str) else [v])
+        clean = []
+        for x in vals:
+            x = str(x).strip()
+            if not x:
+                continue
+            if (x.startswith("-") and not re.fullmatch(r"-\d+(\.\d+)?(e-?\d+)?", x)) or not SAFE.match(x) or len(x) > 4096:
+                raise ValueError(f"{flag}: values may not start with '-' (except negative numbers) or contain "
+                                 "control characters")
+            if o["choices"] and x not in o["choices"]:
+                raise ValueError(f"{flag} must be one of {', '.join(o['choices'])}")
+            clean.append(x)
+        if clean:
+            out += [flag] + clean
+    return out
+
+
 def build_argv(kind: str, values: dict) -> list[str]:
     specs = all_specs()
     if kind not in specs:
@@ -578,7 +675,7 @@ def build_argv(kind: str, values: dict) -> list[str]:
             argv += ([f["flag"]] if f["flag"] else []) + out       # flag "" = positional
         elif f["required"]:
             raise ValueError(f"{f['name']} is required")
-    return argv
+    return argv + _extra_argv(kind, values.get("__extra") or {})
 
 
 # ---- progress and plain-language hints, read from a job's log
@@ -824,13 +921,17 @@ button.pri{background:var(--acc);color:var(--accfg);border-color:var(--acc)}
 .hint b{color:var(--no)}
 .job:hover{background:var(--code)}.st{font-size:11px;padding:0 .4rem;border-radius:4px;border:1px solid var(--line)}
 .st.running{color:var(--acc)}.st.done{color:var(--ok)}.st.failed,.st.lost{color:var(--no)}
+.tip{display:inline-block;width:15px;height:15px;line-height:15px;text-align:center;border-radius:50%;border:1px solid var(--line);font:600 10px ui-sans-serif,system-ui;color:var(--mut);margin-left:.3rem;cursor:help;vertical-align:1px}
+.fhelp{font-size:11.5px;color:var(--mut);margin:.1rem 0 0}
 pre{background:var(--code);padding:.6rem;border-radius:6px;max-height:60vh;overflow:auto;font:12px ui-monospace,monospace;white-space:pre-wrap;word-break:break-all;margin:.5rem 0 0}
 </style>
 <header><h1>Studio · Jobs</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a><span class="note" id="hint"></span></header>
 <main>
  <section class="card"><h2>New job</h2>
   <select id="kind"></select><div id="khelp" class="note" style="margin-top:.3rem"></div>
+  <div id="profbar" style="margin:.5rem 0 .2rem"></div>
   <form id="form"></form>
+  <details id="allopts" style="margin-top:.6rem" hidden><summary class="note" style="cursor:pointer">All options <span id="nopts"></span></summary><div id="extra"></div></details>
   <label for="target" style="margin-top:.7rem">Run on</label>
   <select id="target" title="This computer, or a linked host whose owner allows jobs (Remote page)"><option value="local">This computer</option></select>
   <div class="note" id="tnote"></div>
@@ -866,27 +967,55 @@ const PICK={gguf:'file',from:'file',imatrix:'file',testqa:'file',file:'file',ser
   model:'any',base:'any',teacher:'any',student:'any',review_model:'any'};
 function pickFor(f){ const w=PICK[f.name]; if(!w||f.multi||f.choices) return '';
   return ` data-pick="${w}"`+(f.name==='gguf'?' data-ext="gguf" list="dl-ggufs"':''); }
+// Help goes in a tooltip (and under the field while it has focus), so it never overflows the input.
+const tip=h=>h?`<span class="tip" title="${esc(h)}" aria-label="${esc(h)}" tabindex="0">i</span>`:'';
+const ph=h=>h&&h.length<=38?h:'';
 function renderForm(prefill){const k=$('#kind').value, s=specs[k]; prefill=prefill||{};
  $('#khelp').innerHTML=esc(s.help)+(DEF.root?` <span class="note">· runs in ${esc(DEF.root)} (workspace ${esc(DEF.workspace)}, <a href="/settings#workspaces">change</a>)</span>`:'');
  $('#form').innerHTML=s.fields.map(f=>{const id='f_'+f.name, lab=esc(f.name.replace(/_/g,' '))+(f.required?' *':'');
   const sg=suggest(f);
   const d=f.name in prefill?prefill[f.name]:Array.isArray(f.default)?f.default.join(' '):(f.default??sg??'');
-  if(f.kind==='bool')return `<label><input type="checkbox" id="${id}" ${prefill[f.name]==='1'||prefill[f.name]==='true'?'checked':''}>${lab}${f.help?` <span class="note">${esc(f.help)}</span>`:''}</label>`;
+  if(f.kind==='bool')return `<label><input type="checkbox" id="${id}" ${[true,'1','true','on'].includes(prefill[f.name])?'checked':''}>${lab}${tip(f.help)}</label>`;
   const inp=f.choices?`<select id="${id}">${f.choices.map(c=>`<option ${c===d?'selected':''}>${esc(c)}</option>`).join('')}</select>`
-   :`<input id="${id}" value="${esc(d)}" placeholder="${esc(f.help||'')}"${pickFor(f)}>`;
-  return `<label for="${id}">${lab}${f.multi?' <span class="note">(space-separated)</span>':''}</label>${inp}`}).join('')
-  +`<datalist id="dl-ggufs">${(DEF.ggufs||[]).map(p=>`<option value="${esc(p)}">`).join('')}</datalist>`;}
+   :`<input id="${id}" value="${esc(Array.isArray(d)?d.join(' '):d)}" placeholder="${esc(ph(f.help))}" title="${esc(f.help||'')}"${pickFor(f)}>`;
+  return `<label for="${id}">${lab}${f.multi?' <span class="note">(space-separated)</span>':''}${tip(f.help)}</label>${inp}`}).join('')
+  +`<datalist id="dl-ggufs">${(DEF.ggufs||[]).map(p=>`<option value="${esc(p)}">`).join('')}</datalist>`;
+ $('#form').querySelectorAll('input[title],select').forEach(el=>{ el.onfocus=()=>{ const h=el.title||''; if(h.length>38){ let n=el.parentNode.querySelector('.fhelp[data-for="'+el.id+'"]');
+   if(!n){ n=document.createElement('div'); n.className='fhelp'; n.dataset.for=el.id; (el.closest('span')||el).after(n); } n.textContent=h; } };
+   el.onblur=()=>{ const n=el.parentNode.querySelector('.fhelp[data-for="'+el.id+'"]'); if(n) n.remove(); }; });
+ loadExtra(k, prefill.__extra||{}); }
+// A job kind opened: its form, and its profiles; the saved default fills the form unless a link already did.
+function openKind(prefill){ prefill=prefill||{}; const k=$('#kind').value; renderForm(prefill);
+  const pr=nsProfiles($('#profbar'),{scope:'job:'+k,get:formValues,set:v=>renderForm(v),system:()=>renderForm({})});
+  if(!Object.keys(prefill).length) pr.ready.then(v=>{ if(v&&$('#kind').value===k) renderForm(v); }); }
+function formValues(){ const k=$('#kind').value, v={};
+  for(const f of specs[k].fields){ const el=$('#f_'+f.name); if(el) v[f.name]=f.kind==='bool'?el.checked:el.value.trim(); }
+  const ex={}; document.querySelectorAll('#extra [data-flag]').forEach(el=>{ const val=el.type==='checkbox'?(el.indeterminate?undefined:el.checked):el.value.trim();
+    if(val!==undefined&&val!==''&&!(el.type==='checkbox'&&el.dataset.neg!=='1'&&!val)) ex[el.dataset.flag]=val; });
+  if(Object.keys(ex).length) v.__extra=ex; return v; }
+// Every other option the job's script has, from its own --help.
+const OPTS={}; let extraSeq=0;
+async function loadExtra(k, pre){ const seq=++extraSeq; let opts=OPTS[k];
+  if(!opts){ try{ opts=OPTS[k]=await api('/api/jobs/options?kind='+encodeURIComponent(k)); }catch(e){ opts=[]; } }
+  if($('#kind').value!==k||seq!==extraSeq) return;           // a newer form replaced this one meanwhile
+  $('#allopts').hidden=!opts.length; $('#nopts').textContent=opts.length?`(${opts.length} more)`:'';
+  $('#extra').innerHTML=opts.map((o,i)=>{ const id='x_'+i, nm=esc(o.flag.replace(/^--/,'').replace(/[-_]/g,' ')), v=pre[o.flag];
+    if(!o.takes_value) return `<label><input type="checkbox" id="${id}" data-flag="${esc(o.flag)}" data-neg="${o.boolean_optional?1:0}" ${v===true||v==='true'?'checked':''}>${nm}${tip(o.help)}</label>`;
+    const ctl=o.choices?`<select id="${id}" data-flag="${esc(o.flag)}"><option value="">(script default)</option>${o.choices.map(c=>`<option ${c===v?'selected':''}>${esc(c)}</option>`).join('')}</select>`
+      :`<input id="${id}" data-flag="${esc(o.flag)}" value="${esc(v??'')}" placeholder="${esc(o.metavar?o.metavar.toLowerCase():'')}" title="${esc(o.help)}">`;
+    return `<label for="${id}">${nm}${o.multi?' <span class="note">(space-separated)</span>':''}${tip(o.help)}</label>${ctl}`; }).join('');
+  if(Object.keys(pre).length) $('#allopts').open=true; }
 let DEF={};
 async function load(){specs=await api('/api/jobs/specs'); DEF=await api('/api/jobs/defaults').catch(()=>({}));const g={};for(const[k,s]of Object.entries(specs))(g[s.group]??=[]).push([k,s]);
  $('#kind').innerHTML=Object.entries(g).map(([n,xs])=>`<optgroup label="${esc(n)}">${xs.map(([k,s])=>`<option value="${k}">${esc(s.title)}</option>`).join('')}</optgroup>`).join('');
  openFromHash(); refresh();}
-function openFromHash(){ const h=decodeURIComponent(location.hash.slice(1)); if(!h) return renderForm();
+function openFromHash(){ const h=decodeURIComponent(location.hash.slice(1)); if(!h) return openKind();
   let kind=h, pre={};
   if(h.includes('=')){ const q=new URLSearchParams(location.hash.slice(1)); kind=q.get('kind')||''; q.forEach((v,k)=>{ if(k!=='kind') pre[k]=v; }); }
-  if(specs[kind]){ $('#kind').value=kind; renderForm(pre); if(Object.keys(pre).length) $('#ferr').innerHTML='<span class="note">filled in from the link: check the values, then Run</span>'; }
-  else renderForm(); }
+  if(specs[kind]){ $('#kind').value=kind; openKind(pre); if(Object.keys(pre).length) $('#ferr').innerHTML='<span class="note">filled in from the link: check the values, then Run</span>'; }
+  else openKind(); }
 addEventListener('hashchange',()=>{ if(specs) openFromHash(); });
-$('#kind').onchange=()=>{renderForm();history.replaceState(null,'','#'+$('#kind').value)};
+$('#kind').onchange=()=>{openKind();history.replaceState(null,'','#'+$('#kind').value)};
 // Where jobs can run: this computer, or linked hosts whose owner allows jobs.
 let TARGETS=[], curHost='';
 async function loadTargets(){ try{ TARGETS=await api('/api/jobs/targets'); }catch(e){ return; }
@@ -896,8 +1025,7 @@ function targetNote(){ const t=TARGETS.find(x=>x.id===$('#target').value)||{}; c
   $('#tnote').innerHTML=(t.id&&t.id!=='local'?`Runs on <b>${esc(t.id.slice(5))}</b> with its own NeuronScope; paths are paths on that computer.`:'')
     +(off.length?`<div>${off.map(x=>`${esc(x.label)}: ${esc(x.why||'not available')}`).join('<br>')}</div>`:''); }
 $('#target').onchange=targetNote;
-$('#run').onclick=async()=>{const k=$('#kind').value, v={}; $('#ferr').textContent='';
- for(const f of specs[k].fields){const el=$('#f_'+f.name); v[f.name]=f.kind==='bool'?el.checked:el.value.trim()}
+$('#run').onclick=async()=>{const k=$('#kind').value, v=formValues(); $('#ferr').textContent='';
  const target=$('#target').value;
  try{const j=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:k,values:v,target})});cur=j.id;curHost=j.host||'';refresh()}
  catch(e){$('#ferr').textContent=e.message}};

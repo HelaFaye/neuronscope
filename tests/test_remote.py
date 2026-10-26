@@ -550,6 +550,7 @@ def test_check_a_hosts_reply_here_or_on_the_host(studio_srv, tmp_path, backend):
         st, r = call(studio_srv, "/api/remote/classifier", {"host": "rig", "model": "tiny-chat",
                                                              "classifier": str(tmp_path / "clf.npz")})
         assert st == 200
+        ag.cfg["tracer"] = {"neuronscope": str(tmp_path / "no-neuronscope-here")}     # whatever this machine has
         st, r = call(studio_srv, "/api/trace", ask)
         assert st == 502 and "no NeuronScope tracer" in r["error"]
         fake = tmp_path / "ns" / "scripts" / "hscore.py"

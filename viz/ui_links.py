@@ -65,7 +65,8 @@ const NS_ICON={chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9
   wrench:'<path d="M14.5 4.5a4.5 4.5 0 0 0 5 6L11 19a2.1 2.1 0 0 1-3-3l8.5-8.5a4.5 4.5 0 0 1-2-3z"/>',
   gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   more:'<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>',
-  pulse:'<path d="M3 12h4l2-6 4 12 2-6h6"/>'};
+  pulse:'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
+  find:'<circle cx="10" cy="10" r="6"/><path d="M19 19l-4.5-4.5M7.5 10h5"/>'};
 // tab: the Studio-page tab the item opens. mobile: also on the phone bar.
 const NS_NAV=[
   {href:'/#chats',tab:'chats',label:'Chat',icon:'chat',tip:'Chat with your models',mobile:1},
@@ -121,13 +122,16 @@ body.ns-railed aside>.tabs{display:none}
   let top='',bot='';
   NS_NAV.forEach((it,i)=>{ const h=it.sep?'<hr>':item(it,i); if(it.bottom) bot+=h; else top+=h; });
   const r=document.createElement('nav'); r.id='ns-rail'; r.setAttribute('aria-label','Studio');
-  r.innerHTML=`<a class="brand" href="/#chats" title="NeuronScope Studio" aria-label="NeuronScope Studio home"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="6" r="1.6"/><circle cx="19.5" cy="6" r="1.6"/><circle cx="4.5" cy="18" r="1.6"/><circle cx="19.5" cy="18" r="1.6"/><path d="M6 6.8l3.6 3.4M18 6.8l-3.6 3.4M6 17.2l3.6-3.4M18 17.2l-3.6-3.4"/></svg></a>${top}<div class="grow"></div>${bot}`;
+  r.innerHTML=`<a class="brand" href="/#chats" title="NeuronScope Studio" aria-label="NeuronScope Studio home"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="6" r="1.6"/><circle cx="19.5" cy="6" r="1.6"/><circle cx="4.5" cy="18" r="1.6"/><circle cx="19.5" cy="18" r="1.6"/><path d="M6 6.8l3.6 3.4M18 6.8l-3.6 3.4M6 17.2l3.6-3.4M18 17.2l-3.6-3.4"/></svg></a><a class="it" href="#" data-find="1" title="Search every page, setting and job (Ctrl+K)">${nsSvg('find')}<span>Search</span></a><hr>${top}<div class="grow"></div>${bot}`;
   const bar=document.createElement('nav'); bar.id='ns-bar'; bar.setAttribute('aria-label','Studio');
   bar.innerHTML=NS_NAV.map((it,i)=>it.mobile?item(it,i):'').join('')+`<a class="it" href="#" data-more="1" aria-haspopup="true">${nsSvg('more')}<span>More</span></a>`;
   const more=document.createElement('div'); more.id='ns-more'; more.hidden=true;
   more.innerHTML=NS_NAV.map((it,i)=>it.sep||it.mobile?'':item(it,i)).join('');
   document.body.prepend(r); document.body.append(bar,more); document.body.classList.add('ns-railed');
   bar.querySelector('[data-more]').onclick=e=>{ e.preventDefault(); more.hidden=!more.hidden; };
+  r.querySelector('[data-find]').onclick=e=>{ e.preventDefault(); nsFind(); };
+  more.insertAdjacentHTML('afterbegin',`<a class="it" href="#" data-find="1">${nsSvg('find')}<span>Search</span></a>`);
+  more.querySelector('[data-find]').onclick=e=>{ e.preventDefault(); nsFind(); };
   more.onclick=()=>more.hidden=true;
   addEventListener('hashchange',nsRailDraw); document.addEventListener('ns-tab',e=>{ window.NS_TAB=e.detail; nsRailDraw(); });
   nsRailDraw(); }
@@ -153,6 +157,94 @@ async function nsRestart(what){ const o=document.createElement('div');
     b.querySelector('[data-s=later]').onclick=()=>{ try{ sessionStorage.setItem('ns-stale-later','1'); }catch(e){} b.remove(); };
     document.body.appendChild(b); }).catch(()=>{});
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',go); else go(); })();
+// ---- search: every page, section, job and help page, and the controls on this page (Ctrl+K)
+const NS_SECTIONS=[
+  ['Status and next step','/setup#status-card','Setup'],['Folders, ports and Studio settings','/setup#paths','Setup'],
+  ['Build llama.cpp','/setup#build','Setup'],['Hardware for worker models (GPUs, devices)','/setup#hardware','Setup'],
+  ['Health check (doctor)','/setup#health','Setup'],['Requirements and Python packages','/setup#requirements','Setup'],
+  ['Appearance and themes','/settings#appearance','Settings'],['Workspaces (folders per machine)','/settings#workspaces','Settings'],
+  ['Models per subject (auto routing)','/settings#subjects','Settings'],['Connectors (MCP servers)','/settings#connectors','Settings'],
+  ['Tool approval rules','/settings#tools','Settings'],['Plugins','/settings#plugins','Settings'],['Sharing results (scoreboard)','/settings#sharing','Settings'],
+  ['Connect Claude Desktop, Claude Code, claude.ai','/connect#claude','Connect'],['Connect Cline and OpenAI-compatible apps','/connect','Connect'],
+  ['Add a remote host','/remote#add','Remote'],['Running parts: restart Studio, models, connectors','/system#services','System'],
+  ['Chats','/#chats','Studio'],['My Models: load, settings, accuracy','/#models','Studio'],['Discover and download models','/#hub','Studio'],
+  ['Documents (RAG collections)','/#docs','Studio'],['Tools (MCP) in chat','/#tools','Studio'],['Pair a device, link Studios','/link','Devices'],
+  ['Workers: where project tasks run, GPU temperatures','/workers','Workers'],['Projects','/projects','Projects'],['Lab and 3D views','/lab','Lab'],
+  ['Neuron review','/review','Review'],['Jobs','/jobs','Jobs']];
+let NS_FIND_EXTRA=null;
+async function nsFindIndex(){ const out=NS_SECTIONS.map(([t,h,d])=>({t,h,d}));
+  NS_NAV.forEach(it=>{ if(it.href) out.push({t:it.label,h:it.href,d:it.tip}); });
+  if(!NS_FIND_EXTRA){ NS_FIND_EXTRA=[];
+    try{ const sp=await (await fetch('/api/jobs/specs')).json(); for(const [k,s] of Object.entries(sp)) NS_FIND_EXTRA.push({t:s.title,h:'/jobs#'+k,d:'Job · '+(s.group||'')+' · '+(s.help||'')}); }catch(e){}
+    try{ const hp=await (await fetch('/api/help/index')).json(); for(const x of hp.pages||[]) NS_FIND_EXTRA.push({t:x.title,h:'/help/'+x.name,d:'Help'}); }catch(e){} }
+  out.push(...NS_FIND_EXTRA);
+  // controls and sections on this page
+  document.querySelectorAll('main label, main h2, main h3, main button, main summary').forEach((el,i)=>{ if(el.closest('#ns-find')) return;
+    const t=(el.innerText||'').trim().split('\n')[0].slice(0,90); if(t.length<3) return;
+    out.push({t,h:null,el,d:'On this page'+(el.title?' · '+el.title:'')}); });
+  return out; }
+function nsScore(it,q){ const t=it.t.toLowerCase(), all=(t+' '+(it.d||'')).toLowerCase(); const ws=q.toLowerCase().split(/\s+/).filter(Boolean);
+  if(!ws.every(w=>all.includes(w))) return -1; let s=0; if(t.startsWith(ws[0])) s+=6; ws.forEach(w=>{ if(t.includes(w)) s+=3; if(new RegExp('\\b'+w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).test(t)) s+=2; });
+  if(it.el) s+=1; return s-t.length/200; }
+async function nsFind(){ if(document.getElementById('ns-find')) return; const idx=await nsFindIndex();
+  const o=document.createElement('div'); o.id='ns-find';
+  o.style.cssText='position:fixed;inset:0;z-index:9700;background:rgba(0,0,0,.45);display:flex;justify-content:center;align-items:flex-start;padding:10vh 12px';
+  o.innerHTML=`<div role="dialog" aria-label="Search" style="width:min(640px,100%);background:var(--panel,#1d1d1b);color:var(--fg,#ececea);border:1px solid var(--line,#33332f);border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.45);overflow:hidden;font:14px ui-sans-serif,system-ui">
+    <input data-f="q" placeholder="Search pages, settings, jobs, help and this page's controls" aria-label="Search" style="width:100%;border:none;border-bottom:1px solid var(--line,#33332f);padding:.8rem 1rem;font:15px ui-sans-serif,system-ui;background:transparent;color:inherit;outline:none">
+    <div data-f="list" role="listbox" style="max-height:55vh;overflow:auto;padding:.3rem"></div>
+    <div style="padding:.35rem .8rem;font-size:11.5px;color:var(--mut,#9a9a94);border-top:1px solid var(--line,#33332f)">↑ ↓ to move · Enter to open · Esc to close</div></div>`;
+  document.body.appendChild(o); const q=o.querySelector('[data-f=q]'), list=o.querySelector('[data-f=list]'); let hits=[], sel=0;
+  const close=()=>{ o.remove(); document.removeEventListener('keydown',key,true); };
+  const go=it=>{ close(); if(it.el){ it.el.scrollIntoView({block:'center'}); const tgt=it.el.tagName==='LABEL'&&it.el.htmlFor?document.getElementById(it.el.htmlFor):it.el;
+      (tgt||it.el).focus&&(tgt||it.el).focus(); it.el.style.outline='2px solid var(--acc,#6f93ff)'; it.el.style.outlineOffset='3px'; setTimeout(()=>{ it.el.style.outline=''; },2500); return; }
+    const [path,hash]=it.h.split('#'); if((path||'/')===location.pathname&&hash!==undefined){ location.hash=hash; const el=document.getElementById(hash); if(el) el.scrollIntoView({block:'start'}); } else location.href=it.h; };
+  const draw=()=>{ const v=q.value.trim(); hits=v?idx.map(it=>[nsScore(it,v),it]).filter(x=>x[0]>=0).sort((a,b)=>b[0]-a[0]).slice(0,40).map(x=>x[1])
+      :idx.filter(it=>!it.el).slice(0,12); sel=Math.min(sel,Math.max(0,hits.length-1));
+    list.innerHTML=hits.length?hits.map((it,i)=>`<div role="option" data-i="${i}" aria-selected="${i===sel}" style="padding:.45rem .7rem;border-radius:7px;cursor:pointer;${i===sel?'background:color-mix(in srgb,var(--acc,#6f93ff) 18%,transparent)':''}"><div>${nsEsc(it.t)}</div><div style="font-size:12px;color:var(--mut,#9a9a94);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${nsEsc(it.d||it.h||'')}</div></div>`).join('')
+      :'<div style="padding:.8rem;color:var(--mut,#9a9a94)">Nothing matches.</div>';
+    list.querySelectorAll('[data-i]').forEach(el=>{ el.onclick=()=>go(hits[+el.dataset.i]); el.onmousemove=()=>{ if(sel!==+el.dataset.i){ sel=+el.dataset.i; draw(); } }; }); };
+  const key=e=>{ if(e.key==='Escape'){ e.preventDefault(); close(); } else if(e.key==='ArrowDown'){ e.preventDefault(); sel=Math.min(hits.length-1,sel+1); draw(); list.children[sel]?.scrollIntoView({block:'nearest'}); }
+    else if(e.key==='ArrowUp'){ e.preventDefault(); sel=Math.max(0,sel-1); draw(); list.children[sel]?.scrollIntoView({block:'nearest'}); } else if(e.key==='Enter'&&hits[sel]){ e.preventDefault(); go(hits[sel]); } };
+  document.addEventListener('keydown',key,true); o.onclick=e=>{ if(e.target===o) close(); };
+  q.oninput=()=>{ sel=0; draw(); }; draw(); q.focus(); }
+document.addEventListener('keydown',e=>{ const typing=/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)||document.activeElement?.isContentEditable;
+  if((e.key==='k'||e.key==='K')&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); nsFind(); }
+  else if(e.key==='/'&&!typing&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&window.self===window.top){ e.preventDefault(); nsFind(); } });
+// ---- setting profiles: any number of named settings per tool; one can be the saved default.
+// nsProfiles(el, {scope, get:()=>values, set:values=>{}, system:()=>{}}) -> {ready: Promise<default values or null>}
+function nsProfiles(el,o){ let P={profiles:{},default:null};
+  const btn='border:1px solid var(--line,#33332f);background:var(--panel,#1d1d1b);color:var(--fg,#ececea);border-radius:6px;padding:.22rem .55rem;cursor:pointer;font:500 12px ui-sans-serif,system-ui';
+  el.classList.add('ns-prof');
+  const call=async(body)=>{ const r=await fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope:o.scope,...body})});
+    const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||r.status); P=j; draw(); return j; };
+  const msg=t=>{ const m=el.querySelector('[data-p=m]'); if(m){ m.textContent=t; clearTimeout(m._t); m._t=setTimeout(()=>m.textContent='',3500); } };
+  function draw(){ const names=Object.keys(P.profiles).sort((a,b)=>a.localeCompare(b)); const cur=el.querySelector('[data-p=sel]')?.value||'';
+    el.innerHTML=`<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap;font-size:12px">
+      <select data-p="sel" aria-label="Setting profile" title="Saved settings for this tool" style="width:auto;max-width:14rem;font:12px ui-sans-serif,system-ui"><option value="">Profile…</option>${names.map(n=>`<option ${n===cur?'selected':''} value="${nsEsc(n)}">${nsEsc(n)}${n===P.default?' ★':''}</option>`).join('')}</select>
+      <button type="button" data-p="save" style="${btn}" title="Save the current settings into the selected profile, or a new one">Save</button>
+      <button type="button" data-p="saveas" style="${btn}" title="Save the current settings as a new profile">Save as…</button>
+      <button type="button" data-p="star" style="${btn}" title="Load the selected profile automatically when this tool opens">★ Default</button>
+      <button type="button" data-p="del" style="${btn}" title="Delete the selected profile">Delete</button>
+      <span style="flex:1"></span>
+      <button type="button" data-p="sys" style="${btn}" title="Reset every setting to NeuronScope's own defaults">System defaults</button>
+      <button type="button" data-p="def" style="${btn}" ${P.default?'':'disabled'} title="${P.default?'Load the saved default: '+nsEsc(P.default):'No saved default yet: select a profile and press ★ Default'}">Saved default</button>
+      <span data-p="m" style="color:var(--mut,#9a9a94);min-width:0"></span></div>`;
+    const q=k=>el.querySelector(`[data-p=${k}]`), sel=q('sel');
+    sel.onchange=()=>{ if(sel.value&&P.profiles[sel.value]){ o.set(P.profiles[sel.value]); msg('loaded '+sel.value); } };
+    q('save').onclick=async()=>{ let n=sel.value; if(!n){ n=prompt('Name for these settings'); if(!n) return; }
+      try{ await call({action:'save',name:n,values:o.get()}); el.querySelector('[data-p=sel]').value=n; msg('saved'); }catch(e){ msg(e.message); } };
+    q('saveas').onclick=async()=>{ const n=prompt('Name for these settings'); if(!n) return;
+      try{ await call({action:'save',name:n,values:o.get()}); el.querySelector('[data-p=sel]').value=n; msg('saved as '+n); }catch(e){ msg(e.message); } };
+    q('star').onclick=async()=>{ if(!sel.value) return msg('select a profile first');
+      try{ const n=sel.value; await call({action:'default',name:n}); el.querySelector('[data-p=sel]').value=n; msg(n+' opens by default now'); }catch(e){ msg(e.message); } };
+    q('del').onclick=async()=>{ if(!sel.value||!confirm(`Delete profile ${sel.value}?`)) return;
+      try{ await call({action:'delete',name:sel.value}); msg('deleted'); }catch(e){ msg(e.message); } };
+    q('sys').onclick=()=>{ o.system(); el.querySelector('[data-p=sel]').value=''; msg('system defaults'); };
+    q('def').onclick=()=>{ if(P.default&&P.profiles[P.default]){ o.set(P.profiles[P.default]); el.querySelector('[data-p=sel]').value=P.default; msg('saved default: '+P.default); } }; }
+  draw();
+  const ready=fetch('/api/profiles?scope='+encodeURIComponent(o.scope)).then(r=>r.ok?r.json():null).then(j=>{ if(j){ P=j; draw();
+    if(P.default&&P.profiles[P.default]){ el.querySelector('[data-p=sel]').value=P.default; return P.profiles[P.default]; } } return null; }).catch(()=>null);
+  return {ready}; }
 // ---- files and folders on Studio's computer: a browse dialog, path fields, per-entry lists
 function nsEsc(x){ return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function nsRecent(kind){ try{ return JSON.parse(localStorage.getItem('ns-recent-'+kind)||'[]'); }catch(e){ return []; } }
