@@ -20,6 +20,7 @@ button{cursor:pointer;background:var(--panel)}button.pri{background:var(--acc);c
 .tag.on{color:var(--ok);border-color:var(--ok)}.tag.changed,.tag.broken{color:var(--no);border-color:var(--no)}.tag.off{color:var(--warn);border-color:var(--warn)}
 .drop{border:2px dashed var(--line);border-radius:10px;padding:1rem;text-align:center;color:var(--mut)}.drop.over{border-color:var(--acc);color:var(--fg)}
 code{background:var(--code);padding:0 .3rem;border-radius:4px;font-size:12.5px}
+a{color:var(--acc)}
 </style>
 <main>
 <h1>Add-ons</h1>
