@@ -5092,6 +5092,26 @@ class Handler(BaseHTTPRequestHandler):
             sc["binary"] = STATE.get("server_bin") if engine == "llama" else STATE.get("vllm_bin")
             sc["vllm_installed"] = bool(shutil.which((STATE.get("vllm_bin") or "vllm").split()[0]))
             return self._json(200, sc)
+        if self.path.startswith("/api/models/draft"):
+            # compatible draft models for speculative decoding, and a device for the draft
+            import draft_pick
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            ms = scan_models()
+            m = find_model((q.get("model") or [""])[0], ms)
+            if m is None:
+                return self._json(404, {"error": "no such model"})
+            try:
+                cands = draft_pick.candidates(m["path"], [x["path"] for x in ms])
+            except (ValueError, ImportError) as e:
+                return self._json(400, {"error": str(e)})
+            out = {"model": m["id"], "candidates": [{**c, "id": next((x["id"] for x in ms if x["path"] == c["path"]),
+                                                                     c["name"])} for c in cands[:6]]}
+            if cands and STATE.get("server_bin"):
+                dev = str(load_settings().get(_key(m["path"]), {}).get("device") or "")
+                out["placement"] = draft_pick.place(draft_pick.list_devices(STATE["server_bin"]),
+                                                    [x for x in dev.split(",") if x], cands[0]["bytes"],
+                                                    os.path.getsize(m["path"]))
+            return self._json(200, out)
         if self.path in ("/remote", "/remote/download") or self.path.startswith("/api/remote"):
             return self._remote_get()
         if self.path in ("/connect", "/api/connect"):
@@ -6263,6 +6283,7 @@ function renderEO(s){
     const have=opts.filter(o=>o.available), lack=opts.filter(o=>!o.available);
     n+=opts.filter(o=>s[o.key]!==undefined&&s[o.key]!==''&&s[o.key]!==null&&s[o.key]!==false&&!(o.key==='flash_attn'&&s[o.key]==='auto')&&!(o.key==='parallel'&&+s[o.key]===1)).length;
     html+=`<details class="eoG"${opts.some(o=>s[o.key])?' open':''}><summary>${esc(g)}</summary>${have.map(o=>eoInput(o,s[o.key])).join('')}`+
+      (g==='Speculative decoding'&&EO.engine==='llama'?`<div class="eoRow"><button type="button" onclick="suggestDraft()" title="Find models in your folders that share this model's vocabulary, and a device the big model does not use">Suggest a draft model and device</button><div id="draftOut" class="note"></div></div>`:'')+
       (lack.length?`<details><summary class="note">${lack.length} not in this ${EO.engine==='llama'?'llama-server':'vLLM'} build</summary>${lack.map(o=>eoInput(o,s[o.key])).join('')}<div class="note">Update the engine (Setup → Build llama.cpp) to use these.</div></details>`:'')+`</details>`;
   }
   const env=s.env||{};
@@ -6273,6 +6294,19 @@ function renderEO(s){
   if(EO.engine==='vllm') html=(EO.vllm_installed?'':'<div class="bad">vLLM is not installed here (pip install vllm), or set its command with studio --vllm.</div>')+
     `<div class="eoRow"><label>Tokenizer (GGUF only)</label><input id="eo_tokenizer" value="${esc(s.tokenizer??'')}" placeholder="the original HF model id"></div>`+html;
   $('#eoForm').innerHTML=html; $('#eoCount').textContent=n?`(${n} set)`:'';
+}
+async function suggestDraft(){
+  const out=$('#draftOut'); if(!sel){out.textContent='Pick a model first.';return}
+  out.textContent='Reading vocabularies…';
+  const r=await (await fetch('/api/models/draft?model='+encodeURIComponent(sel.id))).json();
+  if(r.error){out.innerHTML=`<span class="bad">${esc(r.error)}</span>`;return}
+  if(!r.candidates.length){out.textContent='No model in your folders shares this one\'s vocabulary and is small enough (under 40% of its size). Download a smaller model of the same family, or try an n-gram method, which needs no draft.';return}
+  const pl=r.placement||{};
+  out.innerHTML=(pl.why?`<div>${esc(pl.why)}.</div>`:'')+r.candidates.map((c,i)=>`<div class="eoRow" style="display:flex;gap:.4rem;align-items:center"><button type="button" data-i="${i}">Use</button><span title="${esc(c.path)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.id)}</span><span class="note">${(c.ratio*100).toFixed(0)}% of the size${c.same_arch?', same family':''}</span></div>`).join('');
+  out.querySelectorAll('button[data-i]').forEach(b=>b.onclick=()=>{const c=r.candidates[+b.dataset.i],set=(k,v)=>{const el=$('#eo_'+k);if(el&&v!=null&&v!=='')el.value=v};
+    set('draft_model',c.path);set('spec_type',$('#eo_spec_type')&&[...$('#eo_spec_type').options].some(o=>o.value==='draft-simple')?'draft-simple':'');
+    set('draft_device',pl.draft_device);set('draft_ngl',pl.draft_ngl);if(pl.device)set('device',pl.device);
+    b.textContent='✓ set'; out.insertAdjacentHTML('beforeend','<div>Filled in: save the settings and load the model to use it.</div>')});
 }
 function readEO(){ const s={};
   for(const opts of Object.values(EO?EO.groups:{})) for(const o of opts){ const el=$('#eo_'+o.key); if(!el) continue;

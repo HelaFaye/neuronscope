@@ -53,6 +53,11 @@ SPECS: dict[str, dict] = {
         "help": "Graded bank against an endpoint; publish stats so auto routing sees them.",
         "fields": [
             F("endpoint", req=True, repeat=True, help="label=URL@model, e.g. m=http://127.0.0.1:7870/v1@my-model"),
+            F("concurrency", default="auto", help="requests in flight per server: a number, or auto (grows while "
+              "throughput rises, up to the server's slots)"),
+            F("parallel", repeat=True, help="one endpoint's own concurrency: label=N or label=auto, e.g. slow=1"),
+            F("pool", repeat=True, help="another server sharing an endpoint's tasks (same model): label=URL@model; "
+              "whichever is free takes the next"),
             F("per_subject", kind="int", help="items per subject (0 = all)"),
             F("subject", multi=True, help="limit to these subjects"),
             F("allow_exec", kind="bool", help="run model-written code"),

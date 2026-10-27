@@ -87,6 +87,38 @@ For code and repetitive text this often gives 1.5–2× and costs nothing.
 
 If acceptance is low, lower the limit.
 
+### A draft on another device
+
+The draft model proposes a few tokens, and the big model checks all of them
+in one pass. Putting the draft on a device the big model does not use (an
+iGPU, a second GPU, or the CPU) keeps the big model's GPU free for that
+checking.
+
+In a model's settings, **Speculative decoding → Suggest a draft model and
+device** does the matching (`scripts/draft_pick.py`):
+
+- **Drafts.** It reads the vocabulary of every model in your folders and keeps
+  the ones llama-server will accept: the same tokenizer, vocab sizes within
+  128 of each other, the same BOS and EOS tokens, and the same token text at
+  the ids it compares. Of those, models near a tenth of the big model's size
+  rank first; anything over 40% of its size is left out.
+- **Device.** From `llama-server --list-devices`, it picks the GPU with the
+  most free memory that the big model does not use and that holds the draft.
+  If the big model is not pinned to a device and there are several GPUs, it
+  pins the big model to the largest and drafts on another. With nowhere else
+  to go, the draft runs on the CPU (draft GPU layers 0).
+- **Use** fills in the draft model, `draft-simple`, the draft device and its
+  layers. Save, then load the model.
+
+From a terminal: `python scripts/draft_pick.py big.gguf --models-dir ~/models
+--server llama-server`.
+
+A draft on another computer works through RPC: list its `rpc-server` under
+Devices → RPC servers, then set the draft device to the RPC device that
+`--list-devices` shows. Only do this on a trusted network, because
+rpc-server has no authentication. Every drafted token crosses the network,
+so this pays off only on a fast link.
+
 ### An NVIDIA dGPU and an AMD iGPU in one laptop
 CUDA and ROCm cannot share a model, so:
 1. Build llama.cpp for **Vulkan** (Setup → Build llama.cpp → vulkan). Both
