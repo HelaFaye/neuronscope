@@ -53,6 +53,12 @@ def test_sidebar_groups():
                       "Studio": ["Features", "Review", "Lab"], "Connect": ["Apps", "Remote hosts", "Devices"]}
     for fn in ("nsSub", "nsGroupHref", "ns-fly"):                   # sibling tabs, last-used page, flyout
         assert fn in js
+    # the Godot client groups its tabs the same way (its 3D view is its own; Workers is web-only)
+    gd = (ROOT / "viz" / "godot" / "app.gd").read_text()
+    gd_groups = {g: re.findall(r'"([^"]+)"', body)
+                 for g, body in re.findall(r'"(\w+)": \[([^\]]*)\]', re.search(r"const GROUPS := \{(.*?)\}", gd).group(1))}
+    for g, kids in gd_groups.items():
+        assert g in groups and set(kids) - {"3D"} <= set(groups[g]), (g, kids)
     tour = re.findall(r"\{path:'([^']+)'", js)
     hrefs = {h.split("#")[0] or "/" for h in re.findall(r"href:'([^']+)'", js)}
     assert set(tour) <= hrefs                                         # the tour only stops on real pages

@@ -14,6 +14,7 @@ header h1{font-size:15px;margin:0}header .r{margin-left:auto;display:flex;gap:.4
 nav.tabs{display:flex;gap:.2rem;padding:.4rem 16px 0;border-bottom:1px solid var(--line);background:var(--panel);overflow-x:auto}
 nav.tabs button{border:none;border-bottom:2px solid transparent;border-radius:0;background:none;padding:.45rem .75rem;color:var(--mut);white-space:nowrap}
 nav.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+@media (max-width:600px){nav.tabs{flex-wrap:wrap;overflow-x:visible}nav.tabs button{padding:.4rem .55rem}}
 main{max-width:1280px;margin:0 auto;padding:1rem 16px 3rem}
 section[data-tab]{display:none;gap:1rem}section[data-tab].on{display:grid}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.9rem 1rem;min-width:0}
@@ -195,7 +196,7 @@ $$('nav.tabs button').forEach(b=>b.onclick=()=>tab(b.dataset.t));
 $('#labUrl').value=ls('ns-feat-lab')||'http://127.0.0.1:8090';
 $('#labUrl').onchange=()=>{ ls('ns-feat-lab',labUrl()); checkLab(); };
 async function checkLab(){ const p=$('#labpill');
-  try{ LAB=await api('/api/features/lab/info?lab='+encodeURIComponent(labUrl())); p.className='pill ok'; p.textContent=`lab: ${LAB.model.split('/').pop()} · ${LAB.device} ${LAB.dtype}`; p.title=`${LAB.model}, ${LAB.layers} layers`; }
+  try{ LAB=await api('/api/features/lab/info?lab='+encodeURIComponent(labUrl())); if(LAB.running===false) throw new Error(LAB.error||'not running'); p.className='pill ok'; p.textContent=`lab: ${LAB.model.split('/').pop()} · ${LAB.device} ${LAB.dtype}`; p.title=`${LAB.model}, ${LAB.layers} layers`; }
   catch(e){ LAB=null; p.className='pill off'; p.textContent='lab: not running'; p.title=e.message; } }
 $('#labStart').onclick=async()=>{ const models=[...new Set([...LIST.dicts,...LIST.acts,...LIST.emotions].map(d=>d.model).filter(Boolean))];
   const m=prompt('Model for the decoding lab (Hugging Face id or folder)'+(models.length?'\nUsed here before: '+models.join(', '):''),models[0]||''); if(!m) return;

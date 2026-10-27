@@ -14,6 +14,7 @@ affects your work:
 | projects: plan, approve, start, review results, answer questions | ✓ | ✓ `create-project`, `get-project`, `review-task`… | ✓ |
 | project requirements | ✓ | ✓ `project-requirements` | status and check |
 | neuron review | ✓ | ✓ `review-summary` | ✓ summary, and the 3D view natively |
+| features and emotions: train, read a reply, circuits, steer | ✓ | ✓ `list-features`; train with `start-job --kind feat_*` / `emo_*` | the list and the jobs; reading and steering open in the browser |
 | 3D views of replies and review periods | three.js in the browser | the link to the browser view | **native**: orbit, layer filter, F12 screenshots |
 | workspaces, models per subject, tool approval | ✓ (edit everything) | ✓ switch, pick, quick settings | ✓ switch, pick, quick settings |
 | setup: health check, requirements, build llama.cpp, restart | ✓ | ✓ `doctor`, `requirements`, `start-job --kind build_llama`, `restart` | ✓ |
@@ -56,11 +57,14 @@ NS_STUDIO=https://gpu-box:7870 NS_TOKEN=… godot --path viz/godot
 NS_API=http://127.0.0.1:7880 godot --path viz/godot res://main.tscn   # the 3D viewer alone (viz/bloom.py)
 ```
 
-Tabs: Connect, Chat, Models, Jobs, Projects, Review, 3D, Settings, Setup,
-Lab. Links in messages work as on the web pages: "Setup → Build llama.cpp"
-opens the build job, "Jobs → Evaluate" opens TestQA filled in for a model,
-and a checked reply's *open in 3D* switches to the 3D tab. The 3D tab:
+Tabs, grouped as in the web sidebar: Connect, Chat, Models, **Tasks** (Jobs,
+Projects), **Studio** (Features, Review, 3D, Lab), Settings, Setup.
+`NS_TAB` opens any of them, including a page inside a group. Links in
+messages work as on the web pages: "Setup → Build llama.cpp" opens the build
+job, "Jobs → Evaluate" opens TestQA filled in for a model, and a checked
+reply's *open in 3D* switches to the 3D tab. The 3D tab:
 - plays a checked reply token by token, or a review's periods frame by frame;
+- plays a decoding-lab recording with its emotion lanes and the features at each token;
 - **Layers** limits the view to a range of layers;
 - **Screenshot** or F12 saves a PNG under the app's user folder;
 - keys: Space play/pause, ←/→ step, N next flagged token.

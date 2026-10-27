@@ -3926,6 +3926,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "server": ex(STATE.get("server_bin") or ws.get("server")),
                                     "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
                                     "workspace": STATE.get("workspace_name"), "root": ws.get("root"),
+                                    "traces": STATE.get("traces_dir"),       # where the 3D views look
                                     "ggufs": [m["path"] for m in scan_models()][:200]})
         if runner is None and not self.path.startswith(("/api/jobs/targets", "/api/jobs/options")):
             return self._jobs_off()
@@ -3973,7 +3974,11 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/features/list":
                 return self._json(200, FA.list_all(root, extra))
             if route == "/api/features/lab/info":
-                return self._json(200, features_lab_call(arg("lab"), "info", None))
+                # a status probe: "not running" is an answer, not an error the browser logs
+                try:
+                    return self._json(200, {"running": True, **features_lab_call(arg("lab"), "info", None, timeout=5)})
+                except OSError as e:
+                    return self._json(200, {"running": False, "error": f"{type(e).__name__}: {e}"})
             p = FA.allowed(arg("path"), root, extra)
             if route == "/api/features/dict":
                 return self._json(200, FA.dictionary(p))
@@ -4644,7 +4649,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
             hub = lab_hub()
-            return self._json(200, {"services": hub.service_state(), "traces": hub.find_traces()})
+            return self._json(200, {"services": hub.service_state(),
+                                    "traces": hub.find_traces(extra=[STATE.get("traces_dir")])})
         if self.path in ("/setup", "/api/setup", "/api/hardware"):
             if not self._owner_only():
                 return

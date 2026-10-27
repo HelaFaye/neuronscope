@@ -91,7 +91,7 @@ Open Studio → **Remote** (*Remote* in the sidebar) → **Add a host**.
   streams as it does for any other model. Closing the chat (or pressing
   Stop) tells the host to stop at its next post, which stops generation.
   Agents older than this answer in one piece, which still works.
-- **Per host, on the Remote page:**
+- **Per host, on Connect → Remote hosts:**
   - *Host info*: OS, RAM, GPUs, LLM servers, folders, what is allowed;
   - *Models*: load and unload;
   - *Try a model*;

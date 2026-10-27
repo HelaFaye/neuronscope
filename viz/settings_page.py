@@ -117,7 +117,7 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
 <h3>Connected tools</h3><div id="tlist" class="note"></div></section>
 <section class="card" id="plugins"><h2>Plugins</h2>
 <div class="note">A plugin is a folder with a <code>plugin.json</code>. It can add jobs, checks under chat replies, a page of its own and MCP tools. <b>Plugins run code on this computer</b>, so none is used until you turn it on. If a plugin's files change after that, it turns itself off until you look at it again. See docs/PLUGINS.md to write one.</div>
-<div id="plDirs" class="note"></div><table id="plList"></table><div id="plMsg" class="note"></div></section>
+<div id="plDirs" class="note"></div><div style="overflow-x:auto"><table id="plList"></table></div><div id="plMsg" class="note"></div></section>
 
 <section class="card" id="sharing"><h2>Sharing results</h2>
 <div class="note"><b>Off unless you turn it on.</b> When on, TestQA results can be sent to a scoreboard you name, so models can be compared across machines and setups. NeuronScope runs no scoreboard of its own; anyone can host <code>scripts/scoreboard_server.py</code>.</div>

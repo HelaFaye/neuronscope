@@ -39,7 +39,7 @@ NeuronScope has three MCP pieces. Pick by what should control what:
 
 **B. Another computer's LLMs for an agent app**
 1. On the computer with the models (the *host*), run NeuronScope Remote
-   (Studio → Remote → *Download NeuronScope Remote*, or copy `remote/`).
+   (Studio → Connect → Remote hosts → *Download NeuronScope Remote*, or copy `remote/`).
    Python 3.9+, nothing else.
 2. On the computer with the agent app (the *controller*), pair it once:
    `python -m neuronscope_remote add-host nsr://…` with the pairing link the
@@ -91,7 +91,7 @@ compare yours (`model_stats` shows the results to an agent).
       "disabled": false,
       "autoApprove": ["studio_status", "list_models", "route_prompt", "model_stats", "devices", "doctor",
                       "job_kinds", "job_status", "job_log", "list_projects", "get_project", "list_traces",
-                      "requirements", "project_requirements", "review_sources",
+                      "list_features", "requirements", "project_requirements", "review_sources",
                       "review_summary"]
     }
   }
@@ -181,6 +181,7 @@ HTTP) or start `scripts/ns_mcp.py` (stdio).
 | `decide_proposal` | changes state | Accept or reject a change the director proposed. |
 | `answer_task` | changes state | Answer a blocked task's questions; it goes back in the queue. |
 | `list_traces` | reads | Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/. |
+| `list_features` | reads | Feature dictionaries, emotion vectors, recorded activations and attribution graphs in the workspace, with their checks. |
 | `requirements` | reads | What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), what is missing and the fix for this OS. |
 | `project_requirements` | reads | Check a project's own requirements (toolchain, libraries, packages, hardware, features, notes) on this machine. |
 | `set_project_requirements` | changes state | Replace a project's requirement list. |

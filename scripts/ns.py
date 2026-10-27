@@ -90,6 +90,19 @@ def show(name: str, out) -> None:
         for p in out.get("projects", []):
             print(f"{p['id']}  {p['status']:<9} {p['title']}")
         return
+    if name == "list_features" and isinstance(out, dict):
+        for d in out.get("dicts", []):
+            kept = f" · keeps {d['recovered']:.0%}" if d.get("recovered") is not None else ""
+            print(f"dictionary  {d['name']:<24} {d.get('arch') or ''} {d.get('site')}.{d.get('layer')} "
+                  f"{d.get('n_features')} features{kept}" + ("" if d.get("interpreted") else " · not described"))
+        for e in out.get("emotions", []):
+            acc = f" · {e['best_accuracy']:.0%} at layer {e.get('best_layer')}" if e.get("best_accuracy") is not None else ""
+            print(f"emotions    {e['name']:<24} {e.get('n')} emotions{acc}")
+        for g in out.get("graphs", []):
+            print(f"graph       {g['name']:<24} {(g.get('prompt') or '')[:60]}")
+        if not any(out.get(k) for k in ("dicts", "emotions", "graphs")):
+            print("none yet: start-job --kind feat_collect, then feat_train (docs/FEATURES.md)")
+        return
     if name == "chat" and isinstance(out, dict):
         print(out.get("reply", ""))
         return

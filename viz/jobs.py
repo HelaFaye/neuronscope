@@ -137,7 +137,8 @@ SPECS: dict[str, dict] = {
             F("watch_sae", repeat=True, help="feature dictionary folder: the top features per token"),
             F("publish", help="live viewer to stream those to as tokens are generated, e.g. http://127.0.0.1:7890"),
             F("publish_token_file", help="the viewer's access token, if it has one"),
-            F("record", help="save each reply as a trace session for the 3D replay and Godot, e.g. runs/traces")]},
+            F("record", help="save each reply as a trace session for the 3D views. Studio fills in its own traces "
+                             "folder, which the Lab's Replay and Godot's 3D tab list")]},
     "rp_fit": {
         "title": "Random-projection steering: fit", "group": "Evaluate", "argv": [S / "rp_steer.py", "fit"],
         "help": "Project layers' MLP outputs to a few dozen random dimensions and find the direction that separates "
@@ -1102,10 +1103,11 @@ function suggest(f){ const h=(f.help||'').toLowerCase();
   if(f.name==='binary'||f.name==='cett') return DEF.cett;
   if(f.name==='server'&&h.includes('llama-server')) return DEF.server;
   if(f.name==='llama') return DEF.llama;
+  if(f.name==='record'&&h.includes('trace session')) return DEF.traces;
   return null; }
 // Fields that name a file or folder get Browse…; GGUF fields also a list of the models Studio knows.
 const PICK={gguf:'file',from:'file',imatrix:'file',testqa:'file',file:'file',server:'file',binary:'file',cett:'file',classifier:'file',predictions:'file',reply_file:'file',h_neurons:'file',
-  llama:'dir',cache:'dir',out:'any',dataset:'any',data:'any',results:'any',report:'any',traces:'any',state:'any',session:'any',reference:'any',
+  llama:'dir',cache:'dir',record:'dir',watch_emotions:'dir',out:'any',dataset:'any',data:'any',results:'any',report:'any',traces:'any',state:'any',session:'any',reference:'any',
   model:'any',base:'any',teacher:'any',student:'any',review_model:'any'};
 function pickFor(f){ const w=PICK[f.name]; if(!w||f.multi||f.choices) return '';
   return ` data-pick="${w}"`+(f.name==='gguf'?' data-ext="gguf" list="dl-ggufs"':''); }

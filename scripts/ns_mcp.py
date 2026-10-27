@@ -268,6 +268,11 @@ TOOLS = [
      _pact("answer")),
     ("list_traces", "Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/.", _s({}), READ,
      lambda st, a: st.call("GET", "/api/traces")),
+    ("list_features", "Feature dictionaries (sparse autoencoders and transcoders), emotion vectors, recorded "
+     "activations and attribution graphs in the workspace, with their checks (how much of the model's behaviour a "
+     "dictionary keeps, how accurately the emotion vectors classify). Make them with start_job kinds feat_* and "
+     "emo_*; read replies, trace and steer on Studio's /features page.", _s({}), READ,
+     lambda st, a: st.call("GET", "/api/features/list")),
     ("requirements", "What each NeuronScope feature needs (Python packages, programs, llama.cpp builds and their GPU "
      "backends, drivers, device access, memory) and what this machine is missing, with the fix for its OS. "
      "Install a missing Python package with start_job kind 'install_package'.",

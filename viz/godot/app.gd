@@ -8,7 +8,7 @@ extends Control
 ##
 ##   godot --path viz/godot                                   # pick or add a Studio under Connect
 ##   NS_STUDIO=https://gpu-box:7870 NS_TOKEN=… godot --path viz/godot
-##   NS_TAB=Review godot --path viz/godot                       # open on a tab
+##   NS_TAB=Review godot --path viz/godot                       # open on a tab (or a page inside a group)
 ##   NS_SHOTS=/tmp/shots NS_STUDIO=… godot --path viz/godot     # screenshot every tab, then quit
 ##
 ## Beyond the web pages: the 3D view is native (orbit, layer filter, F12
@@ -36,7 +36,9 @@ const LINKS := [
 	["Studio\\s*(->|→)\\s*Models", "tab:Models"],
 	["Studio\\s*(->|→)\\s*Tools", "web:/#tools"],
 ]
-const OWNER_TABS := ["Jobs", "Projects", "Review", "Settings", "Setup", "Lab"]
+const OWNER_TABS := ["Jobs", "Projects", "Review", "Features", "Settings", "Setup", "Lab"]
+# Tabs grouped as in the web sidebar: each group is one tab holding its pages as sub-tabs.
+const GROUPS := {"Tasks": ["Jobs", "Projects"], "Studio": ["Features", "Review", "3D", "Lab"]}
 
 var studio: StudioClient
 var tabs: TabContainer
@@ -46,6 +48,7 @@ var specs: Dictionary = {}
 var job_defaults: Dictionary = {}
 var models: Array = []
 var pages: Dictionary = {}          # tab name -> its root container
+var groups: Dictionary = {}         # group name -> its TabContainer
 var ui: Dictionary = {}             # named widgets
 
 
@@ -71,11 +74,12 @@ func _ready() -> void:
 	_build_models()
 	_build_jobs()
 	_build_projects()
+	_build_features()
 	_build_review()
 	_build_3d()
+	_build_lab()
 	_build_settings()
 	_build_setup()
-	_build_lab()
 	tabs.tab_changed.connect(_on_tab)
 	_auto_connect()
 
@@ -98,9 +102,35 @@ func _page(name: String, scroll := true) -> VBoxContainer:
 	else:
 		box.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		m.add_child(box)
-	tabs.add_child(m)
+	_parent_for(name).add_child(m)
 	pages[name] = box
 	return box
+
+
+## The container a page goes in: its group's sub-tabs, or the top row.
+func _parent_for(name: String) -> TabContainer:
+	for g in GROUPS:
+		if name in GROUPS[g]:
+			if not groups.has(g):
+				var t := TabContainer.new()
+				t.name = g
+				t.size_flags_vertical = Control.SIZE_EXPAND_FILL
+				t.tab_changed.connect(func(_i):
+					if tabs.get_current_tab_control() == t:
+						_on_tab(tabs.current_tab))
+				tabs.add_child(t)
+				groups[g] = t
+			return groups[g]
+	return tabs
+
+
+## The page showing under top tab i (a group shows its current sub-tab).
+func _page_name(i: int) -> String:
+	var t := tabs.get_tab_title(i)
+	if groups.has(t):
+		var g: TabContainer = groups[t]
+		return g.get_tab_title(g.current_tab)
+	return t
 
 
 func _h(text: String, size := 17) -> Label:
@@ -228,6 +258,13 @@ func _go(tab: String) -> void:
 		if tabs.get_tab_title(i) == tab:
 			tabs.current_tab = i
 			return
+	for g in groups:
+		var gc: TabContainer = groups[g]
+		for j in gc.get_tab_count():
+			if gc.get_tab_title(j) == tab:
+				gc.current_tab = j          # first, so the group opens on this page
+				_go(g)
+				return
 
 
 # ---------------------------------------------------------------- header + connect
@@ -351,17 +388,29 @@ func _on_connection() -> void:
 		var st := studio.status
 		conn_label.text = "%s · %s · model: %s · workspace %s" % [studio.base, studio.role,
 			str(st.get("id")) if st.get("id") else "none loaded", str(st.get("workspace", "?"))]
+	var device := studio.role == "device"
+	for g in groups:
+		var gc: TabContainer = groups[g]
+		for j in gc.get_tab_count():
+			gc.set_tab_disabled(j, device and gc.get_tab_title(j) in OWNER_TABS)
+		if gc.is_tab_disabled(gc.current_tab):
+			for j in gc.get_tab_count():
+				if not gc.is_tab_disabled(j):
+					gc.current_tab = j
+					break
 	for i in tabs.get_tab_count():
 		var t := tabs.get_tab_title(i)
-		tabs.set_tab_disabled(i, studio.role == "" and t != "Connect" or (studio.role == "device" and t in OWNER_TABS))
+		var owner_only: bool = t in OWNER_TABS or (groups.has(t) and GROUPS[t].all(func(p): return p in OWNER_TABS))
+		tabs.set_tab_disabled(i, studio.role == "" and t != "Connect" or (device and owner_only))
 	if studio.role != "":
 		_load_models()
 		studio.get_json("/api/jobs/defaults", func(c, d): job_defaults = d if c == 200 else {})
 
 
 func _on_tab(i: int) -> void:
-	match tabs.get_tab_title(i):
+	match _page_name(i):
 		"Models": _load_models()
+		"Features": _load_features()
 		"Jobs": _load_jobs()
 		"Projects": _load_projects()
 		"Review": _load_review()
@@ -623,6 +672,8 @@ func _suggest(f: Dictionary) -> String:
 		return str(job_defaults.server)
 	if f.name == "llama" and job_defaults.get("llama"):
 		return str(job_defaults.llama)
+	if f.name == "record" and "trace session" in h and job_defaults.get("traces"):
+		return str(job_defaults.traces)
 	return ""
 
 
@@ -782,6 +833,63 @@ func _show_project() -> void:
 
 # ---------------------------------------------------------------- review
 
+func _build_features() -> void:
+	var v := _page("Features")
+	v.add_child(_note("Feature dictionaries and emotion vectors found in the workspace. Reading, circuits and steering "
+		+ "open in the browser; replies the decoding lab recorded with --watch-* play in Studio -> 3D with their "
+		+ "emotion lanes and features."))
+	v.add_child(_row([_btn("Record activations", func(): _open_job("feat_collect", {})),
+		_btn("Train a dictionary", func(): _open_job("feat_train", {})),
+		_btn("Build emotion vectors", func(): _open_job("emo_build", {})),
+		_btn("Decoding lab", func(): _open_job("decode_lab", {})),
+		_btn("Open Features", func(): OS.shell_open(studio.base + "/features"))]))
+	ui.featlist = VBoxContainer.new()
+	v.add_child(ui.featlist)
+
+
+## JSON numbers arrive as floats: 12.0 -> "12".
+func _num(v) -> String:
+	if v == null:
+		return "?"
+	if (typeof(v) == TYPE_FLOAT) and v == floor(v):
+		return str(int(v))
+	return str(v)
+
+
+func _load_features() -> void:
+	studio.get_json("/api/features/list", func(c, d):
+		for ch in ui.featlist.get_children():
+			ch.queue_free()
+		if c != 200:
+			ui.featlist.add_child(_note(_err(str(d.get("error", c)))))
+			return
+		var dc := _card(ui.featlist, "Dictionaries (%d)" % d.dicts.size())
+		if d.dicts.is_empty():
+			dc.add_child(_note("None yet: record activations, then train one."))
+		for x in d.dicts:
+			var stats := "%s · %s %s.%s · %s features" % [_esc(str(x.get("model", "?")).get_file()), str(x.get("arch", "")),
+				str(x.get("site", "")), _num(x.get("layer")), _num(x.get("n_features"))]
+			if x.get("recovered") != null:
+				stats += " · recovers %d%%" % int(round(float(x.recovered) * 100))
+			if not x.get("interpreted"):
+				stats += " · not described yet"
+			var path: String = x.path
+			dc.add_child(_row([_h(str(x.name), 14), _note(stats),
+				_btn("Open", func(): OS.shell_open(studio.base + "/features#dicts?path=" + path.uri_encode()))]))
+		var ec := _card(ui.featlist, "Emotion vectors (%d)" % d.emotions.size())
+		if d.emotions.is_empty():
+			ec.add_child(_note("None yet: write stories (Jobs -> Interpret), then build the vectors."))
+		for x in d.emotions:
+			var acc := "" if x.get("best_accuracy") == null else " · best layer %s, %d%% accurate" % [_num(x.best_layer), int(round(float(x.best_accuracy) * 100))]
+			ec.add_child(_row([_h(str(x.name), 14), _note("%s · %s emotions%s" % [_esc(str(x.get("model", "?")).get_file()), _num(x.get("n")), acc]),
+				_btn("Open", func(): OS.shell_open(studio.base + "/features#emotions"))]))
+		if not d.graphs.is_empty():
+			var gc := _card(ui.featlist, "Graphs (%d)" % d.graphs.size())
+			for x in d.graphs:
+				gc.add_child(_row([_h(str(x.name), 14), _note(_esc(str(x.get("prompt", "")).left(80))),
+					_btn("Open", func(): OS.shell_open(studio.base + "/features#circuits"))])))
+
+
 func _build_review() -> void:
 	var v := _page("Review")
 	var c := _card(v, "Neuron review")
@@ -848,7 +956,7 @@ func _build_3d() -> void:
 	var m := MarginContainer.new()
 	m.name = "3D"
 	m.add_theme_constant_override("margin_left", 10)
-	tabs.add_child(m)
+	_parent_for("3D").add_child(m)
 	var h := HBoxContainer.new()
 	m.add_child(h)
 	var side := VBoxContainer.new()
@@ -859,7 +967,7 @@ func _build_3d() -> void:
 	ui.traces.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	ui.traces.item_activated.connect(func(i): _open_3d(studio.base + "/viz/%s/" % ui.traces.get_item_metadata(i)))
 	side.add_child(ui.traces)
-	side.add_child(_note("Double-click a checked reply. Review views open from the Review tab."))
+	side.add_child(_note("Double-click a checked reply or a decoding-lab recording. Review views open from Studio -> Review."))
 	side.add_child(_h("Layers", 13))
 	ui.lo = SpinBox.new()
 	ui.hi = SpinBox.new()
@@ -1075,11 +1183,21 @@ func _load_lab() -> void:
 func _capture_all(dir: String) -> void:
 	DirAccess.make_dir_recursive_absolute(dir)
 	var v3d := OS.get_environment("NS_SHOT_3D")
+	var all: Array = []
 	for i in tabs.get_tab_count():
-		var t := tabs.get_tab_title(i)
+		var top := tabs.get_tab_title(i)
 		if tabs.is_tab_disabled(i):
 			continue
-		tabs.current_tab = i
+		if groups.has(top):
+			var gc: TabContainer = groups[top]
+			for j in gc.get_tab_count():
+				if not gc.is_tab_disabled(j):
+					all.append(gc.get_tab_title(j))
+		else:
+			all.append(top)
+	for i in all.size():
+		var t: String = all[i]
+		_go(t)
 		if t == "3D" and v3d != "":
 			viz.open(v3d, studio.token)
 			var w := OS.get_environment("NS_SHOT_WAIT")
@@ -1096,5 +1214,5 @@ func _capture_all(dir: String) -> void:
 
 
 func _unhandled_input(e: InputEvent) -> void:
-	if e is InputEventKey and e.pressed and e.keycode == KEY_F12 and viz and tabs.get_tab_title(tabs.current_tab) == "3D":
+	if e is InputEventKey and e.pressed and e.keycode == KEY_F12 and viz and _page_name(tabs.current_tab) == "3D":
 		ui.shot.text = viz.screenshot()

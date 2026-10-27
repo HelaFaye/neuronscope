@@ -3,7 +3,7 @@
 Device pairing and linked hosts: use one machine's models from another
 (LM Link-style), without sharing the master token.
 
-On the host, the owner creates a one-time pairing code (Studio: Link page, or
+On the host, the owner creates a one-time pairing code (Studio: Connect → Devices, or
 `POST /api/pair/start`). It is shown as a link:
 
     https://studio.lan:7870/pair#c=K7QX-M2PA-9DTE&fp=3f9a…   (single use, short-lived)

@@ -127,14 +127,16 @@ def declare(root, py):
 TRACE_DIRS = ["~/.neuronscope/traces", "runs", "runs/traces"]     # runs/traces: the decoding lab's --record
 
 
-def find_traces(limit=200):
+def find_traces(limit=200, extra=()):
     """Trace sessions for the Replay picker: Studio's per-reply checks,
-    scripts/trace_sample.py output and decoding-lab recordings, newest first."""
-    out = []
-    for base in TRACE_DIRS:
-        base = os.path.join(STATE["root"], os.path.expanduser(base))
-        if not os.path.isdir(base):
+    scripts/trace_sample.py output and decoding-lab recordings, newest first.
+    extra: more folders, e.g. the running Studio's traces folder."""
+    out, seen = [], set()
+    for base in [*TRACE_DIRS, *(x for x in extra if x)]:
+        base = os.path.realpath(os.path.join(STATE["root"], os.path.expanduser(base)))
+        if not os.path.isdir(base) or base in seen:
             continue
+        seen.add(base)
         for name in os.listdir(base):
             d = os.path.join(base, name)
             try:
