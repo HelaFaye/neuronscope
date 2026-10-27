@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "viz"))
 sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "scripts"))
 import addons as A  # noqa: E402
 import plugins as PL  # noqa: E402
 from test_studio import studio_srv  # noqa: E402,F401
@@ -89,13 +90,25 @@ def test_builtins_block_routes_and_jobs():
     b.set("retraining", False)
     assert b.blocks("/features") == "features" and b.blocks("/api/features/list?x=1") == "features"
     assert b.blocks("/featuresX") is None and b.blocks("/graphs") is None
-    assert b.job_hidden("feat_train", {"group": "Interpret"}) and b.job_hidden("decode_lab", {"group": "Evaluate"})
+    assert b.job_hidden("feat_train", {"group": "Interpret"}) and not b.job_hidden("decode_lab", {"group": "Evaluate"})
     assert b.job_hidden("finetune", {"group": "Retrain"}) and not b.job_hidden("testqa", {"group": "Evaluate"})
     assert "/features" in b.nav_off()
     b.set("features", True)
     assert b.blocks("/features") is None
     with pytest.raises(A.AddonError):
         b.set("chat", False)                                            # not removable
+    for core in ("remote", "devices", "vision", "transfer"):            # part of the core: always there
+        assert core not in A.BUILTIN
+    assert not b.job_hidden("clip_collect", {"group": "Vision"})
+    # features needs the decoding lab: removing the lab alone is refused, with_dependents takes both
+    b.set("features", True)
+    with pytest.raises(A.AddonError):
+        b.set("decoding_lab", False)
+    assert set(b.set("decoding_lab", False, with_dependents=True)) == {"decoding_lab", "features"}
+    assert b.node_hidden("emotion_screen") and b.job_hidden("decode_lab", {"group": "Evaluate"})
+    assert set(b.set("features", True)) == {"features", "decoding_lab"}  # reinstalling brings back what it needs
+    b.set("labs", False)
+    assert b.service_hidden("live") and not b.service_hidden("transfer")
 
 
 def _post(base, path, body, ctype="application/json"):
@@ -133,6 +146,14 @@ def test_studio_addons(studio_srv, tmp_path):  # noqa: F811
         assert "/graphs" in json.loads(_get(studio_srv, "/api/addons/nav")[1])["off"]
         _post(studio_srv, "/api/addons/builtin", {"name": "features", "installed": False})
         assert "feat_train" not in jobs.all_specs()
+        assert _post(studio_srv, "/api/addons/builtin", {"name": "decoding_lab", "installed": False})[0] == 200
+        assert "decode_lab" not in jobs.all_specs()
+        _post(studio_srv, "/api/addons/builtin", {"name": "graphs", "installed": True})
+        assert not any(t["name"] == "emotion_screen" for t in json.loads(_get(studio_srv, "/api/graphs")[1])["types"])
+        _post(studio_srv, "/api/addons/builtin", {"name": "labs", "installed": False})
+        lab = json.loads(_get(studio_srv, "/api/lab")[1])["services"]
+        assert "transfer" in lab and "live" not in lab
+        _post(studio_srv, "/api/addons/builtin", {"name": "labs", "installed": True})
         _post(studio_srv, "/api/addons/builtin", {"name": "features", "installed": True})
         _post(studio_srv, "/api/addons/builtin", {"name": "graphs", "installed": True})
         assert _get(studio_srv, "/api/graphs")[0] == 200 and "feat_train" in jobs.all_specs()
@@ -173,3 +194,54 @@ def test_comfyui_addon_files():
     assert set(NN.NODE_CLASS_MAPPINGS) == {"NeuronScopeChat", "NeuronScopeCheck", "NeuronScopeGraph"}
     for c in NN.NODE_CLASS_MAPPINGS.values():
         assert c.INPUT_TYPES()["required"] and c.FUNCTION == "run"
+
+
+def test_default_addons(studio_srv, tmp_path):  # noqa: F811
+    """Add-ons that ship with NeuronScope and are on unless turned off: the Godot client, jewel styles,
+    the theme pack and the graph screens. ComfyUI ships too but waits to be turned on."""
+    import studio
+    import graph_engine as G
+    studio.STATE["plugin_dirs"] = [str(tmp_path / "plugins"), str(ROOT / "plugins")]
+    studio.STATE.pop("plugins", None)
+    studio.STATE["config_path"] = str(tmp_path / "config.json")
+    try:
+        pk = {p["name"]: p for p in json.loads(_get(studio_srv, "/api/addons")[1])["packages"]}
+        for name in ("godot-client", "jewel-styles", "theme-pack", "graph-screens"):
+            assert pk[name]["status"] == "on" and pk[name]["default"], name
+        assert pk["comfyui"]["status"] == "off" and pk["claim-spotter"]["status"] == "off"
+        # the Godot client: a tab, its jobs, and a download for another computer
+        nav = json.loads(_get(studio_srv, "/api/addons/nav")[1])
+        assert any(t["href"] == "/plugins/godot-client/" for t in nav["tabs"])
+        with urllib.request.urlopen(studio_srv + "/plugins/godot-client/download/neuronscope-godot.zip", timeout=20) as r:
+            z = zipfile.ZipFile(io.BytesIO(r.read()))
+        names = z.namelist()
+        assert "neuronscope-godot/project.godot" in names and "neuronscope-godot/widgets/jewel.gd" in names
+        assert not any("/.godot/" in n for n in names)
+        # the theme pack's themes are listed while it is on
+        assert "arcade" in json.loads(_get(studio_srv, "/api/themes")[1])["themes"]
+        # graph screens from the node pack
+        cat = json.loads(_get(studio_srv, "/api/graphs")[1])
+        assert {"plugin:graph-screens:code_security", "plugin:graph-screens:injection_screen"} <= {t["name"] for t in cat["types"]}
+        g = {"nodes": [{"id": "in", "type": "input", "params": {}}, {"id": "s", "type": "plugin:graph-screens:code_security",
+                                                                     "params": {"fail_on": "medium"}},
+                       {"id": "o", "type": "output", "params": {"name": "bad"}}],
+             "edges": [{"from": ["in", "value"], "to": ["s", "code"]}, {"from": ["s", "fail"], "to": ["o", "value"]}]}
+        r = G.Runner(g, G.Env(policy=None)).start({"input": "requests.get(u, verify=False)"})
+        assert "certificate checks" in r["outputs"]["bad"]
+        # turning a default add-on off sticks, and its parts go
+        assert _post(studio_srv, "/api/plugins/enable", {"name": "theme-pack", "on": False})[0] == 200
+        assert "arcade" not in json.loads(_get(studio_srv, "/api/themes")[1])["themes"]
+        assert _post(studio_srv, "/api/plugins/enable", {"name": "theme-pack", "on": True})[0] == 200
+        assert "arcade" in json.loads(_get(studio_srv, "/api/themes")[1])["themes"]
+    finally:
+        studio.STATE.pop("plugin_dirs", None)
+        studio.STATE.pop("plugins", None)
+
+
+def test_godot_client_jobs():
+    import subprocess
+    m = PL.read_manifest(ROOT / "plugins" / "godot-client")
+    for j in m["jobs"]:
+        out = subprocess.run([sys.executable, str(ROOT / "plugins" / "godot-client" / j["script"]), "--help"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0 and all("--" + f["name"] in out.stdout for f in j["fields"])

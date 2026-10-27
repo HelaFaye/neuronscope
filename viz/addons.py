@@ -4,10 +4,11 @@ Add-ons: Studio's optional parts, and plugins installed from a package file or a
 
 Two kinds:
 
-  built-in  parts of Studio that not everyone needs (features and emotions, graphs, neuron review,
-            projects, remote hosts, labs, …). Removing one takes away its pages, API routes, jobs and
-            sidebar entries; reinstalling brings them back. Their code stays in the checkout, so a
-            reinstall needs no download.
+  built-in  parts of Studio that not everyone needs (the decoding lab, features and emotions, graphs,
+            neuron review, projects, labs, retraining, …). Removing one takes away its pages, API routes,
+            jobs, lab services, graph nodes and sidebar entries; reinstalling brings them back. Their code
+            stays in the checkout, so a reinstall needs no download. Vision, remote hosts, model transfer
+            and device pairing are part of the core and stay.
   packaged  plugins (viz/plugins.py): a folder with plugin.json, installed from a .zip (a file you
             have, or one listed in a repository index), updated, and uninstalled. A newly installed or
             updated add-on is off until the owner reviews and turns it on, as with any plugin.
@@ -45,39 +46,50 @@ MAX_PACKAGE = 200 * 1024 * 1024
 MAX_FILES = 5000
 
 # Each built-in add-on: what it brings, so removing it can take exactly that away.
-#   paths: URL path prefixes (pages and API); nav: sidebar hrefs; jobs: job kinds or groups ("group:Retrain")
+#   paths: URL path prefixes (pages and API); nav: sidebar hrefs; jobs: job kinds or groups ("group:Retrain");
+#   services: lab hub services (viz/hub.py); nodes: graph node types; requires: add-ons it needs;
+#   needs: Python packages it uses (shown, so you know what removing it saves)
+# Not here, so always present: chat, models, jobs, settings, setup, permissions, help, vision, remote hosts,
+# model transfer and device pairing.
 BUILTIN = {
-    "features": {"title": "Features and emotions", "desc": "Feature dictionaries (SAEs and transcoders), reading replies, "
-                 "attribution graphs, emotion vectors and steering, with the decoding lab.",
-                 "paths": ["/features", "/api/features/"], "nav": ["/features"], "jobs": ["group:Interpret", "decode_lab"],
-                 "docs": "FEATURES.md"},
+    "decoding_lab": {"title": "Decoding lab", "desc": "A Hugging Face model behind an OpenAI-compatible API with "
+                     "decoding variants (SLED, steering, random projections), the logit lens, and live watching of "
+                     "neurons, emotions and features.", "jobs": ["decode_lab", "rp_fit", "rp_export", "logit_lens"],
+                     "needs": ["torch", "transformers"], "docs": "DECODING.md"},
+    "features": {"title": "Features and emotions", "desc": "Feature dictionaries (SAEs and transcoders), reading "
+                 "replies, attribution graphs, emotion vectors and steering.",
+                 "paths": ["/features", "/api/features/"], "nav": ["/features"], "jobs": ["group:Interpret"],
+                 "nodes": ["emotion_screen", "feature_screen"], "requires": ["decoding_lab"],
+                 "needs": ["torch", "transformers"], "docs": "FEATURES.md"},
     "graphs": {"title": "Graphs", "desc": "Node graphs that screen, verify and route model inputs and outputs.",
                "paths": ["/graphs", "/api/graphs"], "nav": ["/graphs"], "docs": "GRAPHS.md"},
     "review": {"title": "Neuron review", "desc": "How neurons behave across tests and checked replies, by subject and "
                "over time.", "paths": ["/review", "/api/review"], "nav": ["/review"], "jobs": ["group:Review"],
-               "docs": "REVIEW.md"},
+               "requires": ["hneurons"], "docs": "REVIEW.md"},
     "projects": {"title": "Projects and workers", "desc": "The director: plans from a description, worker models, "
                  "reviews and verification graphs.", "paths": ["/projects", "/api/projects", "/workers", "/api/workers"],
                  "nav": ["/projects", "/workers"], "docs": "DIRECTOR.md"},
-    "remote": {"title": "Remote hosts", "desc": "Models on computers running NeuronScope Remote, LM Studio or Ollama.",
-               "paths": ["/remote", "/api/remote"], "nav": ["/remote"], "docs": "REMOTE.md"},
-    "devices": {"title": "Device pairing", "desc": "Pair phones and other computers with a link; linked Studios.",
-                "paths": ["/link", "/api/pair/", "/api/devices", "/api/links/"], "nav": ["/link"], "docs": "ROLES.md"},
-    "labs": {"title": "Labs and 3D views", "desc": "The lab hub: live activations, the 3D replay, quantization, sweeps "
-             "and transfer labs.", "paths": ["/lab", "/api/lab"], "nav": ["/lab"], "jobs": ["group:Views"],
-             "docs": "LABS.md"},
+    "labs": {"title": "Labs and 3D views", "desc": "The live activation viewer, the 3D replay, the pipeline dashboard, "
+             "and the quantization and sweep labs (the transfer lab stays).",
+             "services": ["live", "replay", "pipeline", "quant_lab", "scale_sweep", "adaptive_tuning"],
+             "jobs": ["group:Views"], "docs": "LABS.md"},
     "documents": {"title": "Documents (RAG)", "desc": "Document collections for chat and graphs.",
-                  "paths": ["/api/rag"], "nav": ["/#docs"], "docs": "STUDIO.md"},
-    "system": {"title": "System monitor and automation", "desc": "What is running, hardware monitor, power and "
-               "activity rules.", "paths": ["/system", "/api/system", "/api/automation"], "nav": ["/system"],
-               "docs": "SYSTEM.md"},
-    "retraining": {"title": "Retraining", "desc": "Deficit datasets, fine-tuning, retrain cycles, concept edits and "
-                   "merges.", "jobs": ["group:Retrain", "group:Merge"], "docs": "RETRAINING.md"},
-    "benchmarks": {"title": "Benchmarks", "desc": "SWE-bench, LiveBench, quantization selection and CLIP benchmarks.",
-                   "jobs": ["group:Benchmarks"], "docs": "BENCHMARKS.md"},
+                  "paths": ["/api/rag"], "nav": ["/#docs"], "nodes": ["rag_search", "grounding"], "docs": "STUDIO.md"},
+    "system": {"title": "System monitor", "desc": "What is running, restarting any part, and the hardware monitor.",
+               "paths": ["/system", "/api/system"], "nav": ["/system"], "docs": "SYSTEM.md"},
+    "automation": {"title": "Automation and Home Assistant", "desc": "Power and activity rules, and the Home "
+                   "Assistant connection.", "paths": ["/api/automation"], "docs": "SYSTEM.md"},
+    "retraining": {"title": "Retraining", "desc": "Deficit datasets, fine-tuning (SFT, DPO, QLoRA), retrain cycles, "
+                   "concept edits and merges.", "jobs": ["group:Retrain", "group:Merge"],
+                   "needs": ["torch", "transformers", "peft", "trl", "bitsandbytes"], "docs": "RETRAINING.md"},
+    "benchmarks": {"title": "SWE-bench and LiveBench", "desc": "SWE-bench predictions, the Docker evaluation harness, "
+                   "training data from it, and LiveBench.",
+                   "jobs": ["swe_predict", "swe_evaluate", "swe_import", "swe_train", "livebench"],
+                   "needs": ["datasets", "swebench", "docker"], "docs": "BENCHMARKS.md"},
     "hneurons": {"title": "H-Neuron pipeline", "desc": "Collect, label, extract, classify, tune and export "
-                 "hallucination neurons; vision and analysis jobs.",
-                 "jobs": ["group:H-Neurons", "group:Vision", "group:Analysis", "group:Tuning"], "docs": "PIPELINE.md"},
+                 "hallucination neurons; analysis and tuning jobs; the hallucination check node.",
+                 "jobs": ["group:H-Neurons", "group:Analysis", "group:Tuning"], "nodes": ["hallucination_check"],
+                 "docs": "PIPELINE.md"},
     "sharing": {"title": "Sharing results", "desc": "Publish model results to a scoreboard.",
                 "paths": ["/api/settings/sharing"], "docs": "SHARING.md"},
 }
@@ -98,12 +110,47 @@ class Builtins:
     def off(self) -> set:
         return {x for x in self._load() or [] if x in BUILTIN}
 
-    def set(self, name: str, installed: bool) -> None:
+    def set(self, name: str, installed: bool, with_dependents: bool = False) -> list:
+        """Remove or reinstall one. Removing an add-on others need is refused unless with_dependents, which
+        removes them too; reinstalling brings back what it needs. -> every add-on changed."""
         if name not in BUILTIN:
             raise AddonError(f"no built-in add-on {name!r}")
         off = self.off()
-        (off.discard if installed else off.add)(name)
+        if installed:
+            todo, changed = [name], []
+            while todo:                                    # it and everything it needs
+                n = todo.pop()
+                if n in off:
+                    off.discard(n)
+                    changed.append(n)
+                todo += BUILTIN[n].get("requires", [])
+        else:
+            deps = self.dependents(name) - off
+            if deps and not with_dependents:
+                raise AddonError(f"{', '.join(BUILTIN[d]['title'] for d in sorted(deps))} need"
+                                 f"{'s' if len(deps) == 1 else ''} {BUILTIN[name]['title']}: remove "
+                                 f"{'it' if len(deps) == 1 else 'them'} too, or keep it")
+            changed = [n for n in [name, *sorted(deps)] if n not in off]
+            off.update(changed)
         self._save(sorted(off))
+        return changed
+
+    def dependents(self, name: str) -> set:
+        """Every add-on that needs this one, directly or not."""
+        out, todo = set(), [name]
+        while todo:
+            n = todo.pop()
+            for k, v in BUILTIN.items():
+                if n in v.get("requires", []) and k not in out:
+                    out.add(k)
+                    todo.append(k)
+        return out
+
+    def service_hidden(self, service: str) -> bool:
+        return any(service in BUILTIN[n].get("services", []) for n in self.off())
+
+    def node_hidden(self, node_type: str) -> bool:
+        return any(node_type in BUILTIN[n].get("nodes", []) for n in self.off())
 
     def blocks(self, path: str) -> str | None:
         """The removed add-on that owns this URL path, if any."""
@@ -128,7 +175,9 @@ class Builtins:
     def list(self) -> list:
         off = self.off()
         return [{"name": k, "kind": "built-in", "installed": k not in off, **{x: v.get(x) for x in ("title", "desc", "docs")},
-                 "adds": {"pages": v.get("nav", []), "jobs": v.get("jobs", [])}} for k, v in BUILTIN.items()]
+                 "requires": v.get("requires", []), "needed_by": sorted(self.dependents(k)), "needs": v.get("needs", []),
+                 "adds": {"pages": v.get("nav", []), "jobs": v.get("jobs", []), "services": v.get("services", []),
+                          "nodes": v.get("nodes", [])}} for k, v in BUILTIN.items()]
 
 
 # ------------------------------------------------------------------ packages
@@ -292,7 +341,7 @@ def pack(folder: str | Path, out_dir: str | Path) -> Path:
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(folder.rglob("*")):
             rel = p.relative_to(folder)
-            if p.is_file() and not any(part in ("__pycache__", ".git", ".venv", "venv") for part in rel.parts):
+            if p.is_file() and not any(part in ("__pycache__", ".git", ".venv", "venv", ".godot") for part in rel.parts):
                 z.write(p, f"{m['name']}/{rel.as_posix()}")
     return out
 

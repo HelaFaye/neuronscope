@@ -7,23 +7,50 @@
 
 ## Built-in add-ons
 
-| add-on | what removing it takes away |
-|---|---|
-| Features and emotions | `/features`, the Interpret jobs, the decoding lab job |
-| Graphs | `/graphs` and its API |
-| Neuron review | `/review`, the Review jobs |
-| Projects and workers | `/projects`, `/workers`, the director |
-| Remote hosts | `/remote`, controlling other computers |
-| Device pairing | `/link`, pairing links, linked Studios |
-| Labs and 3D views | `/lab`, the view jobs |
-| Documents (RAG) | document collections |
-| System monitor and automation | `/system`, power and activity rules |
-| Retraining | the Retrain and Merge jobs |
-| Benchmarks | the Benchmarks jobs |
-| H-Neuron pipeline | the H-Neurons, Vision, Analysis and Tuning jobs |
-| Sharing results | publishing to the scoreboard |
+| add-on | what removing it takes away | needs |
+|---|---|---|
+| Decoding lab | the decoding lab job (SLED, steering, random projections, live watching), random-projection fitting, the logit lens | torch, transformers |
+| Features and emotions | `/features`, the Interpret jobs, the emotion and feature screen nodes | the decoding lab |
+| Graphs | `/graphs` and its API | |
+| Neuron review | `/review`, the Review jobs | the H-Neuron pipeline |
+| Projects and workers | `/projects`, `/workers`, the director | |
+| Labs and 3D views | the live viewer, 3D replay, pipeline dashboard and the quantization and sweep labs; the view jobs | |
+| Documents (RAG) | document collections, the document search and grounding nodes | |
+| System monitor | `/system` | |
+| Automation and Home Assistant | power and activity rules, the Home Assistant connection | |
+| Retraining | the Retrain and Merge jobs | torch, transformers, peft, trl, bitsandbytes |
+| SWE-bench and LiveBench | SWE-bench prediction, evaluation, import and training data; LiveBench | datasets, swebench, Docker |
+| H-Neuron pipeline | the H-Neurons, Analysis and Tuning jobs, the hallucination check node | |
+| Sharing results | publishing to the scoreboard | |
 
-Chat, models, jobs, settings, setup, permissions and help are the core and stay.
+An add-on another one needs cannot be removed alone: Studio offers to remove
+both (removing the decoding lab removes Features too). Reinstalling an add-on
+brings back what it needs.
+
+**Always part of Studio:** chat, models, jobs, settings, setup, permissions and
+help, and also vision (CLIP neurons, mmproj, vision benchmarks), remote hosts and
+model transfer (the transfer lab stays on the Lab page), and device pairing.
+
+## Default packages
+
+These ship in the checkout's `plugins/` folder, marked `"default": true`. They are
+on unless you turn them off, and they are trusted like the rest of the checkout, so
+updating NeuronScope does not turn them off. Like any package, they can be packed
+and installed elsewhere.
+
+| package | what it is |
+|---|---|
+| `godot-client` | The Godot client: a sidebar tab, a job that downloads Godot 4 and checks it against the release's SHA-512 list, a job that opens the client here, and the client as a `.zip` for another computer (`/plugins/godot-client/download/neuronscope-godot.zip`). `./neuronscope godot` uses it. |
+| `jewel-styles` | The icosphere and tesseract jewel styles, for the browser views (`styles.js`) and the Godot client (`styles.gd`, compiled by the client when it connects). Without it the jewel has the reactor core and off. |
+| `theme-pack` | The Arcade, Ember, Forest and Solar themes and the Ember, Cool, Arcade, Forest and Solar 3D palettes. The core keeps Midnight, Daylight, Contrast and Clinical. |
+| `graph-screens` | Graph nodes: a code security screen (shell injection, eval, disabled certificate checks, hard-coded secrets, destructive commands) and a prompt-injection screen for text a model is about to read. |
+
+`comfyui` and `claim-spotter` also ship here, but stay off until you turn them on.
+
+A package can add jewel styles (`"widgets": {"jewel_styles": [...], "js": "...", "gd": "..."}`
+inside its page folder) and themes (`"themes": "themes.json"`, the same shape as
+`viz/themes.json`), as well as jobs, checks, pages, tabs, MCP tools, graph nodes and
+downloads ([PLUGINS.md](PLUGINS.md)).
 
 ## Packages
 
@@ -67,26 +94,8 @@ page also gets a sidebar tab (under *Add-ons*) while it is on.
 
 They reach Studio at `http://127.0.0.1:7870`, set per node, using `NS_STUDIO_TOKEN` or `~/.neuronscope/studio.token` if Studio has a token. ComfyUI is GPL-3.0 and is downloaded from its own repository; none of it is shipped here.
 
-## What else should be an add-on
+## Language packs
 
-These parts of NeuronScope could become packages next. Each is used by some
-people and not others, and each has its own heavy dependencies or its own
-attack surface:
-
-| candidate | why |
-|---|---|
-| **The decoding lab** (`decode_lab.py`, `feature_lab.py`) | pulls in PyTorch and transformers; only needed for features, emotions, SLED and steering |
-| **Retraining** (finetune, SFT/DPO, SAGE, merges) | the largest dependencies (PEFT, TRL, bitsandbytes) and GPU time; most users only evaluate |
-| **SWE-bench and LiveBench** | Docker and big datasets |
-| **Vision** (CLIP neurons, mmproj suppression) | only for multimodal models |
-| **Remote hosts and the transfer lab** | network-facing; better absent when unused |
-| **Device pairing** | the same; a single-user desktop does not need it |
-| **The Godot client** | a separate program and download; could be a package that installs Godot and the client |
-| **Themes and widgets beyond the defaults** | the jewel styles, extra 3D themes: easy to share as small packages |
-| **Connectors** (Home Assistant automation, scoreboard sharing) | each talks to one outside service |
-| **Graph node packs** | domain screens (legal, medical, code security) as plugin nodes |
-| **Language packs** | translations of the UI and docs |
-
-The built-in add-ons above already let you remove the first several today; turning
-them into separately downloadable packages would also keep their dependencies off
-machines that never use them.
+Not yet. Studio's text is written into its pages, so translating it needs a
+string catalogue first; a language pack can then supply one (and translated
+docs for `/help`). Until then this is the one item of the list that stays undone.

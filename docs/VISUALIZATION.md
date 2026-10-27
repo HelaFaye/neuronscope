@@ -150,7 +150,7 @@ variation the animation exists to show.
 | frontend | renderer | for |
 |---|---|---|
 | `viz/timeline.py` | pygfx / WGPU | analysis. Exact sizes, no effects. |
-| `viz/godot/` | Godot 4.7 Forward+ | standalone desktop, real glow |
+| `plugins/godot-client/client/` | Godot 4.7 Forward+ | standalone desktop, real glow |
 | `viz/bloom.py` | three.js in a browser | remote, zero install |
 
 Parity survives because the clients are thin. `viz/bloom.py` serves the API all
@@ -180,7 +180,7 @@ positions once and streams only intensities.
 
 ```bash
 python viz/bloom.py runs/trace-abc --host 0.0.0.0   # backend + web
-NS_API=http://127.0.0.1:7880 godot --path viz/godot                # desktop
+NS_API=http://127.0.0.1:7880 godot --path plugins/godot-client/client                # desktop
 python viz/timeline.py runs/trace-abc                # analysis
 ```
 
@@ -194,15 +194,15 @@ A real trace comes from `scripts/trace_sample.py`.
 
 ```bash
 python viz/bloom.py --demo                                  # terminal 1
-NS_API=http://127.0.0.1:7880 godot --path viz/godot         # terminal 2
-NS_FRAME=67 NS_PAUSED=1 NS_API=... godot --path viz/godot   # open on one token, paused
+NS_API=http://127.0.0.1:7880 godot --path plugins/godot-client/client         # terminal 2
+NS_FRAME=67 NS_PAUSED=1 NS_API=... godot --path plugins/godot-client/client   # open on one token, paused
 ```
 
 Space pauses, Left/Right step a token, N jumps to the next flagged token,
 clicking the risk strip seeks, Esc quits. `NS_API` may include a path (Studio
 serves each checked reply at `.../viz/<id>/`) and `NS_TOKEN` sends a bearer
 token for a Studio that needs one. It runs the project
-directly, no editor needed; opening `viz/godot/project.godot` in the editor
+directly, no editor needed; opening `plugins/godot-client/client/project.godot` in the editor
 works too. Forward+ needs Vulkan; on a GPU or driver without it, add
 `--rendering-method gl_compatibility` (glow still works, a little softer).
 Verified with the official 4.7.2 build on a software Vulkan driver.

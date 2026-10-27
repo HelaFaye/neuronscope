@@ -2,7 +2,7 @@
 
 Small pieces of UI that take data and settings from outside, so any view can
 use them. The web pages share one script (`viz/widgets.py`, `WIDGETS_JS`); the
-Godot client has the same widgets in `viz/godot/widgets/`, drawn the same way
+Godot client has the same widgets in `plugins/godot-client/client/widgets/`, drawn the same way
 and reading the same settings keys.
 
 | widget | where | what it shows |
@@ -29,8 +29,8 @@ each token.
 | style | how the values move it |
 |---|---|
 | `core` (default) | A reactor core with one ribbon per emotion on its own tilted orbit. A ribbon's length, width and speed follow its \|z\|. Positive z turns one way, negative the other. The core pulses with the strongest emotion. |
-| `icosphere` | A sphere pushed out (positive z) or in (negative) around a direction for each emotion. Faces take the colours of the emotions shaping them. |
-| `tesseract` | A 4D cube. It turns in one 4D plane as positive emotions rise and in another as negative ones do. The inner cube takes the mixed colour; each outer edge takes one emotion's colour and weight. |
+| `icosphere` (the jewel-styles add-on) | A sphere pushed out (positive z) or in (negative) around a direction for each emotion. Faces take the colours of the emotions shaping them. |
+| `tesseract` (the jewel-styles add-on) | A 4D cube. It turns in one 4D plane as positive emotions rise and in another as negative ones do. The inner cube takes the mixed colour; each outer edge takes one emotion's colour and weight. |
 | `off` | A faint ring. |
 
 ## Navigating the Godot 3D view
@@ -62,7 +62,7 @@ Values outside `SPEC` are refused.
 
 | widget | setting | |
 |---|---|---|
-| jewel | `style` | `core`, `icosphere`, `tesseract`, `off` |
+| jewel | `style` | `core`, `off`, and styles from add-ons (`icosphere`, `tesseract`) |
 | | `speed` | 0.1 to 4 |
 | | `glow` | 0 to 2 |
 | | `scale` | 0.5 to 1, its size within its box |
@@ -76,3 +76,7 @@ Values outside `SPEC` are refused.
 - **Web.** `NSWidgets.register(name, (element, opts) => api)`; a page creates one with `NSWidgets.create(name, element, {settings, ...})`. Keep per-viewer state in `NSWidgets.store`.
 - **Godot.** Extend `res://widgets/widget.gd`, set `widget_id`, draw in `_draw()`, and read `setting(key, default)`. The host calls `set_theme_data(theme)` and `set_data(dict)`; `save_state()` and `save_setting()` persist what the viewer changes.
 - **Both.** Add the settings to `SPEC` so Settings can draw them and Studio can check them.
+
+Jewel styles beyond the reactor core come from add-ons ([ADDONS.md](ADDONS.md#default-packages)). A style
+whose add-on is off falls back to the core.
+

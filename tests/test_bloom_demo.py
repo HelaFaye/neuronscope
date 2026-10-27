@@ -69,12 +69,12 @@ def test_demo_payload_layout_flags_and_band():
 def test_clients_share_sizes_and_rate():
     import re
     js = (ROOT / "viz" / "bloom.py").read_text()
-    gd = (ROOT / "viz" / "godot" / "main.gd").read_text()
+    gd = (ROOT / "plugins" / "godot-client" / "client" / "main.gd").read_text()
     for name in ("SIZE_IDLE", "SIZE_ACTIVE", "SIZE_FLAG", "FPS"):
         a = float(re.search(rf"{name} = ([\d.]+)", js).group(1))
         b = float(re.search(rf"const {name} := ([\d.]+)", gd).group(1))
         assert a == b, name
-    assert "billboard_keep_scale = true" in (ROOT / "viz" / "godot" / "main.tscn").read_text()
+    assert "billboard_keep_scale = true" in (ROOT / "plugins" / "godot-client" / "client" / "main.tscn").read_text()
 
 
 def test_default_theme_is_dark_blue_and_red_orange():

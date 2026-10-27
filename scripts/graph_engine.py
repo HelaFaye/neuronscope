@@ -79,8 +79,11 @@ def node(name, title, group, inputs=(), outputs=(), params=(), help="", acts=())
     return deco
 
 
+HIDDEN = None             # (node type) -> True when its add-on is removed (viz/addons.py); set by Studio
+
+
 def types_public() -> list[dict]:
-    return [{k: v for k, v in t.items() if k != "run"} for t in TYPES.values()]
+    return [{k: v for k, v in t.items() if k != "run"} for t in TYPES.values() if not (HIDDEN and HIDDEN(t["name"]))]
 
 
 # ------------------------------------------------------------------ the environment nodes run in
@@ -849,6 +852,8 @@ def validate(g: dict) -> dict:
         ids.add(nd["id"])
         if nd.get("type") not in TYPES:
             raise GraphError(f"{nd['id']}: unknown node type {nd.get('type')!r}")
+        if HIDDEN and HIDDEN(nd["type"]):
+            raise GraphError(f"{nd['id']}: {TYPES[nd['type']]['title']} belongs to an add-on that is removed (Add-ons)")
         nd.setdefault("params", {})
     by = {nd["id"]: nd for nd in nodes}
     for e in g.get("edges") or []:

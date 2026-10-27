@@ -1469,7 +1469,8 @@ def plugins():
         home = os.path.dirname(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         dirs = STATE.get("plugin_dirs") or [os.path.join(home, "plugins"), os.path.join(repo, "plugins")]
-        pm = STATE["plugins"] = ns_plugins.Plugins(dirs, os.path.join(home, "plugins.json"))
+        pm = STATE["plugins"] = ns_plugins.Plugins(dirs, os.path.join(home, "plugins.json"),
+                                                   bundled=[os.path.join(repo, "plugins")])
     return pm
 
 
@@ -2858,13 +2859,18 @@ def sharing_after_job(meta: dict) -> None:
 
 
 def studio_themes() -> dict:
-    """Named Studio themes (viz/themes.json, "_studio"): UI colours, chart colours, and the
-    3D viewer theme each one uses."""
+    """Named Studio themes (viz/themes.json, "_studio", plus those of theme add-ons that are on):
+    UI colours, chart colours, and the 3D viewer theme each one uses."""
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "themes.json")) as f:
-            return json.load(f).get("_studio") or {}
+            core = json.load(f).get("_studio") or {}
     except (OSError, ValueError):
-        return {}
+        core = {}
+    try:
+        extra = plugins().themes().get("_studio") or {}
+    except Exception:
+        extra = {}
+    return {**core, **{k: v for k, v in extra.items() if k not in core}}
 
 
 def load_studio_config(path=None):
@@ -3265,6 +3271,7 @@ def screen_result(graph_name: str, t: dict, text: str, model: str | None) -> dic
     try:
         store = graphs_api.Store(STATE.get("graphs_dir") or os.path.expanduser("~/.neuronscope/graphs"))
         G.sync_plugins(plugins())
+        G.HIDDEN = addon_builtins().node_hidden
         g = store.get(graph_name)
         base = f"{'https' if STATE['tls'] else 'http'}://127.0.0.1:{STATE.get('port') or 7870}"
         env = G.Env(studio_client.Studio(base, STATE.get("token"), insecure_loopback=True), P.Policy(STATE.get("permissions_path")),
@@ -3582,6 +3589,21 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/plugins/([a-z0-9][a-z0-9_-]{0,39})/(.*)", self.path.split("?")[0])
         if not m:
             return self._json(404, {"error": "not found"})
+        d = re.fullmatch(r"download/([A-Za-z0-9_.-]{1,60}\.zip)", m.group(2))
+        if d:
+            try:
+                body = pm.download(m.group(1), d.group(1))
+            except ns_plugins.PluginError as e:
+                return self._json(404, {"error": str(e)})
+            if body is None:
+                return self._json(404, {"error": "not found"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{d.group(1)}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         try:
             f = pm.page_file(m.group(1), urllib.parse.unquote(m.group(2)))
         except ns_plugins.PluginError as e:
@@ -4129,8 +4151,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, {"off": b.nav_off(), "tabs": tabs})
                 return self._json(404, {"error": "not found"})
             if path == "/api/addons/builtin":
-                b.set(str(req.get("name")), bool(req.get("installed")))
-                return self._json(200, {"builtin": b.list()})
+                changed = b.set(str(req.get("name")), bool(req.get("installed")), bool(req.get("with_dependents")))
+                return self._json(200, {"builtin": b.list(), "changed": changed})
             if path == "/api/addons/install":
                 out = pk.install_from_repo(str(req.get("name") or ""), req.get("repo"))
                 STATE.pop("mcp", None)
@@ -4190,6 +4212,7 @@ class Handler(BaseHTTPRequestHandler):
         import graphs_api as GA
         store = self._graph_store()
         G.sync_plugins(plugins())                  # node types from enabled plugins
+        G.HIDDEN = addon_builtins().node_hidden    # and none from removed add-ons
         path = urllib.parse.urlsplit(self.path).path
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         try:
@@ -4764,7 +4787,7 @@ class Handler(BaseHTTPRequestHandler):
             # the owner's widget settings, served with every 3D theme (viz/widgets.py)
             import widgets
             try:
-                clean = widgets.validate(req.get("widgets") or {})
+                clean = widgets.validate(req.get("widgets") or {}, plugins().widget_assets()["styles"])
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
             save_studio_config({"widgets": clean})
@@ -4911,7 +4934,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
             hub = lab_hub()
-            return self._json(200, {"services": hub.service_state(),
+            b = addon_builtins()
+            return self._json(200, {"services": {k: v for k, v in hub.service_state().items() if not b.service_hidden(k)},
                                     "traces": hub.find_traces(extra=[STATE.get("traces_dir")])})
         if self.path in ("/setup", "/api/setup", "/api/hardware"):
             if not self._owner_only():
@@ -4935,7 +4959,8 @@ class Handler(BaseHTTPRequestHandler):
             import widgets
             return self._json(200, {"themes": studio_themes(), "default": STATE.get("studio_theme") or "midnight",
                                     "viz": sorted(__import__("bloom").THEMES),
-                                    "widgets": {"spec": widgets.SPEC, "values": widgets.merged(None, STATE.get("widgets"))}})
+                                    "widgets": {"spec": widgets.spec(plugins().widget_assets()["styles"]),
+                                                "values": widgets.merged(None, STATE.get("widgets"))}})
         if self.path.startswith("/api/engine/options"):
             import engine_options as eo
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -5025,6 +5050,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._graphs(None)
+        if self.path == "/api/addons/widgets":
+            # any signed-in viewer: which widget scripts the pages and the Godot client should load
+            return self._json(200, plugins().widget_assets())
         if self.path == "/addons" or self.path.startswith("/api/addons"):
             if not self._owner_only():
                 return
@@ -5302,8 +5330,8 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 req = self._read()
                 hub = lab_hub()
                 name = str(req.get("name") or "")
-                if name not in hub.SERVICES:
-                    return self._json(404, {"error": f"no lab service {name!r}"})
+                if name not in hub.SERVICES or (self.path == "/api/lab/start" and addon_builtins().service_hidden(name)):
+                    return self._json(404, {"error": f"no lab service {name!r} (Add-ons shows what is removed)"})
                 if self.path == "/api/lab/stop":
                     hub.stop(name)
                     return self._json(200, {"ok": True})

@@ -5,9 +5,9 @@ extends Node3D
 ## uses. All thresholding and flagging happened in Python; this only draws, so
 ## the frontends cannot drift on what counts as a flagged token or cell.
 ##
-##   NS_API=http://127.0.0.1:7880 godot --path viz/godot
+##   NS_API=http://127.0.0.1:7880 godot --path plugins/godot-client/client
 ##   NS_FRAME=146 NS_PAUSED=1 ...    # open on one token, paused (for screenshots)
-##   NS_API=https://studio:7870/viz/<id> NS_TOKEN=... godot --path viz/godot   # a reply checked in Studio
+##   NS_API=https://studio:7870/viz/<id> NS_TOKEN=... godot --path plugins/godot-client/client   # a reply checked in Studio
 ##
 ## MultiMesh keeps the whole field in one draw call, and glow runs at half
 ## resolution, because the GPU is usually also running the model.

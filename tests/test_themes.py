@@ -32,7 +32,8 @@ def test_api_default_and_viewer_cookie(studio_srv):
     h.headers = {"Cookie": "ns_viz=ember"}
     assert h._viz_theme({"x": 1})["active"] == "#EF9F27"
     h.headers = {"Cookie": "ns_viz=nonsense"}
-    assert h._viz_theme({"x": 1}) == {"x": 1}
+    t = h._viz_theme({"x": 1})
+    assert t["x"] == 1 and "jewel" in t["widgets"]          # the 3D theme carries the widget settings (WIDGETS.md)
     with urllib.request.urlopen(studio_srv + "/settings") as r:
         page = r.read().decode()
     assert "id=\"appearance\"" in page and "ns-theme-vars" in page and "function nsApplyTheme" in page

@@ -151,3 +151,10 @@ appears as `plugin:<plugin>:<type>` while the plugin is on.
 ([ADDONS.md](ADDONS.md)). A plugin with a `page` can also declare
 `"tab": {"label": "ComfyUI", "tip": "..."}` to get a sidebar tab while it is on.
 
+## Defaults, widgets, themes and downloads
+
+- `"default": true` marks a plugin that ships in the checkout's `plugins/` folder as on unless the owner turns it off ([ADDONS.md](ADDONS.md#default-packages)).
+- `"widgets": {"jewel_styles": ["name"], "js": "styles.js", "gd": "styles.gd"}` adds jewel styles. The files sit in the page folder. The script calls `NSWidgets.jewelStyle(name, (ctx, J) => …)`; the GDScript has `STYLES` and `draw(style, jewel, centre, radius)`.
+- `"themes": "themes.json"` adds Studio themes (under `"_studio"`) and 3D palettes.
+- `"downloads": {"name.zip": "folder"}` serves a folder of the plugin as a zip at `/plugins/<name>/download/name.zip`.
+

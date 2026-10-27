@@ -5,9 +5,9 @@ and keeps the models, jobs, projects, review data and settings. Three clients
 use the same HTTP API, so what one can do the others can, wherever it
 affects your work:
 
-| | web pages | terminal (`scripts/ns.py`) | Godot (`viz/godot`) |
+| | web pages | terminal (`scripts/ns.py`) | Godot (`plugins/godot-client/client`) |
 |---|---|---|---|
-| start | `./neuronscope` (opens the browser) | `./neuronscope cli …` | `./neuronscope godot` |
+| start | `./neuronscope` (opens the browser) | `./neuronscope cli …` | `./neuronscope godot`, or the Godot client tab (the `godot-client` add-on: gets Godot, opens the client, or downloads it for another computer) |
 | chat, `auto` routing, check a reply, mark it right/wrong | ✓ (plus tools and documents) | ✓ `chat` (`/check`, `/right`, `/wrong`) | ✓ |
 | models: list, stats, load | ✓ (plus downloads, per-model settings) | ✓ `list-models`, `load-model` | ✓ |
 | jobs: start any kind, follow the log | ✓ | ✓ `start-job`, `follow` | ✓ (forms filled from the workspace) |
@@ -52,9 +52,9 @@ client greys out the tabs a pairing cannot use.
 ## The Godot client
 
 ```bash
-./neuronscope godot                                     # or: godot --path viz/godot
-NS_STUDIO=https://gpu-box:7870 NS_TOKEN=… godot --path viz/godot
-NS_API=http://127.0.0.1:7880 godot --path viz/godot res://main.tscn   # the 3D viewer alone (viz/bloom.py)
+./neuronscope godot                                     # or: godot --path plugins/godot-client/client
+NS_STUDIO=https://gpu-box:7870 NS_TOKEN=… godot --path plugins/godot-client/client
+NS_API=http://127.0.0.1:7880 godot --path plugins/godot-client/client res://main.tscn   # the 3D viewer alone (viz/bloom.py)
 ```
 
 Tabs, grouped as in the web sidebar: Connect, Chat, Models, **Tasks** (Jobs,

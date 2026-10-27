@@ -279,7 +279,7 @@ button:hover{background:#16161e}
 // the module below never runs; say so instead of leaving a black page.
 setTimeout(()=>{ if(!window.__nsReady){ const w=document.createElement('div'); w.className='warn';
   w.innerHTML='Could not load three.js from unpkg.com.<br>This viewer needs that CDN, or use the Godot '+
-    'client (viz/godot) or viz/timeline.py, which work offline.'; document.body.appendChild(w); } }, 10000);
+    'client (plugins/godot-client/client) or viz/timeline.py, which work offline.'; document.body.appendChild(w); } }, 10000);
 </script>
 <script type="module">
 import * as THREE from 'three';
@@ -304,7 +304,7 @@ const state = new Uint8Array(buf, o, T*N);
 const prob = meta.prob, thr = meta.threshold ?? 0.5;
 const flaggedSet = new Set(meta.flagged);
 
-// Sizes and rate shared with the Godot client (viz/godot/main.gd); a test keeps them equal.
+// Sizes and rate shared with the Godot client (plugins/godot-client/client/main.gd); a test keeps them equal.
 const SIZE_IDLE = 1.1, SIZE_ACTIVE = 2.4, SIZE_FLAG = 7.0, FPS = 8;
 
 const hex = s => new THREE.Color(s);
@@ -575,7 +575,7 @@ def main():
 
     print(f"\nopen http://{a.host}:{a.port}  (three.js client)")
     print(f"Godot client: set NS_API=http://{a.host}:{a.port} and run "
-          "viz/godot/")
+          "plugins/godot-client/client/")
     print("This is the presentation view. Bloom blurs neighbours together, so "
           "use\nviz/timeline.py to decide anything.")
     ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()

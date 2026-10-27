@@ -46,12 +46,20 @@ let A=null;
 const navReset=()=>{ try{ localStorage.removeItem('ns-addon-nav'); }catch(e){} };
 async function load(){ A=await api('/api/addons');
   $('#bi').innerHTML=A.builtin.map(b=>`<div class="ad${b.installed?'':' off'}"><b>${esc(b.title)}</b><span class="note">${esc(b.desc)}</span>
-    <span class="note">${b.adds.pages.length?'pages: '+esc(b.adds.pages.join(', ')):''}${b.adds.jobs.length?(b.adds.pages.length?' · ':'')+'jobs: '+esc(b.adds.jobs.map(j=>j.replace('group:','')).join(', ')):''}</span>
+    <span class="note">${[b.adds.pages.length?'pages: '+b.adds.pages.join(', '):'', b.adds.jobs.length?'jobs: '+b.adds.jobs.map(j=>j.replace('group:','')).join(', '):'',
+      b.adds.services.length?'labs: '+b.adds.services.join(', '):'', b.adds.nodes.length?'graph nodes: '+b.adds.nodes.join(', '):''].filter(Boolean).map(esc).join(' · ')}</span>
+    ${b.requires.length?`<span class="note">needs the ${esc(b.requires.map(r=>(A.builtin.find(x=>x.name===r)||{}).title||r).join(', '))} add-on</span>`:''}
+    ${b.needs.length?`<span class="note">uses ${esc(b.needs.join(', '))}</span>`:''}
     <div class="row"><span class="tag ${b.installed?'on':'off'}">${b.installed?'installed':'removed'}</span>${b.docs?`<a class="note" href="/help/${esc(b.docs.replace('.md',''))}">docs</a>`:''}<span style="flex:1"></span>
     <button data-bi="${b.name}" data-to="${b.installed?0:1}" class="${b.installed?'bad':'pri'}">${b.installed?'Remove':'Reinstall'}</button></div></div>`).join('');
-  document.querySelectorAll('[data-bi]').forEach(x=>x.onclick=async()=>{ const on=x.dataset.to==='1';
+  document.querySelectorAll('[data-bi]').forEach(x=>x.onclick=async()=>{ const on=x.dataset.to==='1', name=x.dataset.bi;
     if(!on&&!confirm('Remove this part of Studio? Its pages and jobs go until you reinstall it; your data stays.')) return;
-    try{ await api('/api/addons/builtin',{name:x.dataset.bi,installed:on}); navReset(); msg(on?'Reinstalled.':'Removed.'); load(); }catch(e){ msg(e.message,true); } });
+    const title=n=>(A.builtin.find(b=>b.name===n)||{}).title||n;
+    try{ let r;
+      try{ r=await api('/api/addons/builtin',{name,installed:on}); }
+      catch(e){ if(on||!/ need/.test(e.message)||!confirm(e.message.replace(/: remove .*$/,'')+'. Remove '+(e.message.includes(' needs ')?'it':'them')+' as well?')) throw e;
+        r=await api('/api/addons/builtin',{name,installed:false,with_dependents:true}); }
+      navReset(); msg((on?'Reinstalled: ':'Removed: ')+r.changed.map(title).join(', ')+'.'); load(); }catch(e){ msg(e.message,true); } });
   $('#pk').innerHTML=A.packages.map(p=>`<div class="ad${p.status==='on'?'':' off'}"><b>${esc(p.name)} <span class="note">${esc(p.version||'')}</span></b>
     <span class="note">${esc(p.description)}</span>${p.error?`<span class="err">${esc(p.error)}</span>`:''}
     <span class="note">${[...(p.adds.jobs||[]).map(x=>'job: '+x),...(p.adds.nodes||[]).map(x=>'node: '+x),p.adds.page?'a page':'',p.tab?'a tab':'',p.adds.mcp?'MCP tools':''].filter(Boolean).map(esc).join(' · ')}</span>

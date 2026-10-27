@@ -6,10 +6,10 @@ extends Control
 ## you must), so drawing never takes GPU memory from the model. It uses the
 ## same HTTP API as Studio's web pages, so the two cannot drift.
 ##
-##   godot --path viz/godot                                   # pick or add a Studio under Connect
-##   NS_STUDIO=https://gpu-box:7870 NS_TOKEN=… godot --path viz/godot
-##   NS_TAB=Review godot --path viz/godot                       # open on a tab (or a page inside a group)
-##   NS_SHOTS=/tmp/shots NS_STUDIO=… godot --path viz/godot     # screenshot every tab, then quit
+##   godot --path plugins/godot-client/client                                   # pick or add a Studio under Connect
+##   NS_STUDIO=https://gpu-box:7870 NS_TOKEN=… godot --path plugins/godot-client/client
+##   NS_TAB=Review godot --path plugins/godot-client/client                       # open on a tab (or a page inside a group)
+##   NS_SHOTS=/tmp/shots NS_STUDIO=… godot --path plugins/godot-client/client     # screenshot every tab, then quit
 ##
 ## Beyond the web pages: the 3D view is native (orbit, layer filter, F12
 ## screenshots, review periods as frames), several Studios are remembered, and
@@ -405,6 +405,7 @@ func _on_connection() -> void:
 	if studio.role != "":
 		_load_models()
 		studio.get_json("/api/jobs/defaults", func(c, d): job_defaults = d if c == 200 else {})
+		_load_widget_addons()
 
 
 func _on_tab(i: int) -> void:
@@ -1005,6 +1006,26 @@ func _ask_from_3d(q: String) -> void:
 			viz.search.show_answer("error: " + str(d.get("error", code)))
 			return
 		viz.search.show_answer(str(d.choices[0].message.get("content", ""))))
+
+
+## Widget add-ons (the jewel-styles add-on, …): Studio lists their GDScript; each is compiled here and
+## handed to the 3D view's jewel. Only add-ons the owner turned on are listed.
+func _load_widget_addons() -> void:
+	studio.get_json("/api/addons/widgets", func(c, d):
+		if c != 200 or typeof(d) != TYPE_DICTIONARY:
+			return
+		for item in d.get("gd", []):
+			studio.call_api(HTTPClient.METHOD_GET, str(item.url), null, func(code, bytes):
+				if code != 200:
+					return
+				var sc := GDScript.new()
+				sc.source_code = bytes.get_string_from_utf8()
+				if sc.reload() != OK:
+					push_warning("widget add-on %s did not compile" % str(item.url))
+					return
+				var obj = sc.new()
+				if viz and viz.jewel and "STYLES" in obj:
+					viz.jewel.add_styles(obj), true))
 
 
 func _on_layers(_v: float) -> void:

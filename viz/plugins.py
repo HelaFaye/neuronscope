@@ -47,7 +47,8 @@ def digest(folder: Path) -> str:
     h = hashlib.sha256()
     for p in sorted(folder.rglob("*")):
         rel = p.relative_to(folder).as_posix()
-        if not p.is_file() or any(part in ("__pycache__", ".git") for part in p.relative_to(folder).parts):
+        # caches a program rebuilds (Python bytecode, git, Godot's import cache) are not the add-on's code
+        if not p.is_file() or any(part in ("__pycache__", ".git", ".godot") for part in p.relative_to(folder).parts):
             continue
         h.update(rel.encode() + b"\0")
         with open(p, "rb") as f:
@@ -87,6 +88,21 @@ def read_manifest(folder: Path) -> dict:
                 raise PluginError(f"node {n['type']}: ports are [name, type(, required)]")
     if m.get("page"):
         _inside(folder, m["page"])
+    w = m.get("widgets")
+    if w is not None:
+        if not isinstance(w, dict) or not m.get("page"):
+            raise PluginError("widgets: an object, with a page folder holding its scripts")
+        for k in ("js", "gd"):
+            if w.get(k):
+                _inside(_inside(folder, m["page"]), w[k])
+        if not all(NAME.match(str(x)) for x in w.get("jewel_styles") or []):
+            raise PluginError("widgets.jewel_styles: names like icosphere")
+    if m.get("themes"):
+        _inside(folder, m["themes"])
+    for fname, rel in (m.get("downloads") or {}).items():
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,60}\.zip", str(fname)):
+            raise PluginError(f"download {fname!r}: a .zip file name")
+        _inside(folder, rel)
     if m.get("mcp") is not None and not (isinstance(m["mcp"], dict) and (m["mcp"].get("command") or m["mcp"].get("url"))):
         raise PluginError("mcp: needs a command (stdio) or a url")
     return m
@@ -95,10 +111,16 @@ def read_manifest(folder: Path) -> dict:
 class Plugins:
     """The plugins found in some folders, and which of them the owner turned on."""
 
-    def __init__(self, dirs: list, state_path: str | Path):
+    def __init__(self, dirs: list, state_path: str | Path, bundled: list | None = None):
+        """bundled: folders that ship with NeuronScope (the checkout's plugins/). A plugin there marked
+        "default": true is on unless the owner turned it off: it is trusted like the rest of the checkout."""
         self.dirs = [Path(d).expanduser() for d in dirs if d]
+        self.bundled = {Path(d).expanduser().resolve() for d in bundled or []}
         self.state_path = Path(state_path).expanduser()
         self.lock = threading.Lock()
+
+    def _default_on(self, folder: Path, m: dict) -> bool:
+        return bool(m.get("default")) and folder.resolve().parent in self.bundled
 
     # -- state: name -> {"sha256": digest when turned on}
     def _state(self) -> dict:
@@ -133,9 +155,14 @@ class Plugins:
                 seen.add(m["name"])
                 sha = digest(folder)
                 on = st.get(m["name"])
-                status = "off" if not on else ("on" if on.get("sha256") == sha and on.get("folder") == str(folder)
-                                                 else "changed")
-                out.append({**rec, "name": m["name"], "manifest": m, "sha256": sha, "status": status})
+                default = self._default_on(folder, m)
+                if default:
+                    status = "off" if (on or {}).get("off") else "on"
+                else:
+                    status = "off" if not on or on.get("off") else (
+                        "on" if on.get("sha256") == sha and on.get("folder") == str(folder) else "changed")
+                out.append({**rec, "name": m["name"], "manifest": m, "sha256": sha, "status": status,
+                            "default": default})
         return out
 
     def enabled(self) -> list[dict]:
@@ -155,7 +182,12 @@ class Plugins:
             if p["status"] == "broken":
                 raise PluginError(p["error"])
             st = self._state()
-            if on:
+            if p.get("default"):                       # ships with NeuronScope and is on by default
+                if on:
+                    st.pop(name, None)
+                else:
+                    st[name] = {"off": True}
+            elif on:
                 st[name] = {"sha256": p["sha256"], "folder": p["folder"]}
             else:
                 st.pop(name, None)
@@ -266,6 +298,52 @@ class Plugins:
             f = f / "index.html"
         return f if f.is_file() else None
 
+    def download(self, plugin: str, name: str) -> bytes | None:
+        """A folder of the add-on as a zip, for "downloads": {"file.zip": "folder"} in plugin.json (a client to
+        copy to another computer). Caches are left out."""
+        import io
+        import zipfile
+        p = self.get(plugin)
+        rel = (p["manifest"].get("downloads") or {}).get(name)
+        if not rel:
+            return None
+        root = _inside(Path(p["folder"]), rel)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in sorted(root.rglob("*")):
+                parts = f.relative_to(root).parts
+                if f.is_file() and not any(x in ("__pycache__", ".git", ".godot") for x in parts):
+                    z.write(f, (Path(Path(name).stem) / f.relative_to(root)).as_posix())
+        return buf.getvalue()
+
+    def widget_assets(self) -> dict:
+        """Scripts and jewel styles from enabled add-ons' "widgets", for the web pages and the Godot client."""
+        out = {"js": [], "gd": [], "styles": []}
+        for p in self.enabled():
+            w = p["manifest"].get("widgets") or {}
+            for k in ("js", "gd"):
+                if w.get(k):
+                    out[k].append({"plugin": p["name"], "url": f"/plugins/{p['name']}/{w[k]}"})
+            out["styles"] += [s for s in w.get("jewel_styles") or [] if s not in out["styles"]]
+        return out
+
+    def themes(self) -> dict:
+        """Themes from enabled add-ons' "themes" file: {"_studio": {...}, "<3D theme>": {...}}."""
+        out = {}
+        for p in self.enabled():
+            rel = p["manifest"].get("themes")
+            if not rel:
+                continue
+            try:
+                d = json.loads(_inside(Path(p["folder"]), rel).read_text(encoding="utf-8"))
+            except (OSError, ValueError, PluginError):
+                continue
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if isinstance(v, dict):
+                        out.setdefault(k, {}).update(v) if k == "_studio" else out.setdefault(k, v)
+        return out
+
     def mcp_servers(self) -> dict:
         """MCP servers from enabled plugins, for Studio's MCP client (run in the plugin's folder)."""
         out = {}
@@ -280,6 +358,7 @@ class Plugins:
         for p in self.scan():
             m = p.get("manifest") or {}
             rows.append({"name": p["name"], "status": p["status"], "error": p.get("error"), "folder": p["folder"],
+                         "default": bool(p.get("default")),
                          "version": m.get("version"), "description": m.get("description", ""),
                          "author": m.get("author", ""), "sha256": p.get("sha256"),
                          "adds": {"jobs": [j.get("title") or j["kind"] for j in m.get("jobs") or []],

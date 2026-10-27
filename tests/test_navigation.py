@@ -54,7 +54,7 @@ def test_sidebar_groups():
     for fn in ("nsSub", "nsGroupHref", "ns-fly"):                   # sibling tabs, last-used page, flyout
         assert fn in js
     # the Godot client groups its tabs the same way (its 3D view is its own; Workers is web-only)
-    gd = (ROOT / "viz" / "godot" / "app.gd").read_text()
+    gd = (ROOT / "plugins" / "godot-client" / "client" / "app.gd").read_text()
     gd_groups = {g: re.findall(r'"([^"]+)"', body)
                  for g, body in re.findall(r'"(\w+)": \[([^\]]*)\]', re.search(r"const GROUPS := \{(.*?)\}", gd).group(1))}
     for g, kids in gd_groups.items():

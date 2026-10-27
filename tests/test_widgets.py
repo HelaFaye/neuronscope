@@ -14,7 +14,12 @@ from test_studio import studio_srv  # noqa: E402,F401
 
 
 def test_validate_and_merge():
-    assert widgets.validate({"jewel": {"style": "tesseract", "speed": 2}}) == {"jewel": {"style": "tesseract", "speed": 2.0}}
+    # icosphere and tesseract come from the jewel-styles add-on: only valid while it provides them
+    assert widgets.validate({"jewel": {"style": "tesseract", "speed": 2}}, ["icosphere", "tesseract"]) == \
+        {"jewel": {"style": "tesseract", "speed": 2.0}}
+    with pytest.raises(ValueError):
+        widgets.validate({"jewel": {"style": "tesseract"}})
+    assert widgets.spec(["icosphere"])["jewel"]["style"]["choices"] == ["core", "icosphere", "off"]
     for bad in ({"jewel": {"style": "cube"}}, {"jewel": {"speed": 9}}, {"jewel": {"nope": 1}}, {"x": {}},
                 {"emotion_graph": {"labels": "yes"}}, {"jewel": {"speed": True}}):
         with pytest.raises(ValueError):
@@ -33,10 +38,16 @@ def test_pages_carry_the_widgets():
     for page in (bloom.PAGE, stream.PAGE, settings_page.PAGE):
         assert "const NSWidgets" in page and "/*NS_WIDGETS*/" not in page
     assert "id=\"jewel\"" in bloom.PAGE and "id=\"jewel\"" in stream.PAGE and "wdPrev" in settings_page.PAGE
-    # Godot and web draw the same styles
-    gd = (ROOT / "viz" / "godot" / "widgets" / "jewel.gd").read_text()
+    # Godot and web draw the same styles: the core ones, and the add-on's in both its scripts
+    gd = (ROOT / "plugins" / "godot-client" / "client" / "widgets" / "jewel.gd").read_text()
     for style in widgets.SPEC["jewel"]["style"]["choices"]:
         assert f'"{style}"' in gd and f"'{style}'" in widgets.WIDGETS_JS
+    addon = ROOT / "plugins" / "jewel-styles"
+    m = json.loads((addon / "plugin.json").read_text())
+    for style in m["widgets"]["jewel_styles"]:
+        assert f'"{style}"' in (addon / "page" / "styles.gd").read_text()
+        assert f"'{style}'" in (addon / "page" / "styles.js").read_text()
+        assert f"'{style}'" not in widgets.WIDGETS_JS                     # no longer drawn by the core
 
 
 def _post(base, path, body):
@@ -51,6 +62,10 @@ def _post(base, path, body):
 def test_studio_saves_and_serves_widgets(studio_srv):  # noqa: F811
     j = json.loads(urllib.request.urlopen(studio_srv + "/api/themes", timeout=10).read())
     assert set(j["widgets"]["spec"]) == set(widgets.SPEC) and j["widgets"]["values"]["jewel"]["style"] == "core"
+    import urllib.request as u
+    assets = json.loads(u.urlopen(studio_srv + "/api/addons/widgets", timeout=10).read())
+    assert "tesseract" in assets["styles"] and assets["js"][0]["url"] == "/plugins/jewel-styles/styles.js"
+    assert u.urlopen(studio_srv + assets["gd"][0]["url"], timeout=10).read().startswith(b"extends RefCounted")
     code, r = _post(studio_srv, "/api/settings/widgets", {"widgets": {"jewel": {"style": "cube"}}})
     assert code == 400
     code, r = _post(studio_srv, "/api/settings/widgets", {"widgets": {"jewel": {"style": "tesseract"}}})
