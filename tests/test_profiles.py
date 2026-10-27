@@ -45,9 +45,9 @@ def test_extra_options_are_checked(monkeypatch):
 
 def test_real_scripts_offer_their_other_options():
     opts = {o["flag"] for o in jobs.script_options("testqa")}
-    assert "--concurrency" in opts and "--endpoint" not in opts                  # form fields are not repeated
-    argv = jobs.build_argv("testqa", {"endpoint": "m=http://h/v1@m", "out": "r.json", "__extra": {"--concurrency": "2"}})
-    assert argv[-2:] == ["--concurrency", "2"]
+    assert "--max-concurrency" in opts and "--endpoint" not in opts and "--concurrency" not in opts                  # form fields are not repeated
+    argv = jobs.build_argv("testqa", {"endpoint": "m=http://h/v1@m", "out": "r.json", "__extra": {"--max-concurrency": "2"}})
+    assert argv[-2:] == ["--max-concurrency", "2"]
 
 
 def test_profiles_api(studio_srv):
@@ -81,5 +81,5 @@ def test_search_and_profiles_on_pages(studio_srv):
     _, home = call(studio_srv, "/")
     assert 'id="mprof"' in home and "__MODEL_DEFAULTS__" not in home and '"ctx": 8192' in home
     code, opts = call(studio_srv, "/api/jobs/options?kind=testqa")
-    assert code == 200 and any(o["flag"] == "--concurrency" for o in opts)
+    assert code == 200 and any(o["flag"] == "--max-concurrency" for o in opts)
     assert call(studio_srv, "/api/jobs/options?kind=nope")[0] == 404
