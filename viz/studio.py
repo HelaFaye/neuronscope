@@ -2950,6 +2950,106 @@ def sharing_after_job(meta: dict) -> None:
                 STATE.setdefault("sharing_errors", []).append(f"{m['id']}: {type(e).__name__}: {e}"[:300])
 
 
+def shared_board_rows() -> list[dict]:
+    """The scoreboard's public rows (cached for an hour), whose speed measurements train the predictions.
+    Empty unless sharing is on."""
+    sh = sharing()
+    ep = sh.get("endpoint")
+    if not (sh.get("enabled") and ep):
+        return []
+    c = STATE.setdefault("board_cache", {})
+    if c.get("ep") == ep and time.time() - c.get("t", 0) < 3600:
+        return c["rows"]
+    try:
+        if ep.startswith("github:"):
+            import github_board
+            rows = github_board.fetch(ep[7:]).get("rows") or []
+        else:
+            with urllib.request.urlopen(ep.rstrip("/") + "/api/board", timeout=15) as r:
+                rows = json.loads(r.read()).get("board") or []
+        c.pop("error", None)
+    except Exception as e:
+        rows, c["error"] = [], f"{type(e).__name__}: {e}"[:200]
+    c.update(ep=ep, t=time.time(), rows=rows)
+    return rows
+
+
+def _device_info(host, dev):
+    """A work-log device string -> {name, backend, unified} for speed predictions."""
+    dev = str(dev or "")
+    if host not in (None, "this computer"):
+        return {"name": dev or host, "backend": "", "unified": False}
+    for d in POOL.devices():
+        if d["id"] in dev or (d.get("name") and d["name"] in dev):
+            return {"name": d.get("name") or d["id"], "backend": d.get("backend") or "", "unified": bool(d.get("unified"))}
+    m = re.match(r"(Vulkan|CUDA|ROCm|Metal|SYCL)(\d+)$", dev, re.I)
+    if m:
+        be = m.group(1).lower()
+        same = [d for d in POOL.devices() if d.get("backend") == be or (be == "vulkan" and d.get("backend") != "cpu")]
+        d = same[int(m.group(2))] if int(m.group(2)) < len(same) else None
+        if d:
+            return {"name": d.get("name") or d["id"], "backend": be, "unified": bool(d.get("unified"))}
+    if dev.upper() == "CPU":
+        cpu = next((d for d in POOL.devices() if d.get("backend") == "cpu"), {})
+        return {"name": cpu.get("name") or "CPU", "backend": "cpu", "unified": True}
+    return {"name": dev, "backend": "", "unified": False} if dev and dev != "GPU" else None
+
+
+def speed_predictions(since="30d") -> dict:
+    """Fit the speed model on this computer's work log and the scoreboard's measurements, then predict every
+    local model on every local device."""
+    import perf_predict as pp
+    models = {m["id"]: m for m in scan_models() if m.get("format") != "hf"}
+    settings = load_settings()
+
+    def model_info(mid):
+        m = models.get(mid) or find_model(mid, list(models.values()))
+        if not m:
+            return None
+        return {"bytes": m.get("size"), "quant": (m.get("meta") or {}).get("quant") or score_quant(m["path"]),
+                "settings": settings.get(_key(m["path"]), {})}
+    local = pp.samples_from_worklog(work_log().read("work", ns_work.parse_since(since)), model_info, _device_info)
+    board = pp.samples_from_board(shared_board_rows())
+    model = pp.fit(local + board)
+    measured = {}
+    for s in local:
+        measured.setdefault(s.device, []).append(s)
+    devs = [d for d in POOL.devices() if d.get("enabled", True)]
+    rows = []
+    for mid, m in sorted(models.items()):
+        if not m.get("size"):
+            continue
+        q = model_info(mid)["quant"]
+        cells = {}
+        for d in devs:
+            fits = not d.get("memory_total") or d["memory_total"] >= m["size"] * 1.1
+            smp = pp.Sample(device=d.get("name") or d["id"], backend=d.get("backend") or "", model_bytes=m["size"],
+                            tok_s=0, quant=q, unified=bool(d.get("unified")))
+            pr = model.predict(smp)
+            got = [x.tok_s for x in local if x.device == smp.device and x.model_bytes == m["size"]]
+            cells[d["id"]] = {**pr, "fits": fits, "measured": round(sum(got) / len(got), 1) if got else None}
+        rows.append({"model": mid, "gb": round(m["size"] / 2**30, 2), "quant": q, "devices": cells})
+    return {"devices": [{"id": d["id"], "name": d.get("name"), "backend": d.get("backend"),
+                         "memory_gb": round((d.get("memory_total") or 0) / 2**30, 1)} for d in devs],
+            "rows": rows, "model": model.to_json(), "samples": {"this computer": len(local), "scoreboard": len(board)},
+            "board_error": STATE.get("board_cache", {}).get("error")}
+
+
+def score_quant(path):
+    import score_cards
+    return score_cards._quant(os.path.basename(path))
+
+
+def measurement_weights() -> dict:
+    import measure_weights as mw
+    ids = [m["id"] for m in scan_models()]
+    table = mw.table_from_stats(STATE["stats"], ids, review=review_store()) if STATE.get("stats") else {}
+    res = mw.fit(table)
+    home = os.path.dirname(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+    hist = mw.remember(res, os.path.join(home, "measure-weights.json")) if table else []
+    return {**res, "table": table, "history": hist[-30:]}
+
+
 def studio_themes() -> dict:
     """Named Studio themes (viz/themes.json, "_studio", plus those of theme add-ons that are on):
     UI colours, chart colours, and the 3D viewer theme each one uses."""
@@ -4312,6 +4412,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._html(work_page.PAGE)
             if u.path == "/api/work":
                 return self._json(200, ns_work.breakdown(work_log(), q.get("since", "24h")))
+            if u.path == "/api/work/predict":
+                return self._json(200, speed_predictions(q.get("since", "30d")))
+            if u.path == "/api/work/measures":
+                return self._json(200, measurement_weights())
             if u.path == "/api/work/neurons":
                 store = review_store()
                 if not q.get("model"):
@@ -4800,7 +4904,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/settings/sharing":
                 import score_cards
                 cache = STATE.get("hf_checks", {})
-                return self._json(200, {"settings": sharing(),
+                return self._json(200, {"settings": sharing(), "github_token_set": bool(score_cards.github_token()),
                                         "models": [{"id": m["id"], "path": m["path"], "check": cache.get(m["path"])}
                                                    for m in scan_models() if m.get("format") != "hf"],
                                         "results": sharing_results(), "history": score_cards.submissions(),
@@ -4854,9 +4958,21 @@ class Handler(BaseHTTPRequestHandler):
                     cur[k] = bool(req[k])
             if "endpoint" in req:
                 ep = str(req["endpoint"]).strip().rstrip("/")
-                if ep and not re.match(r"https?://[\w.\-\[\]:]+(/[\w./-]*)?$", ep):
-                    return self._json(400, {"error": "the scoreboard address is a URL like https://board.example"})
+                if ep and not (re.match(r"https?://[\w.\-\[\]:]+(/[\w./-]*)?$", ep)
+                               or re.fullmatch(r"github:[\w.-]+/[\w.-]+", ep)):
+                    return self._json(400, {"error": "the scoreboard is a URL like https://board.example, "
+                                                     "or a GitHub repository as github:owner/repo"})
                 cur["endpoint"] = ep
+            if req.get("github_token") is not None:
+                import score_cards
+                tok = str(req["github_token"]).strip()
+                tp = score_cards.HOME / "github.token"
+                if tok:
+                    if not re.fullmatch(r"[\w-]{20,255}", tok):
+                        return self._json(400, {"error": "that does not look like a GitHub token"})
+                    sec.write_secret_file(tp, tok)
+                elif tp.exists():
+                    tp.unlink()
             if "public_models" in req:
                 ids = {m["id"] for m in scan_models()}
                 cur["public_models"] = sorted(str(x) for x in req["public_models"] if x in ids)

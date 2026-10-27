@@ -107,6 +107,8 @@ remote hosts the Workers page is watching.
 | who did the work | one row per device, worker, model, kind of work (chat, task, job) or source. Each row has its share of the work and of the tokens, tokens in and out, generation and prompt speed, busy time, utilisation, average time and failures |
 | tokens over time | stacked bars of tokens per device |
 | hardware | per GPU: load, VRAM, temperature and power curves, with average load, peak temperature and VRAM, average power and the energy used |
+| predicted speed | each model on each device: predicted tokens per second with an 80% range, beside the measured speed where there is one ([HARDWARE.md](HARDWARE.md#speed-predictions)) |
+| how measurements are weighted | the weight each measurement system gets when models are ranked, its agreement, and its history ([REVIEW.md](REVIEW.md#weighting-measurements)) |
 | neuron activations | for a model with recorded activation profiles ([REVIEW.md](REVIEW.md)), filtered by verdict if you like: a box plot per layer (5th, 25th, 50th, 75th and 95th percentiles and the mean), a histogram of every value, a layer × neuron-position heatmap of the mean, and wrong-answer mean minus correct-answer mean |
 
 Speeds come from the server's own timings where it reports them
@@ -129,6 +131,8 @@ prints the same breakdown as JSON.
 | `POST /api/workers/routes` | `{routes: {subject: [worker ids]}}` |
 | `POST /api/workers/test` | `{id}`: a timed one-line chat (endpoints and remote hosts) |
 | `GET /api/work?since=24h` | the work distribution: totals, `by_device`, `by_worker`, `by_model`, `by_kind`, `by_source`, `timeline`, `hardware` |
+| `GET /api/work/predict` | speed predictions for every local model and device, and the fitted model |
+| `GET /api/work/measures` | measurement weights, details, combined ranking and history |
 | `GET /api/work/neurons[?model=&verdict=]` | the models with activation profiles, or one model's activation stats |
 
 Worker ids: a local model's id; `ep:<name>` for an endpoint;

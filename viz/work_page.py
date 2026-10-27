@@ -59,6 +59,14 @@ canvas{width:100%;display:block}
 <section><h2>Hardware <span class="note">load, memory, temperature and power from the samples</span></h2>
 <div class="hw" id="hw"></div></section>
 
+<section id="predict"><h2>Predicted speed <span class="note">generation tokens/s, each model on each device</span><span class="grow"></span><button onclick="predict()" title="Fit again on the latest measurements">Refit</button></h2>
+<div id="pmeta" class="note"></div><div class="scroll"><table id="ptbl"></table></div>
+<details style="margin-top:.4rem"><summary class="note">What the prediction has learned</summary><div id="plearn" class="note"></div></details></section>
+
+<section id="measures"><h2>How measurements are weighted <span class="note">when ranking models</span></h2>
+<div id="mmeta" class="note"></div><div class="scroll"><table id="mtbl"></table></div>
+<details style="margin-top:.4rem"><summary class="note">Combined ranking</summary><div class="scroll"><table id="mrank"></table></div></details></section>
+
 <section id="neurons"><h2>Neuron activations <span class="grow"></span>
 <label class="note" title="Models with recorded activation profiles (Neuron review)">model <select id="model"></select></label>
 <label class="note" title="Only observations with this verdict">verdict <select id="verdict"><option value="">all</option><option>correct</option><option>wrong</option><option>abstained</option><option>unknown</option></select></label></h2>
@@ -201,10 +209,35 @@ function heat(c,M,div){
     tip(e,`layer ${i}, position ${j}/${B}: ${M[i][j].toPrecision(3)}`)};
   c.onmouseleave=e=>tip(e);
 }
+async function predict(){
+  $('pmeta').textContent='fitting…';
+  let r;try{r=await (await fetch('/api/work/predict')).json()}catch(e){$('pmeta').innerHTML='<span class="err">'+esc(e.message)+'</span>';return}
+  if(r.error){$('pmeta').innerHTML='<span class="err">'+esc(r.error)+'</span>';return}
+  const m=r.model,pc=x=>x==null?'–':Math.round(x*100)+'%';
+  $('pmeta').innerHTML=!m.n?'No speed measurements yet, so these come from memory bandwidth alone. Each reply Studio serves adds one (with llama-server\'s timings), and so do scoreboard cards when sharing is on.'+(r.board_error?` <span class="err">Scoreboard: ${esc(r.board_error)}</span>`:''):`Fitted on ${m.n} measurements (${r.samples['this computer']} from this computer, ${r.samples.scoreboard} from the scoreboard). Typical error: ${pc(m.fit_error)} on measured hardware`+(m.cv_error!=null?`, ${pc(m.cv_error)} on hardware it has not seen`:'')+'. Ranges are 80% intervals; the more measurements a device has, the narrower.'+(r.board_error?` <span class="err">Scoreboard: ${esc(r.board_error)}</span>`:'');
+  if(!r.rows.length){$('ptbl').innerHTML='<tr><td class="note">No models found.</td></tr>';return}
+  $('ptbl').innerHTML='<tr><th>model</th><th title="File size">GB</th>'+r.devices.map(d=>`<th class="name" title="${esc(d.id)} · ${esc(d.backend)} · ${d.memory_gb} GB">${esc(d.name||d.id)}</th>`).join('')+'</tr>'+
+    r.rows.map(x=>`<tr><td class="name" title="${esc(x.model)}${x.quant?' · '+esc(x.quant):''}">${esc(x.model)}</td><td>${x.gb}</td>`+r.devices.map(d=>{const c=x.devices[d.id];
+      const tip=`${c.low}–${c.high} tok/s predicted from ${c.bandwidth_gbs} GB/s (${c.specs_from})`+(c.measured!=null?`; measured ${c.measured}`:'')+(c.fits?'':'; does not fit in its memory');
+      return `<td title="${esc(tip)}"${c.fits?'':' style="opacity:.45"'}>${num(c.tok_s)}${c.measured!=null?` <span class="note">(${num(c.measured)})</span>`:''}</td>`}).join('')+'</tr>').join('');
+  const ex=m.explain||[];
+  $('plearn').innerHTML=(ex.length?'<table>'+ex.map(e=>`<tr><td>${esc(e.feature)}</td><td>× ${e.factor}</td><td class="note">${esc(e.unit)}</td></tr>`).join('')+'</table>':'Nothing yet beyond the bandwidth estimate: it needs measurements.')+
+    `<p>Per-device corrections: ${Object.entries(m.device||{}).map(([k,v])=>`${esc(k)} × ${Math.exp(v.offset).toFixed(2)} (${v.n})`).join(', ')||'none yet'}.</p>`;
+}
+async function measures(){
+  let r;try{r=await (await fetch('/api/work/measures')).json()}catch(e){$('mmeta').innerHTML='<span class="err">'+esc(e.message)+'</span>';return}
+  const ks=Object.keys(r.weights||{});
+  if(!ks.length){$('mmeta').textContent='No model has scores from a measurement yet. TestQA, LiveBench, SWE-bench, activation checks and your right/wrong labels all count.';$('mtbl').innerHTML='';return}
+  $('mmeta').textContent=`${r.models} models, weighted ${r.mode==='consensus'?'by agreement with the other measurements':'by agreement with '+r.mode.replace('against ','')}. Weights move toward an equal share while few models have results.`;
+  $('mtbl').innerHTML='<tr><th>measurement</th><th title="Share of the combined score">weight</th><th title="Rank correlation across models">agreement</th><th title="Models compared">models</th><th title="Weight in earlier fits, oldest first">history</th></tr>'+
+    ks.sort((a,b)=>r.weights[b]-r.weights[a]).map(k=>{const d=r.detail[k],h=(r.history||[]).map(x=>x.weights[k]).filter(x=>x!=null);
+      return `<tr><td class="name" title="${esc(k)}">${esc(k)}</td><td><span class="bar"><i style="width:${r.weights[k]*100}%"></i></span>${pct(r.weights[k])}</td><td>${d.r==null?'–':d.r}</td><td>${d.n}</td><td>${h.slice(-12).map(x=>pct(x)).join(' → ')||'–'}</td></tr>`}).join('');
+  $('mrank').innerHTML='<tr><th>model</th><th title="Weighted mean of z-scores">score</th><th>measured by</th></tr>'+(r.ranking||[]).map(x=>`<tr><td class="name" title="${esc(x.model)}">${esc(x.model)}</td><td>${x.score}</td><td class="name" title="${esc(x.systems.join(', '))}">${esc(x.systems.join(', '))}</td></tr>`).join('');
+}
 $('since').onchange=load;$('by').onchange=table;$('model').onchange=neurons;$('verdict').onchange=neurons;
 onresize=()=>{if(DATA){timeline();hardware()}if(NDATA&&!NDATA.error)drawNeurons()};
 setInterval(()=>{if($('auto').checked&&!document.hidden)load()},15000);
-load();models();
+load();models();predict();measures();
 </script>"""
 
 from ui_links import inject as _inject_links  # noqa: E402

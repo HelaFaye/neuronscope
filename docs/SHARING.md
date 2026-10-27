@@ -33,6 +33,12 @@ Studio: Settings → **Sharing results**. Terminal:
 - **The test**: the TestQA bank's fingerprint (a hash of the items asked),
   and the right / wrong / declined counts per subject.
 
+**Measured speed**, when the run measured it: generation tokens per second,
+seconds per request and requests in flight. The card also carries the
+settings that decide speed: GPU layers, context, devices, split, KV cache,
+flash attention and speculative decoding. These train the speed
+predictions ([HARDWARE.md](HARDWARE.md#speed-predictions)).
+
 **A verification log, private.** Per item: the id, the verdict and the
 model's reply. A scoreboard uses it only to check the card. The reference
 server:
@@ -77,3 +83,63 @@ submissions:
 - accuracy and hallucination rate;
 - per-subject counts;
 - the hardware the runs came from.
+
+## A scoreboard on GitHub
+
+A board can also live in a GitHub repository, with no server to host:
+
+```bash
+python scripts/github_board.py init ./my-board --neuronscope-repo OWNER/neuronscope
+```
+
+`init` writes these files:
+- `board.pub`, the board's public key;
+- `board.key`, its private key, git-ignored;
+- a workflow in `.github/workflows/accept.yml`;
+- an empty `cards/` folder and `board.json`.
+
+To finish setting it up:
+1. Create the repository on GitHub and push these files.
+2. Store the contents of `board.key` as the Actions secret `BOARD_KEY`.
+3. Delete `board.key`.
+
+**Submitting.** In Studio, set the scoreboard to `github:OWNER/REPO` and save a
+GitHub token that can open issues on that repository. A fine-grained token
+limited to that one repository is enough. The token is stored on this
+computer (mode 0600), never shown again, and removed by saving an empty one.
+
+A submission is an issue:
+- **The card** is plain JSON in the issue.
+- **The verification log** (each item's reply) is sealed to the board's
+  public key: X25519, HKDF-SHA256 and ChaCha20-Poly1305. A log too long for
+  one issue continues in comments.
+
+Only the board's workflow can open the log: it holds the private key.
+
+**Accepting.** The workflow runs `github_board.py action` with the
+NeuronScope checkout named at `init`, which supplies the TestQA bank and the
+graders. It regrades every reply, as the reference server does:
+- **A verified card** is committed to
+  `cards/<sha[:2]>/<sha>/<variant>/<issue>.json`, and `board.json` is
+  rebuilt.
+- **A rejected card** (replies that do not grade to its numbers, a different
+  bank, a duplicate of an accepted result, an unreadable log) is not
+  committed.
+
+Either way, the workflow answers on the issue and closes it. **The log is
+never committed.** Once read, it exists only in the issue, sealed.
+
+**Everything accepted is public**, because the repository is. Studio
+therefore sends only cards for public models to a GitHub board: models found
+on Hugging Face, or ones you listed by hand. A private card is refused before
+anything is sent.
+
+**Reading.** `board.json` holds:
+- one row per model file and variant;
+- the speed measurements cards carried;
+- the fitted speed prediction (`perf_model`);
+- the measurement weights per subject (`measure_weights`).
+
+Studio reads it from `raw.githubusercontent.com` (cached for an hour) to
+train its speed predictions. So does anyone else:
+`python scripts/github_board.py fetch OWNER/REPO`.

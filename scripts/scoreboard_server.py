@@ -58,6 +58,49 @@ create table if not exists logs (id text primary key, log text);
 """
 
 
+def verify_card(tasks: dict, card: dict, log: dict, verify_hf: bool = False) -> tuple[str, str]:
+    """(status, note): verified, unverified (another bank) or rejected. tasks: the bank by id."""
+    import score_cards as sc
+    import testqa as tq
+    items = log.get("items") or []
+    if not items:
+        return "rejected", "no log items"
+    unknown = [i["id"] for i in items if i.get("id") not in tasks]
+    if unknown:
+        return "unverified", f"{len(unknown)} items are not in this server's bank"
+    asked = [tasks[i["id"]] for i in items]
+    if sc.bank_fingerprint(asked) != card.get("test", {}).get("bank"):
+        return "unverified", "the bank differs from this server's"
+    args = SimpleNamespace(allow_exec=False, exec_timeout=5)
+    per = {}
+    mismatched, not_regraded = 0, 0
+    for it in items:
+        t = tasks[it["id"]]
+        claimed = it.get("verdict")
+        if claimed in ("error", "skipped"):
+            continue
+        if t["kind"] == "code_exec":
+            not_regraded += 1
+            v = claimed
+        else:
+            v = tq.grade(t, str(it.get("reply", "")), args)[0]
+            if v != claimed:
+                mismatched += 1
+        c = per.setdefault(t["subject"], {"n": 0, "correct": 0, "wrong": 0, "abstained": 0, "other": 0})
+        c["n"] += 1
+        key = "correct" if v in ("correct", "answered") else v if v in ("wrong", "abstained") else "other"
+        c[key] += 1
+    if mismatched:
+        return "rejected", f"{mismatched} replies do not grade to the verdicts claimed"
+    if per != (card.get("test") or {}).get("per_subject"):
+        return "rejected", "the card's counts differ from its log"
+    if card.get("model", {}).get("listed") and verify_hf:
+        repo = card["model"].get("hf_repo")
+        if not repo or not _hf_has(repo, card["model"]["sha256"]):
+            return "rejected", "the model is claimed to be listed but its file is not in that repo"
+    return "verified", (f"{not_regraded} code items taken as reported" if not_regraded else "all replies regraded")
+
+
 class Board:
     def __init__(self, db: str, tasks_paths=None, verify_hf: bool = False):
         import testqa as tq
@@ -69,44 +112,7 @@ class Board:
         self.verify_hf = verify_hf
 
     def verify(self, card: dict, log: dict) -> tuple[str, str]:
-        import score_cards as sc
-        items = log.get("items") or []
-        if not items:
-            return "rejected", "no log items"
-        unknown = [i["id"] for i in items if i.get("id") not in self.tasks]
-        if unknown:
-            return "unverified", f"{len(unknown)} items are not in this server's bank"
-        asked = [self.tasks[i["id"]] for i in items]
-        if sc.bank_fingerprint(asked) != card.get("test", {}).get("bank"):
-            return "unverified", "the bank differs from this server's"
-        args = SimpleNamespace(allow_exec=False, exec_timeout=5)
-        per = {}
-        mismatched, not_regraded = 0, 0
-        for it in items:
-            t = self.tasks[it["id"]]
-            claimed = it.get("verdict")
-            if claimed in ("error", "skipped"):
-                continue
-            if t["kind"] == "code_exec":
-                not_regraded += 1
-                v = claimed
-            else:
-                v = self.tq.grade(t, str(it.get("reply", "")), args)[0]
-                if v != claimed:
-                    mismatched += 1
-            c = per.setdefault(t["subject"], {"n": 0, "correct": 0, "wrong": 0, "abstained": 0, "other": 0})
-            c["n"] += 1
-            key = "correct" if v in ("correct", "answered") else v if v in ("wrong", "abstained") else "other"
-            c[key] += 1
-        if mismatched:
-            return "rejected", f"{mismatched} replies do not grade to the verdicts claimed"
-        if per != (card.get("test") or {}).get("per_subject"):
-            return "rejected", "the card's counts differ from its log"
-        if card.get("model", {}).get("listed") and self.verify_hf:
-            repo = card["model"].get("hf_repo")
-            if not repo or not _hf_has(repo, card["model"]["sha256"]):
-                return "rejected", "the model is claimed to be listed but its file is not in that repo"
-        return "verified", (f"{not_regraded} code items taken as reported" if not_regraded else "all replies regraded")
+        return verify_card(self.tasks, card, log, self.verify_hf)
 
     def submit(self, card: dict, log: dict) -> dict:
         if not isinstance(card, dict) or card.get("card_version") != 1:
@@ -132,33 +138,39 @@ class Board:
                                "where visibility='public' and status='verified'"
                                + (" and (model_sha=? or model_file=? or hf_repo=?)" if model else ""),
                                (model, model, model) if model else ()).fetchall()
-        groups = defaultdict(list)
-        for r in rows:
-            groups[(r[0], r[5])].append(r)
-        out = []
-        for (sha, vid), rs in groups.items():
-            cards = [json.loads(r[6]) for r in rs]
-            per = defaultdict(lambda: {"n": 0, "correct": 0, "wrong": 0, "abstained": 0, "other": 0})
-            for c in cards:
-                for s, v in c["test"]["per_subject"].items():
-                    for k in per[s]:
-                        per[s][k] += v.get(k, 0)
-            n = sum(v["n"] for v in per.values())
-            corr = sum(v["correct"] for v in per.values())
-            wrong = sum(v["wrong"] for v in per.values())
-            v0 = cards[-1]["variant"]
-            out.append({"model_sha": sha, "file": rs[0][1], "quant": rs[0][2], "hf_repo": rs[0][3],
-                        "listed": bool(rs[0][4]), "variant_id": vid, "submissions": len(rs), "items": n,
-                        "accuracy": round(corr / n, 4) if n else None,
-                        "hallucination_rate": round(wrong / n, 4) if n else None,
-                        "per_subject": {s: {**v, "accuracy": round(v["correct"] / v["n"], 4) if v["n"] else None}
-                                        for s, v in per.items()},
-                        "variant": {"engine": v0["engine"], "suppression": v0.get("suppression"),
-                                    "lora": v0.get("lora"), "lineage": v0.get("lineage"), "sampling": v0.get("sampling")},
-                        "hardware": sorted({", ".join(g["name"] for g in c["hardware"].get("gpus") or []) or
-                                            c["hardware"].get("cpu", "cpu") for c in cards})})
-        out.sort(key=lambda e: -(e["accuracy"] or 0))
-        return out
+        return aggregate([json.loads(r[6]) for r in rows])
+
+
+def aggregate(cards: list[dict]) -> list[dict]:
+    """Public rows: one per model file and variant, over its verified cards."""
+    groups = defaultdict(list)
+    for c in cards:
+        groups[(c["model"]["sha256"], c.get("variant_id", ""))].append(c)
+    out = []
+    for (sha, vid), cs in groups.items():
+        per = defaultdict(lambda: {"n": 0, "correct": 0, "wrong": 0, "abstained": 0, "other": 0})
+        for c in cs:
+            for s, v in c["test"]["per_subject"].items():
+                for k in per[s]:
+                    per[s][k] += v.get(k, 0)
+        n = sum(v["n"] for v in per.values())
+        corr = sum(v["correct"] for v in per.values())
+        wrong = sum(v["wrong"] for v in per.values())
+        m, v0 = cs[0]["model"], cs[-1]["variant"]
+        out.append({"model_sha": sha, "file": m.get("file"), "quant": m.get("quant"), "hf_repo": m.get("hf_repo"),
+                    "listed": bool(m.get("listed")), "variant_id": vid, "submissions": len(cs), "items": n,
+                    "accuracy": round(corr / n, 4) if n else None,
+                    "hallucination_rate": round(wrong / n, 4) if n else None,
+                    "per_subject": {s: {**v, "accuracy": round(v["correct"] / v["n"], 4) if v["n"] else None}
+                                    for s, v in per.items()},
+                    "variant": {"engine": v0["engine"], "suppression": v0.get("suppression"),
+                                "lora": v0.get("lora"), "lineage": v0.get("lineage"), "sampling": v0.get("sampling")},
+                    "hardware": sorted({", ".join(g["name"] for g in c["hardware"].get("gpus") or []) or
+                                        c["hardware"].get("cpu", "cpu") for c in cs}),
+                    "performance": [dict(p, hardware=c["hardware"], model_bytes=m.get("size"), quant=m.get("quant"))
+                                    for c in cs for p in (c.get("performance") or [])]})
+    out.sort(key=lambda e: -(e["accuracy"] or 0))
+    return out
 
 
 def _hf_has(repo: str, sha: str) -> bool:

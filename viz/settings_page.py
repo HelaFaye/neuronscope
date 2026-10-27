@@ -142,7 +142,7 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
 <div id="plDirs" class="note"></div><div style="overflow-x:auto"><table id="plList"></table></div><div id="plMsg" class="note"></div></section>
 
 <section class="card" id="sharing"><h2>Sharing results</h2>
-<div class="note"><b>Off unless you turn it on.</b> When on, TestQA results can be sent to a scoreboard you name, so models can be compared across machines and setups. NeuronScope runs no scoreboard of its own; anyone can host <code>scripts/scoreboard_server.py</code>.</div>
+<div class="note"><b>Off unless you turn it on.</b> When on, TestQA results can be sent to a scoreboard you name, so models can be compared across machines and setups. NeuronScope runs no scoreboard of its own; anyone can host <code>scripts/scoreboard_server.py</code>, or keep one in a GitHub repository (<code>scripts/github_board.py init</code>).</div>
 <details open style="margin:.5rem 0"><summary><b>What is sent, and what it is for</b></summary>
 <ul class="note">
 <li><b>A card, which may be public</b>:
@@ -158,7 +158,9 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
 <li>Every submission is kept on this computer exactly as sent (<code>~/.neuronscope/submissions/</code>), and listed below.</li>
 </ul></details>
 <label><input type="checkbox" id="shOn"> Share results</label>
-<label>Scoreboard address<input id="shEp" placeholder="https://scores.example.org"></label>
+<label title="A scoreboard server's address, or github:owner/repo for a scoreboard kept in a GitHub repository">Scoreboard<input id="shEp" placeholder="https://scores.example.org or github:owner/repo"></label>
+<div id="shGh" style="display:none"><label title="Stored on this computer only (0600). Needs permission to open issues on the board's repository; a fine-grained token limited to that repository is enough.">GitHub token, to open the submission issue <input id="shTok" type="password" autocomplete="off"></label>
+<div class="note">On a GitHub board everything accepted is public, so only cards for public models are sent. The verification log is sealed to the board's key: only the board's own workflow can read it, and it is never committed. <span id="shTokSt"></span></div></div>
 <label><input type="checkbox" id="shAuto"> Submit automatically when a TestQA run finishes, for models found on Hugging Face</label>
 <details style="margin:.4rem 0"><summary class="note">Advanced</summary>
 <label><input type="checkbox" id="shUnl"> Also submit results for unlisted models automatically <span class="note">(sent privately: only the scoreboard's operator can see them, unless you list the model below)</span></label></details>
@@ -413,6 +415,8 @@ wdLoad();
 let SH=null;
 async function shLoad(){ const r=await fetch('/api/settings/sharing'); SH=await r.json(); const st=SH.settings;
   $('#shOn').checked=st.enabled; $('#shEp').value=st.endpoint; $('#shAuto').checked=st.auto_listed; $('#shUnl').checked=st.auto_unlisted;
+  const gh=()=>{$('#shGh').style.display=$('#shEp').value.trim().startsWith('github:')?'block':'none'}; $('#shEp').oninput=gh; gh();
+  $('#shTokSt').textContent=SH.github_token_set?'A token is saved (leave the field empty to keep it).':'No token saved.';
   $('#shModels').innerHTML='<tr><th>model</th><th>Hugging Face</th><th>public</th></tr>'+SH.models.map(m=>{ const c=m.check;
     const hf=c?(c.listed?`<span class="okm">found in ${esc(c.repo)}</span>`:`<span class="note">${esc(c.reason)}</span>`):'<span class="note">not checked</span>';
     const pub=c&&c.listed?'yes (listed)':`<label style="margin:0"><input type="checkbox" data-pub="${esc(m.id)}"${st.public_models.includes(m.id)?' checked':''}> list this unlisted model</label>`;
@@ -424,8 +428,8 @@ async function shLoad(){ const r=await fetch('/api/settings/sharing'); SH=await 
   $('#shHist').innerHTML=SH.history.length?'<tr><th>file</th><th>model</th><th>visibility</th><th>answer</th></tr>'+SH.history.map(h=>`<tr><td>${esc(h.file)}</td><td>${esc(h.model)}</td><td>${esc(h.visibility)}</td><td>${esc(h.answer?h.answer.status+(h.answer.shown_publicly?' · shown':''):'')}</td></tr>`).join(''):'<tr><td class="note">Nothing sent.</td></tr>';
 }
 $('#shSave').onclick=async()=>{ const pub=[...document.querySelectorAll('[data-pub]')].filter(x=>x.checked).map(x=>x.dataset.pub);
-  const r=await fetch('/api/settings/sharing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:$('#shOn').checked,endpoint:$('#shEp').value,auto_listed:$('#shAuto').checked,auto_unlisted:$('#shUnl').checked,public_models:pub})});
-  $('#shMsg').textContent=r.ok?'Saved.':(await r.json()).error; if(r.ok) shLoad(); };
+  const r=await fetch('/api/settings/sharing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:$('#shOn').checked,endpoint:$('#shEp').value,auto_listed:$('#shAuto').checked,auto_unlisted:$('#shUnl').checked,public_models:pub,...($('#shTok').value.trim()?{github_token:$('#shTok').value.trim()}:{})})});
+  $('#shTok').value=''; $('#shMsg').textContent=r.ok?'Saved.':(await r.json()).error; if(r.ok) shLoad(); };
 async function shAct(kind){ const [results,label]=($('#shRes').value||'|').split('|');
   $('#shOut').textContent=kind==='preview'?'building the card (hashing the model file the first time)…':'sending…';
   const r=await fetch('/api/settings/sharing/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({results,label,path:$('#shModel').value})});

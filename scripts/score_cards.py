@@ -261,6 +261,9 @@ def build(results_path: str, label: str | None, model_path: str, settings: dict 
                      "abstention_rate": round(tot["abstained"] / n, 4) if n else None},
             "visibility": "public" if (lst.get("listed") or public_by_hand) else "private",
             "neuronscope": _version()}
+    perf = performance(d, label, settings or {})
+    if perf:
+        card["performance"] = perf
     cache = {}
     if cache_dir:
         cp = Path(cache_dir) / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', label)}.jsonl"
@@ -271,6 +274,24 @@ def build(results_path: str, label: str | None, model_path: str, settings: dict 
     log = {"items": [{"id": r["id"], "verdict": r["verdict"], "reply": cache.get(r["id"], r.get("text", ""))}
                      for r in rows if r.get("kind") != "canary"]}
     return card, log
+
+
+def performance(results: dict, label: str, settings: dict) -> list[dict]:
+    """Speed measured during the run (testqa's scheduling summary), with the settings that decide it, for
+    hardware performance prediction (perf_predict.py). Only what the server measured; nothing estimated."""
+    ep = (results.get("endpoints") or {}).get(label) or {}
+    url = ep.get("url")
+    out = []
+    for s in results.get("scheduling") or []:
+        if s.get("server") != url or not (s.get("gen_tok_s") or s.get("avg_s")):
+            continue
+        out.append({"source": "testqa", "gen_tok_s": s.get("gen_tok_s"), "avg_s": s.get("avg_s"),
+                    "parallel": s.get("limit"), "requests": s.get("done"),
+                    **{k: settings[k] for k in ("ngl", "ctx", "device", "split_mode", "tensor_split", "cache_type_k",
+                                                "flash_attn", "spec_type", "draft_model") if settings.get(k) not in (None, "")}})
+        if out[-1].get("draft_model"):
+            out[-1]["draft_model"] = Path(str(out[-1]["draft_model"])).name
+    return out
 
 
 def _quant(name: str) -> str | None:
@@ -287,12 +308,26 @@ def _version() -> str:
         return "unknown"
 
 
+def github_token() -> str | None:
+    """For a scoreboard on GitHub: NS_GITHUB_TOKEN, or the token saved in Settings → Sharing results."""
+    t = os.environ.get("NS_GITHUB_TOKEN")
+    if t:
+        return t.strip()
+    p = HOME / "github.token"
+    return p.read_text().strip() if p.exists() else None
+
+
 def submit(endpoint: str, card: dict, log: dict, timeout: float = 60) -> dict:
-    body = json.dumps({"card": card, "log": log}).encode()
-    req = urllib.request.Request(endpoint.rstrip("/") + "/api/submit", data=body,
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        out = json.loads(r.read())
+    """To a scoreboard server (https://…) or a scoreboard on GitHub (github:owner/repo)."""
+    if endpoint.startswith("github:"):
+        import github_board
+        out = github_board.submit(endpoint[7:], card, log, github_token())
+    else:
+        body = json.dumps({"card": card, "log": log}).encode()
+        req = urllib.request.Request(endpoint.rstrip("/") + "/api/submit", data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = json.loads(r.read())
     d = HOME / "submissions"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{time.strftime('%Y%m%d-%H%M%S')}-{card['variant_id']}.json").write_text(

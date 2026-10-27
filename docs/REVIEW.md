@@ -108,6 +108,36 @@ runs and chat checks land together. API: `GET /api/review`,
 - Observations from different model files are never mixed: a quantization
   or an edit is a different model id.
 
+## Weighting measurements
+
+A model can be measured several ways:
+- TestQA, LiveBench and SWE-bench (graded answers, by source);
+- published reference scores;
+- how often H-Neuron activation flags its replies;
+- the replies you marked right or wrong here.
+
+They do not always agree. **Tasks → Distribution → How measurements are
+weighted** shows how much each one counts when models are ranked together
+(`scripts/measure_weights.py`):
+
+- **Against your verdicts.** Once at least five models have replies you
+  labelled, each measurement is weighted by its rank correlation with those
+  labels. It counts for as much as it agrees with what you found in use.
+- **By consensus.** Until then, each measurement is weighted by its
+  correlation with the mean of all the others. A measurement that disagrees
+  with everything else counts less.
+
+The rules for turning correlations into weights:
+- A correlation from few models is shrunk toward an equal share
+  (n ÷ (n + 5)).
+- A negative correlation counts as zero.
+- The combined score is the weighted mean of z-scores, over the
+  measurements each model has.
+
+Every fit is added to a history, shown beside each weight, so you can watch
+the weights settle as results come in. A scoreboard computes the same
+weights per subject, and they show which subjects separate models.
+
 ## Subject colours in the 3D views
 
 Once the review has observations across subjects (TestQA runs and checked

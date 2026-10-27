@@ -122,3 +122,26 @@ def test_studio_work(srv):
     assert code == 200 and m == {"models": []}
     code, e = ts.call(base, "/api/work?since=soon")
     assert code == 400
+
+
+def test_studio_predict_measures_and_github_sharing(srv, tmp_path, monkeypatch):
+    base, ts = srv
+    import score_cards
+    monkeypatch.setattr(score_cards, "HOME", tmp_path / "home")
+    monkeypatch.delenv("NS_GITHUB_TOKEN", raising=False)
+    code, p = ts.call(base, "/api/work/predict")
+    assert code == 200 and p["samples"] == {"this computer": 0, "scoreboard": 0}
+    assert {r["model"] for r in p["rows"]} >= {"coder-gguf/coder-7b-q4_k_m"}
+    cell = next(iter(p["rows"][0]["devices"].values()))
+    assert cell["low"] <= cell["tok_s"] <= cell["high"]
+    code, m = ts.call(base, "/api/work/measures")
+    assert code == 200 and m["weights"] == {}
+    code, e = ts.call(base, "/api/settings/sharing", {"endpoint": "github:not a repo"})
+    assert code == 400
+    code, ok = ts.call(base, "/api/settings/sharing", {"endpoint": "github:acme/board", "github_token": "ghp_" + "x" * 36})
+    assert code == 200 and ok["settings"]["endpoint"] == "github:acme/board"
+    assert (tmp_path / "home" / "github.token").stat().st_mode & 0o077 == 0
+    code, g = ts.call(base, "/api/settings/sharing")
+    assert g["github_token_set"] and "ghp_" not in json.dumps(g)
+    ts.call(base, "/api/settings/sharing", {"github_token": ""})
+    assert not ts.call(base, "/api/settings/sharing")[1]["github_token_set"]
