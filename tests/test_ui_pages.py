@@ -28,7 +28,7 @@ PAGES = [
     ("viz/projects_page.py", "PAGE"), ("viz/connect_page.py", "PAGE"), ("viz/setup_page.py", "PAGE"),
     ("viz/lab_page.py", "PAGE"), ("viz/review_page.py", "PAGE"), ("viz/settings_page.py", "PAGE"),
     ("viz/system_page.py", "PAGE"),
-    ("viz/features_page.py", "PAGE"), ("viz/graphs_page.py", "PAGE"),
+    ("viz/features_page.py", "PAGE"), ("viz/graphs_page.py", "PAGE"), ("viz/work_page.py", "PAGE"),
 ]
 PLACEHOLDERS = {"__MODELS__": '""', "__PROFILES__": '""'}
 

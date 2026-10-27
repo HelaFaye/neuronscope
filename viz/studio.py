@@ -69,6 +69,7 @@ import mcp_client as ns_mcp
 import context_compress as ns_compress
 import quant_select as ns_qsel
 import ns_pairing
+import work_log as ns_work
 try:
     from hostcheck import Host, check as host_check
 except ImportError:
@@ -1343,8 +1344,8 @@ def link_target(model_id: str | None):
     if ln is None:
         return None
     if ln.get("kind") == "agent":
-        return remote().upstream(ln), rid
-    return {"base": ln["url"], "token": ln["token"], "fingerprint": ln.get("fingerprint", "")}, rid
+        return {**remote().upstream(ln), "name": name}, rid
+    return {"base": ln["url"], "token": ln["token"], "fingerprint": ln.get("fingerprint", ""), "name": name}, rid
 
 
 def _upstream_stream(upstream: dict, path: str, payload: dict):
@@ -1853,7 +1854,37 @@ def context_usage(req: dict, role: str) -> dict:
             "turns": len(msgs), "summarized": summarized}
 
 
-def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
+CHAT_PATHS = ("/v1/chat/completions", "/v1/completions")
+
+
+def proxy(path, payload, stream_to=None, hold_done=False, upstream=None, record=True, source="api"):
+    """_proxy, with each chat reply written to the work log (who answered, on what, its tokens and time).
+    record=False for a call its caller logs itself (a project task)."""
+    if not record or path not in CHAT_PATHS:
+        return _proxy(path, payload, stream_to, hold_done, upstream)
+    t0, meas, err = time.time(), {}, None
+    worker = model = host = device = None
+    if upstream is not None:
+        host = upstream.get("name") or "linked host"
+        model = payload.get("model")
+        worker = f"{host}{LINK_SEP}{model}" if model else host
+    elif PROC["model"]:
+        worker = model = PROC["model"]["id"]
+        device = chat_device()
+    try:
+        out = _proxy(path, payload, stream_to, hold_done, upstream, meas)
+        if isinstance(out, dict) and ("usage" in out or "timings" in out):
+            meas.update(ns_work.llama_timings(out))
+        return out
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        log_work("chat", worker or "chat model", model=model, host=host, device=device, error=err,
+                 seconds=time.time() - t0, source=source, **meas)
+
+
+def _proxy(path, payload, stream_to=None, hold_done=False, upstream=None, meas=None):
     """Forward to the running llama-server. Streams SSE when asked.
 
     Streaming matters here: on an iGPU at a few tokens per second, a
@@ -1892,7 +1923,10 @@ def proxy(path, payload, stream_to=None, hold_done=False, upstream=None):
             stream_to.flush()
             if line.startswith("data:") and "[DONE]" not in line:
                 try:
-                    ch = json.loads(line[5:])["choices"][0]
+                    d = json.loads(line[5:])
+                    if meas is not None and ("usage" in d or "timings" in d):
+                        meas.update(ns_work.llama_timings(d))
+                    ch = d["choices"][0]
                     delta = ch.get("delta") or {}
                     text.append(delta.get("content") or "")
                     finish = ch.get("finish_reason") or finish
@@ -2523,6 +2557,64 @@ def workers_registry():
     return reg
 
 
+def work_log():
+    """The work log (scripts/work_log.py), beside Studio's config unless NS_WORK_LOG names a folder."""
+    wl = STATE.get("work_log")
+    if wl is None:
+        home = os.path.dirname(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+        wl = STATE["work_log"] = ns_work.WorkLog(os.environ.get("NS_WORK_LOG") or os.path.join(home, "worklog"))
+    return wl
+
+
+def log_work(kind, worker, **kw):
+    """Never lets bookkeeping fail the work it describes."""
+    if STATE.get("work_log_off"):
+        return
+    try:
+        work_log().record(kind, worker, **kw)
+    except Exception as e:
+        print(f"work log: {e}", file=sys.stderr)
+
+
+def chat_device():
+    """Where the chat model runs, from its llama-server arguments."""
+    args = [str(a) for a in PROC.get("args") or []]
+    for flag in ("--device", "-dev"):
+        if flag in args[:-1]:
+            return args[args.index(flag) + 1]
+    for flag in ("-ngl", "--n-gpu-layers", "--gpu-layers"):
+        if flag in args[:-1] and args[args.index(flag) + 1] == "0":
+            return "CPU"
+    gpus = TELEMETRY.get("local") or []
+    return gpus[0].get("name") or "GPU" if len(gpus) == 1 else "GPU"
+
+
+def _hw_sampler():
+    """This computer's GPUs every 30 s, and each linked host's while the Workers page keeps them fresh."""
+    import remote_hosts
+    while True:
+        if not STATE.get("work_log_off"):
+            try:
+                work_log().sample(remote_hosts.nsr.gpu_telemetry())
+                with TELEMETRY["lock"]:
+                    hosts = dict(TELEMETRY["hosts"]) if time.time() - TELEMETRY["t"] < 60 else {}
+                for name, h in hosts.items():
+                    if isinstance(h, dict) and h.get("gpus"):
+                        work_log().sample(h["gpus"], host=name)
+            except Exception as e:
+                print(f"work log: hardware sample: {e}", file=sys.stderr)
+        time.sleep(30)
+
+
+def job_finished(meta: dict) -> None:
+    started, ended = meta.get("started"), meta.get("ended")
+    rc = meta.get("returncode")
+    log_work("job", meta.get("kind") or "job", seconds=(ended - started) if started and ended else None,
+             ok=rc == 0, error=None if rc == 0 else f"exit {rc}" if rc is not None else meta.get("status"),
+             host=meta.get("host"), device=(meta.get("values") or {}).get("device"), source=meta.get("id"))
+    threading.Thread(target=sharing_after_job, args=(meta,), daemon=True).start()
+
+
 TELEMETRY = {"lock": threading.Lock(), "want": 0.0, "local": [], "hosts": {}, "t": 0.0, "thread": None,
              "health": {}}
 
@@ -2673,7 +2765,7 @@ def chat_off_machine(wid, msgs, usage):
         return worker_chat(ep["url"], ep.get("model") or "default", msgs, token=ep.get("token"), usage=usage)
     up, rid = link_target(wid)
     r = proxy("/v1/chat/completions", {"model": rid, "messages": msgs, "max_tokens": 4096,
-                                       "temperature": 0.3, "stream": False}, upstream=up)
+                                       "temperature": 0.3, "stream": False}, upstream=up, record=False)
     usage.update(r.get("usage") or {})
     return ((r.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
 
@@ -3297,7 +3389,7 @@ def run_task(pid, tid, wid=None, t0=None):
     reg, usage, label = workers_registry(), {}, f"{pid}/{tid}"
     if t0 is None and wid:
         t0 = reg.begin(wid, label)
-    text = err = check = screen = None
+    text = err = check = screen = mid = where = None
     fatal = False
     try:
         with store.lock(pid):
@@ -3312,6 +3404,7 @@ def run_task(pid, tid, wid=None, t0=None):
             if model is None:
                 raise RuntimeError(f"assigned model {mid!r} is not in the models directories")
             w = POOL.acquire(model, policy.get("devices"), policy.get("device_settings"))
+            where = w.get("where") or (chat_device() if w.get("shared") else None)
             try:
                 alias = load_settings().get(_key(model["path"]), {}).get("served_name") or model["id"]
                 text = worker_chat(w["url"], alias, msgs, usage=usage)
@@ -3337,6 +3430,12 @@ def run_task(pid, tid, wid=None, t0=None):
     finally:
         if wid:
             reg.end(wid, t0, label, err, usage.get("completion_tokens") or 0)
+            kind = worker_kind(wid)
+            host = (urllib.parse.urlsplit((reg.endpoint(wid) or {}).get("url", "")).hostname if kind == "endpoint"
+                    else wid.partition(LINK_SEP)[0] if kind == "remote" else None)
+            log_work("task", wid, model=mid, device=where, host=host, error=err, source=f"project {pid}",
+                     seconds=time.time() - t0 if t0 else None, prompt_tokens=usage.get("prompt_tokens"),
+                     completion_tokens=usage.get("completion_tokens"))
             if err and wid.startswith("ep:") and re.search(r"URLError|ConnectionRefused|timed out|Errno", err):
                 # Down now, not at the next health check: its other tasks wait instead of failing too.
                 with TELEMETRY["lock"]:
@@ -4203,6 +4302,27 @@ class Handler(BaseHTTPRequestHandler):
         return G.Env(st, permissions(), model=str(req.get("model") or ""), profile=str(req.get("profile") or ""),
                      workdir=req.get("workdir") or None, mcp_call=mcp_call, graph_loader=store.get)
 
+    def _work(self):
+        """/work and its API: the work log's breakdown, and activation stats from the review store."""
+        u = urllib.parse.urlsplit(self.path)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+        try:
+            if u.path == "/work":
+                import work_page
+                return self._html(work_page.PAGE)
+            if u.path == "/api/work":
+                return self._json(200, ns_work.breakdown(work_log(), q.get("since", "24h")))
+            if u.path == "/api/work/neurons":
+                store = review_store()
+                if not q.get("model"):
+                    return self._json(200, {"models": store.models()})
+                import neuron_review
+                verdicts = [q["verdict"]] if q.get("verdict") else None
+                return self._json(200, neuron_review.activation_stats(store, q["model"], verdicts=verdicts))
+        except ValueError as e:
+            return self._json(400, {"error": str(e)})
+        return self._json(404, {"error": "not found"})
+
     def _graph_store(self):
         import graphs_api
         return graphs_api.Store(STATE.get("graphs_dir") or os.path.expanduser("~/.neuronscope/graphs"))
@@ -4849,7 +4969,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     PAGES = {"/", "/setup", "/settings", "/lab", "/review", "/projects", "/workers", "/jobs", "/connect", "/remote",
-             "/link", "/system", "/features", "/graphs", "/addons"}
+             "/link", "/system", "/features", "/graphs", "/addons", "/work"}
 
     def do_GET(self):
         self._route = None
@@ -5050,6 +5170,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._graphs(None)
+        if self.path == "/work" or self.path.startswith("/api/work"):
+            if not self._owner_only():
+                return
+            return self._work()
         if self.path == "/api/addons/widgets":
             # any signed-in viewer: which widget scripts the pages and the Godot client should load
             return self._json(200, plugins().widget_assets())
@@ -6831,6 +6955,8 @@ def build_parser():
     p.add_argument("--hardware", default=os.path.expanduser("~/.neuronscope/hardware.json"),
                    help="accelerators for worker models: llama-server per backend (rocm, vulkan, cuda, metal, "
                         "cpu), per-device settings, devices to skip (see scripts/accelerators.py)")
+    p.add_argument("--no-work-log", action="store_true",
+                   help="do not record who did what work and hardware samples (/work)")
     p.add_argument("--graphs-dir", default=os.path.expanduser("~/.neuronscope/graphs"),
                    help="node graphs and their runs (/graphs)")
     p.add_argument("--traces-dir", default=os.path.expanduser("~/.neuronscope/traces"),
@@ -6971,8 +7097,7 @@ def main(argv=None):
                              "Restart Studio with --allow-remote-jobs to enable them.")
     else:
         STATE["jobs"] = ns_jobs.JobRunner(a.jobs_dir, a.max_jobs, cwd=ws["root"])
-        STATE["jobs"].on_finish = lambda meta: threading.Thread(target=sharing_after_job, args=(meta,),
-                                                                daemon=True).start()
+        STATE["jobs"].on_finish = job_finished
 
     scheme = "https" if tls else "http"
     print(f"NeuronScope Studio on {scheme}://{a.host}:{a.port}")
@@ -7013,6 +7138,8 @@ def main(argv=None):
             srv.socket, server_side=True, do_handshake_on_connect=False)
     threading.Thread(target=idle_reaper, daemon=True).start()
     threading.Thread(target=score_worker, daemon=True).start()
+    STATE["work_log_off"] = a.no_work_log or os.environ.get("NS_WORK_LOG") == "off"
+    threading.Thread(target=_hw_sampler, daemon=True).start()
     recover_projects()
     threading.Thread(target=director_loop, daemon=True).start()
     try:

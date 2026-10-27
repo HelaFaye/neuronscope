@@ -81,7 +81,8 @@ const NS_NAV=[
   {label:'Tasks',icon:'tasks',tip:'Jobs, projects split into tasks, and the workers that run them',mobile:1,kids:[
     {href:'/jobs',label:'Jobs',tip:'Evaluation, retraining, benchmark and analysis jobs'},
     {href:'/projects',label:'Projects',tip:'Split a project into tasks for worker models'},
-    {href:'/workers',label:'Workers',tip:'Where tasks run; GPU temperatures'}]},
+    {href:'/workers',label:'Workers',tip:'Where tasks run; GPU temperatures'},
+    {href:'/work',label:'Distribution',tip:'Where the work went: shares, tokens, speeds and hardware per device, and neuron activation plots'}]},
   {label:'Studio',icon:'spark',tip:'Studio tools: features and emotions, graphs, neuron review, labs and 3D views',kids:[
     {href:'/features',label:'Features',tip:'Feature dictionaries, what a reply was made of, circuits, emotion vectors, steering'},
     {href:'/graphs',label:'Graphs',tip:'Node graphs: screen, verify and route model inputs and outputs'},
@@ -231,6 +232,7 @@ const NS_SECTIONS=[
   ['Documents (RAG collections)','/#docs','Studio'],['Tools (MCP) in chat','/#tools','Studio'],['Pair a device, link Studios','/link','Devices'],
   ['Workers: where project tasks run, GPU temperatures','/workers','Workers'],['Projects','/projects','Projects'],['Lab and 3D views','/lab','Lab'],
   ['Neuron review','/review','Review'],['Jobs','/jobs','Jobs'],
+  ['Work distribution: tokens, speed and hardware per device','/work','Distribution'],['Neuron activation stat plots','/work#neurons','Distribution'],
   ['Feature dictionaries (sparse autoencoders)','/features#dicts','Features'],['Read a reply: features, emotions, logit lens','/features#read','Features'],
   ['Attribution graph (circuit tracing)','/features#circuits','Features'],['Emotion vectors','/features#emotions','Features'],
   ['Steer with features and emotions','/features#steer','Features'],['Train a dictionary or transcoder','/jobs#kind=feat_train','Features']];

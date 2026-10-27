@@ -84,6 +84,41 @@ console → *GPUs and thermal guard*):
 GPUs also throttle and protect themselves near their own maximum. The guard
 is an earlier, gentler stop that you choose.
 
+## Work distribution
+
+**Tasks → Distribution** (`/work`) shows where the work went over a window: the
+last hour, 24 hours, 7 days, 30 days or everything kept. The Workers page counts
+only since Studio started; this page reads a log that lasts across restarts.
+
+Studio logs every unit of work:
+
+- each chat reply through its API, including linked hosts;
+- each project task attempt;
+- each job.
+
+For each it records the worker, model, device and computer, the prompt and
+generated tokens, and the time taken. Studio also samples every GPU's load,
+VRAM, temperature and power every 30 seconds, for this computer and for the
+remote hosts the Workers page is watching.
+
+| part | what it shows |
+|---|---|
+| tiles | units of work, failures, prompt and generated tokens, summed busy time, the fastest device |
+| who did the work | one row per device, worker, model, kind of work (chat, task, job) or source. Each row has its share of the work and of the tokens, tokens in and out, generation and prompt speed, busy time, utilisation, average time and failures |
+| tokens over time | stacked bars of tokens per device |
+| hardware | per GPU: load, VRAM, temperature and power curves, with average load, peak temperature and VRAM, average power and the energy used |
+| neuron activations | for a model with recorded activation profiles ([REVIEW.md](REVIEW.md)), filtered by verdict if you like: a box plot per layer (5th, 25th, 50th, 75th and 95th percentiles and the mean), a histogram of every value, a layer × neuron-position heatmap of the mean, and wrong-answer mean minus correct-answer mean |
+
+Speeds come from the server's own timings where it reports them
+(llama-server does). Otherwise they are tokens over wall time, which also
+counts queueing and the network.
+
+The log is JSON Lines, one file per day: `worklog/work-*.jsonl` and
+`worklog/hw-*.jsonl` next to Studio's `config.json` (or in `NS_WORK_LOG`).
+It is kept for 90 days and never leaves this computer. `--no-work-log` (or
+`NS_WORK_LOG=off`) turns it off. `python scripts/work_log.py --since 7d`
+prints the same breakdown as JSON.
+
 ## API
 
 | route | what |
@@ -93,6 +128,8 @@ is an earlier, gentler stop that you choose.
 | `POST /api/workers/control` | `{id, paused, draining, max_parallel, takes, stop}` |
 | `POST /api/workers/routes` | `{routes: {subject: [worker ids]}}` |
 | `POST /api/workers/test` | `{id}`: a timed one-line chat (endpoints and remote hosts) |
+| `GET /api/work?since=24h` | the work distribution: totals, `by_device`, `by_worker`, `by_model`, `by_kind`, `by_source`, `timeline`, `hardware` |
+| `GET /api/work/neurons[?model=&verdict=]` | the models with activation profiles, or one model's activation stats |
 
 Worker ids: a local model's id; `ep:<name>` for an endpoint;
 `<host>:<model>` for a remote one. Endpoints, controls and routes are kept

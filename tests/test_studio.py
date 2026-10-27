@@ -51,7 +51,7 @@ def studio_srv(tmp_path):
         "links_path": str(tmp_path / "links.json"), "fingerprint": None,
         "review_dir": str(tmp_path / "review"), "review": None,
         "tool_rules_path": str(tmp_path / "tool-rules.json"), "subject_models": {},
-        "config_path": str(tmp_path / "config.json"), "workspace_name": "default"})
+        "config_path": str(tmp_path / "config.json"), "workspace_name": "default", "work_log": None})
     srv = ThreadingHTTPServer(("127.0.0.1", 0), studio.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"

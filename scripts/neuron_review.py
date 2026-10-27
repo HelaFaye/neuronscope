@@ -454,6 +454,42 @@ def view_payload(store: ReviewStore, model: str, stat: str = "association", how:
 
 # ================================================================ ingest
 
+def activation_stats(store: ReviewStore, model: str, max_obs: int = 500, cols: int = 128, **filters) -> dict:
+    """The distribution of recorded activations (CETT profiles) for the stat plots on /work: per layer a
+    five-number summary and mean over every observation and bin, a layer x bin heatmap of the mean
+    (cols wide), wrong minus correct where both exist, and a histogram of every value."""
+    rows = store.query(model, **filters)[-max_obs:]
+    if not rows:
+        return {"model": model, "n": 0}
+    X = store.vecs(model, rows)                                  # [n, layers, bins]
+    n, L, B = X.shape
+    flat = X.transpose(1, 0, 2).reshape(L, -1)
+    q = np.percentile(flat, [5, 25, 50, 75, 95], axis=1)
+    cols = max(1, min(cols, B))
+
+    def squeeze(M):                                              # [L, B] -> [L, cols]
+        return M[:, : B - B % cols].reshape(L, cols, -1).mean(axis=2)
+
+    out = {"model": model, "n": n, "layers": L, "bins": B, "first": rows[0]["t"], "last": rows[-1]["t"],
+           "per_layer": {"p5": q[0], "p25": q[1], "p50": q[2], "p75": q[3], "p95": q[4],
+                         "mean": flat.mean(axis=1), "max": flat.max(axis=1)},
+           "heatmap": squeeze(X.mean(axis=0))}
+    verdict = np.array([r["verdict"] for r in rows])
+    if (verdict == "wrong").any() and (verdict == "correct").any():
+        out["wrong_minus_correct"] = squeeze(X[verdict == "wrong"].mean(axis=0) - X[verdict == "correct"].mean(axis=0))
+        out["n_wrong"], out["n_correct"] = int((verdict == "wrong").sum()), int((verdict == "correct").sum())
+    lo, hi = float(np.percentile(X, 0.5)), float(np.percentile(X, 99.5))
+    counts, edges = np.histogram(np.clip(X, lo, hi), bins=40, range=(lo, hi + 1e-9))
+    out["histogram"] = {"counts": counts, "edges": edges}
+    def plain(v):
+        if isinstance(v, dict):
+            return {k: plain(x) for k, x in v.items()}
+        if isinstance(v, np.ndarray):
+            return np.round(v.astype(np.float64), 5).tolist()
+        return v
+    return plain(out)
+
+
 def _subjects(text: str, given=None) -> list[str]:
     if given:
         return [given] if isinstance(given, str) else list(given)

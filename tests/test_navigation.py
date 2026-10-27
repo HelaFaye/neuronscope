@@ -49,7 +49,7 @@ def test_sidebar_groups():
     js = ui_links.js()
     groups = {g: re.findall(r"label:'([^']+)'", body)
               for g, body in re.findall(r"\{label:'([^']+)',icon:'\w+',tip:'[^']*'(?:,mobile:1)?,kids:\[(.*?)\]\}", js, re.S)}
-    assert groups == {"Models": ["My Models", "Discover"], "Tasks": ["Jobs", "Projects", "Workers"],
+    assert groups == {"Models": ["My Models", "Discover"], "Tasks": ["Jobs", "Projects", "Workers", "Distribution"],
                       "Studio": ["Features", "Graphs", "Review", "Lab"], "Connect": ["Apps", "Remote hosts", "Devices"]}
     for fn in ("nsSub", "nsGroupHref", "ns-fly"):                   # sibling tabs, last-used page, flyout
         assert fn in js
