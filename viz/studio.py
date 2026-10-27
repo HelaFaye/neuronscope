@@ -6243,7 +6243,11 @@ ol.gs{list-style:none;padding:0;margin:.8rem 0 0;display:grid;gap:.55rem}ol.gs l
 ol.gs .ck{flex:none;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:12px;margin-top:1px}
 ol.gs li.done .ck{background:var(--ok);border-color:var(--ok);color:var(--accfg)}ol.gs li.done b{color:var(--mut)}
 .starters{display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.35rem}.starters button{text-align:left;font-weight:400;font-size:12.5px;line-height:1.35}
-@media(max-width:600px){.starters{grid-template-columns:1fr}.empty{margin:4vh auto}}
+.tasks{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem;margin-top:.35rem}
+.task{display:flex;flex-direction:column;gap:.15rem;padding:.5rem .6rem;border:1px solid var(--line);border-radius:8px;text-decoration:none;color:inherit;font-size:12.5px;line-height:1.35}
+.task:hover{border-color:var(--acc)}.task b{color:var(--fg)}.task span{color:var(--mut);font-size:12px}
+@media(max-width:760px){.tasks{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){.starters{grid-template-columns:1fr}.tasks{grid-template-columns:1fr}.empty{margin:4vh auto}}
 .warnico{color:#e8890c;cursor:help;font-weight:700;margin-left:.3rem}
 .stat{font-size:11px;color:var(--mut);cursor:help}
 .route{font-size:11px;color:var(--mut);margin-top:.2rem}
@@ -6750,10 +6754,24 @@ async function emptyState(){ const el=$('#log');
     !modelsLoaded&&!nModels?step(false,'A model','Looking in your model folders…'):step(nModels>0,'A model',nModels?`${nModels} model${nModels>1?'s':''} in <a href="#models">My Models</a>.`:'<a href="#hub">Discover</a> finds and downloads one (each file says whether it fits this computer), or <a href="/setup#paths">add a folder</a> that already has .gguf files.'),
     step(running,'Load it',running?`${esc(status_.id||status_.model)} is loaded.`:'Pick one in <a href="#models">My Models</a>, or just send a message: with the model picker on <i>auto</i>, Studio loads the best one for the question.'),
   ].join('');
-  el.innerHTML=`<div class="empty" style="text-align:left;max-width:560px"><h2 style="text-align:center">Start a conversation</h2>
-    <ol class="gs">${steps}</ol>
+  const allSet=ready&&ready.server&&nModels>0&&running;
+  const pair=models.slice(0,2).map(m=>`${m.id.split('/').pop().replace(/[^\w.-]/g,'-').slice(0,24)}=${location.origin}/v1@${m.id}`);
+  // the most common things people come to do, the ones this person uses most first
+  const TASKS=[
+    ['Find a model that fits this computer','Each file says whether it fits in memory, and how fast it should run','#hub'],
+    ['Compare models on your own questions','A graded TestQA run: accuracy, confident mistakes and declines per subject','/jobs#'+new URLSearchParams({kind:'testqa',endpoint:pair.join(' '),out:'runs/compare.json'}).toString()],
+    ['Use these models in another app','Claude Desktop, Cline, or any OpenAI client, pointed at this Studio','/connect'],
+    ['See what a reply is made of','Features, emotions and the logit lens over any reply','/features#read'],
+    ['Split a project across models','Tasks planned, assigned to the right models, checked and reviewed','/projects'],
+    ['Where the work went','Tokens, speed and hardware per device, and predicted speed for every model','/work']];
+  const use=typeof nsUsage==='function'?nsUsage():{};
+  const used=h=>use[h.split('?')[0].split('#')[0]+(h.startsWith('#')?h:'')]||use[h.split('#')[0]]||0;
+  const tasks=TASKS.map((t,i)=>[t,i]).sort((a,b)=>used(b[0][2])-used(a[0][2])||a[1]-b[1]).map(x=>x[0]);
+  const tasksHtml=`<div class="note" style="margin-top:1rem">Or:</div><div class="tasks">${tasks.map(([t,d,h])=>`<a class="task" href="${esc(h)}" title="${esc(d)}"><b>${esc(t)}</b><span>${esc(d)}</span></a>`).join('')}</div>`;
+  el.innerHTML=`<div class="empty" style="text-align:left;max-width:${allSet?640:560}px"><h2 style="text-align:center">Start a conversation</h2>
+    ${allSet?`<div class="note" style="text-align:center">✓ engine · ✓ ${nModels} model${nModels>1?'s':''} · ✓ ${esc(status_.id||status_.model)} loaded</div>`:`<ol class="gs">${steps}</ol>`}
     <div class="note" style="margin-top:1rem">Try one:</div><div class="starters">${STARTERS.map((q,i)=>`<button type="button" data-st="${i}">${esc(q)}</button>`).join('')}</div>
-    <div class="note" style="margin-top:1rem">Other apps can use these models too: point any OpenAI client at <code>${esc(location.origin)}/v1</code>, or see <a href="/connect">Connect</a>. New here? The <b>?</b> button has a two-minute tour.</div></div>`;
+    ${allSet?tasksHtml:`<div class="note" style="margin-top:1rem">Other apps can use these models too: point any OpenAI client at <code>${esc(location.origin)}/v1</code>, or see <a href="/connect">Connect</a>. New here? The <b>?</b> button has a two-minute tour.</div>`}</div>`;
   el.querySelectorAll('[data-st]').forEach(b=>b.onclick=()=>{ $('#in').value=STARTERS[+b.dataset.st]; $('#in').focus(); sideSoon(); }); }
 function renderChat(){
   sideSoon(); $('#log').innerHTML='';

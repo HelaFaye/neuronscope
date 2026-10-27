@@ -16,6 +16,37 @@ apps share one library.
 Studio does not implement inference, tokenization or sampling; llama.cpp does
 that. Studio handles everything around it.
 
+## Built around what people do most
+
+People who run NeuronScope most often come to do these things, in roughly
+this order. Each is a click or two from where they start:
+
+| what people come to do | the short path |
+|---|---|
+| chat with a local model | the home page; with the model picker on *auto*, sending a message loads the best model for the question |
+| get a model that fits this computer | **Discover**: each file says whether it fits in memory, and **Tasks → Distribution** predicts how fast it would run on each device |
+| know whether a reply can be trusted | *check replies* under the chat box: token risk from the model's own neurons, with a 3D view of the reply |
+| compare models on their own questions | **Compare models on your own questions** on the home page opens a TestQA run with two models already filled in |
+| use the models from another app | **Connect**, and the `/v1` address in the header |
+| look inside a reply | **Studio → Features**, the 3D replay and the live viewer |
+| split larger work across models | **Tasks → Projects**, with **Workers** and **Distribution** to see where the work went |
+
+How the pages get people there:
+
+- **First run.** The home page shows a three-step checklist (engine, a model,
+  load it) and a Setup banner until both the engine and a model are present.
+  Once all three are done, the checklist shrinks to one line.
+- **After setup.** The home page offers the common tasks above. The ones you
+  use most move to the front. Visits are counted in this browser only
+  (`localStorage`), and nothing is sent anywhere.
+- **Search** (Ctrl+K or /) lists your most recent pages first, before typing
+  anything. It finds every page, setting, job, help page and control on the
+  current page.
+- **Fewer things to type.** Fields with known values are dropdowns, and cut
+  text has a tooltip ([UI_AND_CLI.md](UI_AND_CLI.md#long-text-and-known-values)).
+- **The sidebar** groups pages by purpose (Models, Tasks, Studio, Connect).
+  Parts you do not use can be removed under **Add-ons**, which shortens it.
+
 ## Feature map
 
 | | LM Studio | Studio |

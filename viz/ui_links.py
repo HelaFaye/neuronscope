@@ -237,6 +237,18 @@ const NS_SECTIONS=[
   ['Attribution graph (circuit tracing)','/features#circuits','Features'],['Emotion vectors','/features#emotions','Features'],
   ['Steer with features and emotions','/features#steer','Features'],['Train a dictionary or transcoder','/jobs#kind=feat_train','Features']];
 let NS_FIND_EXTRA=null;
+// ---- what this person uses: page visits counted in this browser only, for "recent" in search and for
+// ordering the common tasks on the home page
+function nsUsage(){ try{ return JSON.parse(localStorage.getItem('ns-usage')||'{}'); }catch(e){ return {}; } }
+function nsRecentPages(){ try{ return JSON.parse(localStorage.getItem('ns-recent')||'[]'); }catch(e){ return []; } }
+function nsTrack(h,t){ try{ const u=nsUsage(); u[h]=(u[h]||0)+1; localStorage.setItem('ns-usage',JSON.stringify(u));
+  const r=nsRecentPages().filter(x=>x.h!==h); r.unshift({h,t:t||h,ts:Date.now()}); localStorage.setItem('ns-recent',JSON.stringify(r.slice(0,20))); }catch(e){} }
+(function(){ const where=()=>{ const sec=location.hash&&/^#[a-z][\w-]*$/i.test(location.hash)?location.hash:'';
+    return location.pathname+(location.pathname==='/'||location.pathname==='/jobs'?sec:''); };
+  const name=()=>{ const n=NS_NAV.flatMap(it=>[it,...(it.kids||[])]).find(k=>k.href&&k.href.split('#')[0]===location.pathname&&(!k.href.includes('#')||k.href===where()));
+    return (n&&n.label)||document.title.replace(/^Studio\s*[·:]?\s*/,'')||location.pathname; };
+  const go=()=>nsTrack(where(),name()); if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',go); else go();
+  addEventListener('hashchange',()=>{ if(location.pathname==='/'||location.pathname==='/jobs') go(); }); })();
 async function nsFindIndex(){ const out=NS_SECTIONS.map(([t,h,d])=>({t,h,d}));
   NS_NAV.forEach(it=>{ if(it.href) out.push({t:it.label,h:it.href,d:it.tip}); (it.kids||[]).forEach(k=>out.push({t:k.label,h:k.href,d:it.label+': '+k.tip})); });
   if(!NS_FIND_EXTRA){ NS_FIND_EXTRA=[];
@@ -264,7 +276,8 @@ async function nsFind(){ if(document.getElementById('ns-find')) return; const id
       (tgt||it.el).focus&&(tgt||it.el).focus(); it.el.style.outline='2px solid var(--acc,#6f93ff)'; it.el.style.outlineOffset='3px'; setTimeout(()=>{ it.el.style.outline=''; },2500); return; }
     const [path,hash]=it.h.split('#'); if((path||'/')===location.pathname&&hash!==undefined){ location.hash=hash; const el=document.getElementById(hash); if(el) el.scrollIntoView({block:'start'}); } else location.href=it.h; };
   const draw=()=>{ const v=q.value.trim(); hits=v?idx.map(it=>[nsScore(it,v),it]).filter(x=>x[0]>=0).sort((a,b)=>b[0]-a[0]).slice(0,40).map(x=>x[1])
-      :idx.filter(it=>!it.el).slice(0,12); sel=Math.min(sel,Math.max(0,hits.length-1));
+      :[...nsRecentPages().filter(r=>r.h!==location.pathname+location.hash&&r.h!==location.pathname).slice(0,5).map(r=>({t:r.t,h:r.h,d:'Recent · '+r.h})),
+        ...idx.filter(it=>!it.el).slice(0,8)]; sel=Math.min(sel,Math.max(0,hits.length-1));
     list.innerHTML=hits.length?hits.map((it,i)=>`<div role="option" data-i="${i}" aria-selected="${i===sel}" style="padding:.45rem .7rem;border-radius:7px;cursor:pointer;${i===sel?'background:color-mix(in srgb,var(--acc,#6f93ff) 18%,transparent)':''}"><div>${nsEsc(it.t)}</div><div style="font-size:12px;color:var(--mut,#9a9a94);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${nsEsc(it.d||it.h||'')}</div></div>`).join('')
       :'<div style="padding:.8rem;color:var(--mut,#9a9a94)">Nothing matches.</div>';
     list.querySelectorAll('[data-i]').forEach(el=>{ el.onclick=()=>go(hits[+el.dataset.i]); el.onmousemove=()=>{ if(sel!==+el.dataset.i){ sel=+el.dataset.i; draw(); } }; }); };
