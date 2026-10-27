@@ -131,7 +131,13 @@ SPECS: dict[str, dict] = {
             F("variant", repeat=True, help="name={json}, each in single quotes, e.g. 'plain={}' 'sled={\"sled\": {\"alpha\": 2}}'; "
                                            "default: plain"),
             F("port", kind="int", default=8090), F("dtype", choices=["auto", "float32", "bfloat16", "float16"],
-                                                   default="auto")]},
+                                                   default="auto"),
+            F("watch_cett", kind="bool", help="each MLP neuron's CETT for every generated token"),
+            F("watch_emotions", help="emotion vectors folder: their activations per token"),
+            F("watch_sae", repeat=True, help="feature dictionary folder: the top features per token"),
+            F("publish", help="live viewer to stream those to as tokens are generated, e.g. http://127.0.0.1:7890"),
+            F("publish_token_file", help="the viewer's access token, if it has one"),
+            F("record", help="save each reply as a trace session for the 3D replay and Godot, e.g. runs/traces")]},
     "rp_fit": {
         "title": "Random-projection steering: fit", "group": "Evaluate", "argv": [S / "rp_steer.py", "fit"],
         "help": "Project layers' MLP outputs to a few dozen random dimensions and find the direction that separates "

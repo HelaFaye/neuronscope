@@ -42,8 +42,8 @@ function url(port){ return `${location.protocol}//${location.hostname}:${port}/`
 function render(){
   $('#svcs').innerHTML=Object.entries(D.services).map(([n,s])=>{
     let extra='';
-    if(n==='replay') extra=`<label class="note">trace</label><select data-cfg="trace">${D.traces.map(t=>`<option value="${esc(t.path)}">${esc((t.model||'')+' · '+(t.created||'')+' · '+(t.source==='studio'?'checked reply':'trace run'))}</option>`).join('')||'<option value="">no traces yet: check a reply in chat, or run “Trace one sample”</option>'}</select>`;
-    if(n==='live') extra=`<label class="note">patched llama-server URL (empty = simulated)</label><input data-cfg="live_source" placeholder="http://127.0.0.1:8080">`;
+    if(n==='replay') extra=`<label class="note">trace</label><select data-cfg="trace">${D.traces.map(t=>`<option value="${esc(t.path)}">${esc((t.model||'')+' · '+(t.created||'')+' · '+({studio:'checked reply',decode_lab:'decoding lab'}[t.source]||'trace run'))}</option>`).join('')||'<option value="">no traces yet: check a reply in chat, or run “Trace one sample”</option>'}</select>`;
+    if(n==='live') extra=`<label class="note">patched llama-server URL (empty = simulated until the decoding lab or autotrace pushes frames)</label><input data-cfg="live_source" placeholder="http://127.0.0.1:8080">`;
     return `<div class="card" data-svc="${esc(n)}"><h2>${esc(TITLES[n]||n)}</h2><div class="note">${esc(s.desc)}</div>${extra}
       <div class="row">${s.running?`<a class="btn pri" target="_blank" rel="noopener" href="${url(s.port)}">Open ↗</a><button data-a="stop">Stop</button><span class="up">running on port ${s.port}</span>`
         :`<button class="pri" data-a="start" ${s.available?'':'disabled'}>Start</button>`}</div><div class="err"></div></div>`}).join('');

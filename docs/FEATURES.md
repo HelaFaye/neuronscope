@@ -189,6 +189,28 @@ Two things are left out of this view:
 - **The first position**, whose activations are outliers.
 - **Dense features**, active on over a fifth of all tokens. They rarely mean one thing. The request field `dense` brings them back.
 
+## Watch while it generates
+
+The decoding lab can watch its own replies. Each generated token produces
+a frame with its top features and emotion activations, and optionally each
+MLP neuron's CETT:
+
+```bash
+python scripts/decode_lab.py --model M --port 8091 \
+    --watch-sae runs/features/m-r12 --watch-emotions runs/emotions/m --watch-cett \
+    --publish http://127.0.0.1:7890 --record runs/traces
+```
+
+- **Live viewer** (`viz/stream.py`, opened from Studio's Live page). Shows emotion lanes under the token strip, the current token's features as chips, and a *colour by* menu to tint tokens by any emotion or the neuron peak.
+- **3D replay** (`viz/bloom.py`), **timeline** and **Godot client**. Open the recorded session; emotion lanes replace the risk strip, and the info line lists the emotions and features at the current token.
+- **The reply itself.** It carries `decode_lab.watch`: the tokens, their top emotions and their features, for scripts that want the numbers.
+
+Steering combines with watching, so you can clamp a feature and watch the
+emotions move as the reply is written. Watching reads the residual stream
+after any steering, so the frames show the steered model.
+[VISUALIZATION.md](VISUALIZATION.md#b-the-decoding-lab) has the frame format
+and cost.
+
 ## Attribution graphs (Circuits)
 
 An attribution graph answers "which features produced this output, and

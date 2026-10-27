@@ -56,6 +56,15 @@ emotion  add an emotion-vector mix (emotions.py)
          "neuronscope": {...}, and feature_lab's /ns/* endpoints (inspect,
          compare, graph, intervene, attribute, sweep) serve Studio's Features page.
 
+Watching (any variant; scripts/live_watch.py):
+  --watch-cett, --watch-emotions DIR, --watch-sae DIR (repeatable) record, for
+  every generated token, each MLP neuron's CETT, the emotion activations and the
+  top features. --publish URL sends each token's frame to the live viewer
+  (viz/stream.py) as it is generated; --record DIR saves each reply as a trace
+  session for the 3D replay, the timeline and the Godot client. The reply's
+  "decode_lab" field carries the per-token emotions and features. A request can
+  turn either off with "watch": false or "record": false.
+
 Greedy unless the request sets temperature > 0. One request at a time.
 """
 from __future__ import annotations
@@ -126,8 +135,17 @@ def load_vector(path: str, direction: int = 0, layer: int | None = None):
     return v / v.norm().clamp(min=1e-8)
 
 
+class _Null:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 class Lab:
-    def __init__(self, model_id: str, variants: dict, dtype: str = "auto", attn_eager: bool = False):
+    def __init__(self, model_id: str, variants: dict, dtype: str = "auto", attn_eager: bool = False,
+                 watch: dict | None = None, publisher=None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from logit_lens import final_norm
@@ -157,6 +175,8 @@ class Lab:
                                         r.get("layers"), self.dev)
         self.lock = threading.Lock()
         self.model_id = model_id
+        self.watch = dict(watch or {})
+        self.publisher = publisher
 
     def _early(self, hidden_states, which) -> list:
         L = len(hidden_states) - 1
@@ -206,8 +226,10 @@ class Lab:
                                        else [])
         text_out, t0 = "", time.time()
         steering = feature_lab.Steering(self.model, steer_opt)
+        watch_opt = (extra or {}).get("watch", True)
+        watcher = self.watcher() if watch_opt is not False else None
         try:
-            with torch.no_grad(), steering:
+            with torch.no_grad(), steering, (watcher if watcher is not None else _Null()):
                 for _ in range(max_tokens):
                     o = self.model(input_ids=cur, past_key_values=past, use_cache=True,
                                    output_hidden_states=bool(sled), output_attentions=want_att)
@@ -246,6 +268,10 @@ class Lab:
                     out_ids.append(nxt)
                     new = tok.decode(out_ids, skip_special_tokens=True)
                     piece, text_out = new[len(text_out):], new
+                    if watcher is not None:                      # the model's state when it chose this token
+                        fr = watcher.step(tok.decode([nxt]), u)
+                        if self.publisher is not None:
+                            self.publisher.send(watcher.live_frame(fr, self.publisher.tier))
                     if on_text and piece:
                         on_text(piece)
                     if stop and any(s and s in text_out for s in stop):
@@ -261,7 +287,31 @@ class Lab:
                "spread": spreads, "alpha": alphas}
         if rp is not None:
             out["rp_drift"] = drift
+        if watcher is not None:
+            out["watch"] = watcher.summary()
+            # only the lab's own --record folder is written to; a request can skip it with "record": false
+            if self.watch.get("record") and (extra or {}).get("record", True) is not False:
+                prompt = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+                out["session"] = watcher.save(self.watch["record"], str(prompt), self.model_id, {"variant": variant})
         return out
+
+    def watcher(self):
+        """A live_watch.Watcher for this reply, when watching is configured (--watch-*)."""
+        w = self.watch
+        if not (w.get("cett") or w.get("emotions") or w.get("sae")):
+            return None
+        import feature_lab
+        import live_watch
+        if "_loaded" not in w:                           # vectors and dictionaries are read once, not per reply
+            vec = feature_lab.load_emotions(w["emotions"], self.dev) if w.get("emotions") else None
+            dicts = []
+            for p in w.get("sae") or []:
+                sae, info, maxes, labels, dense = feature_lab.load_dict(p, self.dev)
+                dicts.append((sae, info, maxes, labels, dense, Path(p).name))
+            w["_loaded"] = (vec, dicts)
+        vec, dicts = w["_loaded"]
+        return live_watch.Watcher(self.model, self.tok, cett=bool(w.get("cett")), bins=int(w.get("bins", 256)),
+                                  emotions=vec, dicts=dicts)
 
 
 def make_handler(lab: Lab):
@@ -342,6 +392,8 @@ def make_handler(lab: Lab):
                               "total_tokens": r["n_prompt"] + r["n_out"]},
                     "decode_lab": {"spread": r["spread"], "alpha": r["alpha"], **({"rp_drift": r["rp_drift"]}
                                                                                     if "rp_drift" in r else {}),
+                                   **({"watch": r["watch"]} if "watch" in r else {}),
+                                   **({"session": r["session"]} if r.get("session") else {}),
                                    "tokens_per_second": round(r["n_out"] / max(r["seconds"], 1e-6), 2)}})
             except (KeyError, ValueError, TypeError) as e:
                 return self._json(400, {"error": {"message": f"{type(e).__name__}: {e}"}})
@@ -379,10 +431,28 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--dtype", default="auto", choices=["auto", "float32", "bfloat16", "float16"])
     p.add_argument("--prompt", help="answer this once with every variant and exit (no server)")
+    g = p.add_argument_group("watching (realtime views; docs/FEATURES.md)")
+    g.add_argument("--watch-cett", action="store_true", help="CETT of every MLP neuron for each generated token")
+    g.add_argument("--watch-bins", type=int, default=256, help="max-pool each layer's neurons to this many bins")
+    g.add_argument("--watch-emotions", help="emotion vectors folder (emotions.py build): activations per token")
+    g.add_argument("--watch-sae", action="append", help="feature dictionary folder: top features per token (repeatable)")
+    g.add_argument("--publish", help="live viewer to send frames to as tokens are generated, e.g. http://127.0.0.1:7890")
+    g.add_argument("--publish-token-file", help="the viewer's access token")
+    g.add_argument("--publish-tier", choices=["sparse", "binned"], default="sparse")
+    g.add_argument("--record", help="save every reply as a trace session in this folder (3D replay, timeline, Godot)")
     p.add_argument("--max-tokens", type=int, default=128)
     a = p.parse_args(argv)
     variants = parse_variants(a.variant)
-    lab = Lab(a.model, variants, a.dtype)
+    watch = {"cett": a.watch_cett, "bins": a.watch_bins, "emotions": a.watch_emotions, "sae": a.watch_sae or [],
+             "record": a.record}
+    publisher = None
+    if a.publish:
+        import live_watch
+        tok = Path(a.publish_token_file).read_text().strip() if a.publish_token_file else None
+        publisher = live_watch.Publisher(a.publish, tok, a.publish_tier)
+        if not (a.watch_cett or a.watch_emotions or a.watch_sae):
+            watch["cett"] = True                       # publishing without anything to show would be empty
+    lab = Lab(a.model, variants, a.dtype, watch=watch, publisher=publisher)
     if a.prompt:
         for name in variants:
             r = lab.generate([{"role": "user", "content": a.prompt}], name, a.max_tokens)

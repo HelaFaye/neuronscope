@@ -319,3 +319,96 @@ def test_job_kinds_match_script_flags():
                              text=True, timeout=120).stdout
         missing = [f["flag"] for f in spec["fields"] if f["flag"] and f["flag"] not in out]
         assert not missing, (kind, missing)
+
+
+# ---------------------------------------------------------------- watching while generating
+
+def test_live_watch_lab_frames_and_session(tiny, built, emo, tmp_path):
+    import bloom
+    import decode_lab
+    import live_watch
+
+    class Sink:
+        tier, frames = "sparse", []
+
+        def send(self, fr):
+            self.frames.append(fr)
+
+    sink = Sink()
+    rec = tmp_path / "traces"
+    lab = decode_lab.Lab(str(tiny), {"plain": {}}, "float32", publisher=sink,
+                         watch={"cett": True, "bins": 16, "emotions": str(emo), "sae": [str(built["runs"] / "r1")],
+                                "record": str(rec)})
+    r = lab.generate([{"role": "user", "content": "the cat sat"}], "plain", 6)
+    n = r["n_out"]
+    assert n >= 1 and len(sink.frames) == n and len(r["watch"]["tokens"]) == n
+    fr = sink.frames[0]
+    assert fr["src"] == "lab" and fr["t"] == "sparse" and fr["l"] == 3
+    assert all(0 <= l < 3 and 0 <= b < 16 for l, b, _ in fr["c"])
+    assert len(fr["emo"]) == 3 and {e for e, _ in fr["emo"]} <= {"angry", "calm", "happy", "sad"}
+    assert all(abs(z) >= 0.5 for z in fr.get("ez", {}).values())
+    assert fr["feat"] and all(d == "r1" and v > 0 for d, _, v, _ in fr["feat"])
+    assert r["watch"]["emotions"]["names"] == ["angry", "calm", "happy", "sad"]
+
+    # the recorded session: what the 3D replay, the timeline and Godot read
+    man = json.loads((Path(r["session"]) / "manifest.json").read_text())
+    assert Path(r["session"]).parent == rec and man["kind"] == "trace" and man["source"] == "decode_lab"
+    _blob, meta = bloom.build_payload(r["session"], None, 90.0, 5000)
+    assert meta["frames"] == n and meta["layers"] == 3 and meta["neurons"] == 16
+    assert len(meta["emotions"]["z"]) == n and len(meta["emotions"]["names"]) == 4
+    assert len(meta["features"]) == n and meta["source"] == "decode_lab"
+
+    # a request can turn either off, but cannot pick the folder
+    sink.frames.clear()
+    r2 = lab.generate([{"role": "user", "content": "the dog"}], "plain", 3, extra={"record": False})
+    assert "session" not in r2 and r2["watch"]["tokens"]
+    r3 = lab.generate([{"role": "user", "content": "the dog"}], "plain", 3, extra={"watch": False})
+    assert "watch" not in r3 and "session" not in r3
+    lab.watch.pop("record")
+    r4 = lab.generate([{"role": "user", "content": "the dog"}], "plain", 3, extra={"record": True})
+    assert "session" not in r4
+
+    # binned tier and emotions-only frames
+    w = live_watch.Watcher(lab.model, lab.tok, cett=True, bins=8)
+    with w, torch.no_grad():
+        lab.model(input_ids=torch.tensor([[3, 4, 5]]))
+        f = w.step(" x")
+    b = w.live_frame(f, "binned")
+    assert b["t"] == "binned" and len(b["v"]) == 3 and len(b["v"][0]) == 8
+    w = live_watch.Watcher(lab.model, lab.tok, cett=False, emotions=lab.watch["_loaded"][0])
+    with w, torch.no_grad():
+        lab.model(input_ids=torch.tensor([[3, 4, 5]]))
+        f = w.live_frame(w.step(" y"))
+    assert f["t"] == "none" and f["emo"]
+    assert not w.hooks                                                       # removed on exit
+
+
+def test_publisher_and_stream_push(capsys):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import live_watch
+    import stream
+    p = live_watch.Publisher("http://127.0.0.1:9")                          # nothing listens there
+    p.send({"i": 0})
+    p.send({"i": 1})
+    assert capsys.readouterr().out.count("not reachable") == 1
+    stream.STATE.update({"token": "tk", "pushed": 0})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), stream.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        live_watch.Publisher(url, "tk").send({"i": 0, "tok": "x", "t": "none", "s": 0, "emo": [["calm", 1.2]]})
+        assert stream.STATE["pushed"] > 0                                    # the simulation steps aside
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.urlopen(urllib.request.Request(url + "/api/push", data=b"{}"), timeout=5)
+    finally:
+        srv.shutdown()
+
+
+def test_decode_lab_watch_flags():
+    import subprocess
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "decode_lab.py"), "--help"], capture_output=True,
+                         text=True, timeout=120).stdout
+    for flag in ("--watch-cett", "--watch-bins", "--watch-emotions", "--watch-sae", "--publish", "--record"):
+        assert flag in out

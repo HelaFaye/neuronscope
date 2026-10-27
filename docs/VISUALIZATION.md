@@ -256,7 +256,7 @@ Four ways to get activations while you work:
 | | how | available | latency |
 |---|---|---|---|
 | **A** | trace the finished response (`scripts/autotrace.py`) | **now** | one prefill behind |
-| **B** | PyTorch hooks during `generate()` | now, needs bf16 in torch | per token |
+| **B** | PyTorch hooks while the decoding lab generates (`scripts/decode_lab.py --watch-*`) | **now**, Hugging Face weights | per token, with emotions and features |
 | **C** | `llama-cpp-python` + `cb_eval` via ctypes | no compile, fiddly | per token |
 | **D** | patched llama-server (`llama-tools/server-activations/`) | **now**, one rebuild | per token |
 
@@ -290,6 +290,39 @@ of tracing everything.
 
 `viz/stream.py` gained `/api/push`, so a trace produced anywhere on the network
 can drive the viewer.
+
+### B. The decoding lab
+
+`scripts/decode_lab.py` runs a Hugging Face model behind an OpenAI-compatible
+API. With `--watch-*` it reads the model as each token is chosen and sends
+the frame to the viewer before the token reaches the client:
+
+```bash
+python viz/stream.py --token-file viewer.token &
+python scripts/decode_lab.py --model Qwen/Qwen2.5-0.5B-Instruct --port 8091 \
+    --watch-cett --watch-emotions runs/emotions/m --watch-sae runs/features/m-r12 \
+    --publish http://127.0.0.1:7890 --publish-token-file viewer.token \
+    --record runs/traces
+```
+
+Each frame carries:
+
+- **CETT** of every MLP neuron, max-pooled to `--watch-bins` per layer (256 by default);
+- **emotions**: the top three, plus every emotion at least 0.5 standard deviations from its story mean, so the viewer's lanes stay continuous;
+- **features**: the top five of each dictionary, relative to each feature's maximum, with your labels.
+
+`--record` saves each reply as a trace session. The 3D replay, the timeline
+and the Godot client open it like any other, and also show the emotion lanes
+and the features at the current token. A request can skip watching with
+`"neuronscope": {"watch": false}` or skip recording with `{"record": false}`.
+It cannot choose the folder.
+
+Cost on a CPU: 40 tokens of a 0.5B model with all three watched took 6 to 10
+seconds, against about 4 unwatched. Without a classifier nothing is flagged;
+the views show activity, emotions and features, not risk.
+
+[FEATURES.md](FEATURES.md#watch-while-it-generates) covers training the
+dictionaries and emotion vectors these read.
 
 ## D. The patched llama-server
 

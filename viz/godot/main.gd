@@ -93,6 +93,21 @@ class RiskStrip extends Control:
 			for i in n:
 				pts.append(Vector2(x.call(i), y.call(owner_node.prob[i])))
 			draw_polyline(pts, hal, 1.5, true)
+		elif owner_node.meta.get("emotions", {}).has("z"):
+			# a decoding-lab recording: emotion lanes instead of risk
+			var emo: Dictionary = owner_node.meta.emotions
+			var pal := [Color("#FF4D1A"), Color("#3D8BFF"), Color("#1D9E75"), Color("#E7B65C"), Color("#B07CFF"), Color("#c9c9d2")]
+			var mx := 3.0
+			for row in emo.z:
+				for v in row:
+					mx = maxf(mx, absf(float(v)))
+			draw_line(Vector2(0, h / 2), Vector2(w, h / 2), Color(0.16, 0.16, 0.2), 1.0)
+			for k in range(emo.names.size()):
+				var pts := PackedVector2Array()
+				for i in range(mini(n, emo.z.size())):
+					pts.append(Vector2(x.call(i), h / 2 - (h / 2 - 3) * float(emo.z[i][k]) / mx))
+				if pts.size() > 1:
+					draw_polyline(pts, pal[k % pal.size()], 1.4, true)
 		else:
 			draw_string(ThemeDB.fallback_font, Vector2(8, h / 2 + 4),
 				"no classifier scores in this trace: nothing can be flagged", HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
@@ -356,6 +371,32 @@ func _hex(c: Color) -> String:
 	return "#" + c.to_html(false)
 
 
+# Emotion and feature tracks recorded by the decoding lab (scripts/live_watch.py), for the current token.
+func _tracks_text() -> String:
+	var out := ""
+	var emo: Dictionary = meta.get("emotions", {})
+	if emo.has("z") and frame < emo.z.size():
+		var pal := ["#FF4D1A", "#3D8BFF", "#1D9E75", "#E7B65C", "#B07CFF", "#c9c9d2"]
+		var rows := []
+		for k in range(emo.names.size()):
+			rows.append([absf(float(emo.z[frame][k])), k])
+		rows.sort_custom(func(a, b): return a[0] > b[0])
+		var parts := []
+		for r in rows.slice(0, 4):
+			var k: int = r[1]
+			var z := float(emo.z[frame][k])
+			parts.append("[color=%s]%s %s%.1f[/color]" % [pal[k % pal.size()], str(emo.names[k]), "+" if z > 0 else "", z])
+		out += "\nemotions: " + " · ".join(parts)
+	var feats: Array = meta.get("features", [])
+	if frame < feats.size() and feats[frame].size() > 0:
+		var parts := []
+		for f in feats[frame].slice(0, 5):
+			var label := str(f[3]) if str(f[3]) != "" else "#%d" % int(f[1])
+			parts.append("%s [color=#8a8a92]%.2f[/color]" % [label.replace("[", "(").replace("]", ")"), float(f[2])])
+		out += "\nfeatures: " + " · ".join(parts)
+	return out
+
+
 func _update_text() -> void:
 	var flagged: bool = flagged_set.has(frame)
 	var hal := _hex(Color(theme.halluc))
@@ -369,6 +410,8 @@ func _update_text() -> void:
 			str(meta.get("strip", ""))]
 	elif mode == "relative":
 		mode_text = "[color=#ff9b8a]relative mode: some tokens are always flagged[/color]"
+	elif mode == "unscored" and str(meta.get("source", "")) == "decode_lab":
+		mode_text = "decoding-lab recording: CETT, emotions and features per token (no classifier, nothing is flagged)"
 	elif mode == "unscored":
 		mode_text = "[color=#ff9b8a]no classifier scores: nothing can be flagged[/color]"
 	var cells_note := "" if mode == "review" else str(meta.get("cells_note", ""))
@@ -380,7 +423,8 @@ func _update_text() -> void:
 		n_frames, unit, risk, ("   [color=%s][b]FLAGGED[/b][/color]" % hal) if flagged else ""]) + \
 		("[color=%s]●[/color] %s   %s\n" % [act, str(legend.get("active", "")),
 			("[color=%s]◉[/color] %s" % [hal, str(legend.get("halluc"))]) if str(legend.get("halluc", "")) != "" else ""]) + \
-		("[color=#8a8a92]%s%s\n%s[/color]" % [mode_text, ("\n" + cells_note) if cells_note.begins_with("none") else "", order])
+		("[color=#8a8a92]%s%s\n%s[/color]" % [mode_text, ("\n" + cells_note) if cells_note.begins_with("none") else "", order]) + \
+		_tracks_text()
 	# The reply around the current token, shaded by risk; the current token boxed.
 	var labels: Array = meta.get("labels", [])
 	var lo := maxi(0, frame - 14)

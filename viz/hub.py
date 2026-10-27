@@ -124,12 +124,12 @@ def declare(root, py):
     }
 
 
-TRACE_DIRS = ["~/.neuronscope/traces", "runs"]
+TRACE_DIRS = ["~/.neuronscope/traces", "runs", "runs/traces"]     # runs/traces: the decoding lab's --record
 
 
 def find_traces(limit=200):
-    """Trace sessions for the Replay picker: Studio's per-reply checks and
-    scripts/trace_sample.py output, newest first."""
+    """Trace sessions for the Replay picker: Studio's per-reply checks,
+    scripts/trace_sample.py output and decoding-lab recordings, newest first."""
     out = []
     for base in TRACE_DIRS:
         base = os.path.join(STATE["root"], os.path.expanduser(base))
@@ -525,7 +525,7 @@ label{display:block;font-size:12px;color:var(--fg-dim);margin:8px 0 3px}
   <input id="server_bin" placeholder="~/llama.cpp/build/bin/llama-server">
   <label>models directory</label>
   <input id="models_dir" placeholder="/path/to/.models">
-  <label>trace session (for Replay): pick a checked reply or a trace_sample.py run, or type a path</label>
+  <label>trace session (for Replay): pick a checked reply, a trace_sample.py run or a decoding-lab recording, or type a path</label>
   <input id="trace" list="traces" placeholder="runs/trace-abc">
   <datalist id="traces"></datalist>
   <label>live source (for Live): a llama-server patched with llama-tools/server-activations; empty = simulated</label>
@@ -562,7 +562,7 @@ for(const k of ['server_bin','models_dir','trace','live_source']){
 
 fetch('/api/traces').then(r=>r.json()).then(j=>{
   const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  $('#traces').innerHTML=j.traces.map(t=>`<option value="${esc(t.path)}">${esc(t.model||'')} · ${esc(t.created)} · ${t.source==='studio'?'checked reply':'trace run'}</option>`).join('');
+  $('#traces').innerHTML=j.traces.map(t=>`<option value="${esc(t.path)}">${esc(t.model||'')} · ${esc(t.created)} · ${({studio:'checked reply',decode_lab:'decoding lab'})[t.source]||'trace run'}</option>`).join('');
   if(!$('#trace').value && j.traces.length) $('#trace').value=j.traces[0].path;
 }).catch(()=>{});
 

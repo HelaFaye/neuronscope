@@ -171,6 +171,16 @@ def build_payload(session, h_neurons, active_pct, max_cells, demo=False, flag_pr
         if not any(c >= 0 for c in cell_subject):
             cell_subject, subj_names = None, []
 
+    # tracks the decoding lab records beside the neurons (scripts/live_watch.py): emotions and features
+    tracks = {}
+    emo = fields.get("emotions") or {}
+    if emo.get("z") and len(emo["z"]) == T:
+        Z = np.asarray(emo["z"], dtype=np.float32)
+        pick = np.argsort(-np.abs(Z).max(axis=0))[:6]
+        tracks["emotions"] = {"names": [emo["names"][int(k)] for k in pick], "layer": emo.get("layer"),
+                              "z": np.round(Z[:, pick], 2).tolist()}
+    if fields.get("features") and len(fields["features"]) == T:
+        tracks["features"] = fields["features"]
     pieces = fields.get("pieces") or []
     stride = int(fields.get("stride", 1))
     labels = ["".join(pieces[i * stride:(i + 1) * stride]) for i in range(T)] \
@@ -188,7 +198,7 @@ def build_payload(session, h_neurons, active_pct, max_cells, demo=False, flag_pr
         "model": fields.get("meta", {}).get("model"),
         "verdict": fields.get("verdict"),
         "question": (fields.get("question") or "")[:160],
-        "subjects": subj_names, "cell_subject": cell_subject,
+        "subjects": subj_names, "cell_subject": cell_subject, **tracks, "source": fields.get("source"),
     }
 
 
@@ -254,6 +264,7 @@ button:hover{background:#16161e}
 <button data-v="reset" title="R">Reset</button><button id="orbit" title="O: slow automatic orbit">Orbit</button>
 <button id="follow" title="F: glide to the flagged neurons on flagged tokens">Follow flags</button></div>
 <div id="panel"><div id="row"><button id="play">Pause</button><canvas id="spark"></canvas><div id="tok"></div></div>
+<div id="ef" style="margin-top:4px;font-size:12.5px;color:#8a8a92;min-height:1em"></div>
 <div id="text"></div></div>
 <script type="importmap">
 {"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
@@ -405,7 +416,13 @@ function drawSpark(){
   spark.width = r.width*dpr; spark.height = r.height*dpr; sctx.setTransform(dpr,0,0,dpr,0,0);
   const w = r.width, h = r.height, x = i => (T>1 ? i/(T-1) : 0)*w, y = p => h-2-(h-4)*p;
   sctx.clearRect(0,0,w,h); sctx.fillStyle='#16161e'; sctx.fillRect(0,0,w,h);
-  if(!prob){ sctx.fillStyle='#8a8a92'; sctx.font='12px ui-sans-serif,system-ui';
+  if(!prob && meta.emotions){            // a decoding-lab recording: emotion lanes instead of risk
+    const E = meta.emotions, pal = ['#FF4D1A','#3D8BFF','#1D9E75','#E7B65C','#B07CFF','#c9c9d2'];
+    const mx = Math.max(3, ...E.z.flat().map(Math.abs)), ye = v => h/2 - (h/2-3)*v/mx;
+    sctx.strokeStyle='#2a2a34'; sctx.beginPath(); sctx.moveTo(0,h/2); sctx.lineTo(w,h/2); sctx.stroke();
+    E.names.forEach((n,k)=>{ sctx.strokeStyle=pal[k%6]; sctx.lineWidth=1.4; sctx.beginPath();
+      E.z.forEach((row,i)=> i?sctx.lineTo(x(i),ye(row[k])):sctx.moveTo(x(i),ye(row[k]))); sctx.stroke(); });
+  } else if(!prob){ sctx.fillStyle='#8a8a92'; sctx.font='12px ui-sans-serif,system-ui';
     sctx.fillText('no classifier scores in this trace: nothing can be flagged', 8, h/2+4); }
   else {
     sctx.fillStyle=rgba(cHal,0.18);
@@ -421,6 +438,7 @@ spark.onclick = e => { const r = spark.getBoundingClientRect(); t = Math.round((
 const modeNote = meta.mode==='review' ? `${esc(meta.question||'')} · cells: ${esc(meta.cells_note||'')}<br>strip: ${esc(meta.strip||'')}`
   : meta.mode==='absolute' ? `tokens flagged at risk ≥ ${Math.round(thr*100)}% (the classifier's own threshold)`
   : meta.mode==='relative' ? `<span class="bad">relative mode: tokens ${meta.relative_z} SD above this reply's mean, so some are always flagged</span>`
+  : meta.source==='decode_lab' ? `decoding-lab recording: CETT${meta.emotions?', emotions':''}${meta.features?', features':''} for each generated token (no classifier, so nothing is flagged)`
   : `<span class="bad">no classifier scores: nothing can be flagged</span>`;
 const cellsNote = meta.mode!=='review' && meta.cells_note && meta.cells_note.startsWith('none') ? `<br><span class="note">${esc(meta.cells_note)}: risky tokens are shown, H-neuron cells are not</span>` : '';
 const orderNote = meta.order==='weight' ? `x: neurons ordered by classifier weight, H-neurons at the left · y: layer` : `x: neuron index · y: layer`;
@@ -445,6 +463,13 @@ function update(){
   if(lastCur) lastCur.classList.remove('cur');
   lastCur = textEl.children[t]; if(lastCur){ lastCur.classList.add('cur');
     const r = lastCur.offsetTop - textEl.offsetTop; if(r < textEl.scrollTop || r > textEl.scrollTop + textEl.clientHeight - 24) textEl.scrollTop = r - 20; }
+  const ef = document.getElementById('ef'); let efh = '';
+  if(meta.emotions){ const E = meta.emotions, pal = ['#FF4D1A','#3D8BFF','#1D9E75','#E7B65C','#B07CFF','#c9c9d2'];
+    efh += 'emotions: ' + E.names.map((n,k)=>[n,E.z[t][k],pal[k%6]]).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,4)
+      .map(([n,z,c])=>`<span style="color:${c}">${esc(n)} ${z>0?'+':''}${z.toFixed(1)}</span>`).join(' · '); }
+  if(meta.features && meta.features[t] && meta.features[t].length){
+    efh += (efh?'<br>':'') + 'features: ' + meta.features[t].slice(0,6).map(([d,id,r,l])=>`<span title="${esc(d)} #${id}" style="color:#c9c9d2">${esc(l||('#'+id))}</span> ${(+r).toFixed(2)}`).join(' · '); }
+  ef.innerHTML = efh;
   bloom.strength = flagged ? 1.5 : 1.0;
   drawSpark();
 }
