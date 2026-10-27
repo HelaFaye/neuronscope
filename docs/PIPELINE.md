@@ -407,6 +407,49 @@ Selected neurons are written to `h_neurons_moe.json` keyed by `"layer:expert"`,
 alongside the flat form in `h_neurons.json`.
 
 
+## Without CETT: older GPUs and CPUs
+
+CETT needs a forward pass with hooks over bf16 weights (PyTorch), or a
+llama.cpp build with the `cett-dump` tool. On an older GPU (no bfloat16, too
+little memory, no Vulkan 1.2) or on a CPU, use one of these instead
+(`scripts/neuron_attrib.py`, or **Jobs → H-Neurons**):
+
+| measure | what it says about a neuron | needs | cost |
+|---|---|---|---|
+| **saliency** (`grad_x_act`) | how much the model's log-probability of its own answer would change if the neuron went quiet: gradient × activation, a first-order estimate of patching each neuron | PyTorch, Hugging Face weights; float32 (any CPU or GPU) or float16 | one forward and one backward pass per sample |
+| **saliency** (`integrated`) | the same, with the gradient averaged along the path from zero to the actual activation (integrated gradients over the neuron Jacobian). It is more faithful where a neuron is far from linear | as above | `--steps` (8) times saliency |
+| **weights** | how strongly the neuron's output column writes each answer token's unembedding, after the final norm's scale (direct logit attribution). It reads the weights only, with no forward pass, so it shows what a neuron *can* promote, not what it did in a given reply | a GGUF and numpy | seconds per layer |
+| **quant-noise** | how far the neuron's gate and up rows and its down column moved between a reference GGUF and a quant. With `h_neurons.json`, it also says whether the H-Neurons were hit harder than the rest | two GGUFs | seconds per layer |
+
+`saliency` and `weights` write what extraction writes:
+`neuron_index.json` and `<location>/act_<qid>.npy`, float16
+`[layers, neurons]`. Stage 5 (the classifier) reads them unchanged. Point
+`--acts_root` at their folder. Each file records its measure
+(`"measure": "saliency-grad_x_act"`, `"weights-dla"`). **Train on one measure
+only**: their scales and meanings differ from CETT's and from each other's.
+
+```bash
+# CPU, a small model, float32
+python scripts/neuron_attrib.py saliency --model_path Qwen/Qwen3-0.6B \
+  --input_path data/answer_tokens.jsonl --ids_path data/train_qids.json \
+  --output_root data/saliency --device cpu
+# an old GPU without bfloat16
+python scripts/neuron_attrib.py saliency ... --device cuda --dtype float16
+# no forward pass at all
+python scripts/neuron_attrib.py weights --gguf model-Q8_0.gguf \
+  --input_path data/answer_tokens.jsonl --output_root data/dla
+# did the quant damage the H-Neurons?
+python scripts/neuron_attrib.py quant-noise --ref model-F16.gguf \
+  --quant model-Q4_K_M.gguf --neurons models/h_neurons.json --out runs/qnoise
+```
+
+Saliency stores every layer's activations for the backward pass, so its
+memory grows with the reply length. `--max_tokens` (1024) skips longer
+samples. Gradients through very small float16 values can underflow; use
+float32 when results look sparse or all zero. `weights` and `quant-noise`
+read dense FFNs; for mixture-of-experts models, use saliency or CETT with
+`--top-experts`.
+
 ---
 
 ## Keeping LM Studio (and LM Link)

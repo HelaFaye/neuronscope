@@ -475,6 +475,35 @@ SPECS.update({
                    U("ids_path", default="data/train_qids.json"), U("output_root", default="data/activations"),
                    U("locations", multi=True, choices=LOCS, default=["answer_tokens", "all_except_answer_tokens"]),
                    U("gpu_mem", help="e.g. 14GiB; empty = CPU"), U("cpu_mem", help="e.g. 40GiB"), TRUST]},
+    "attrib_saliency": {
+        "title": "4 · Saliency instead of CETT (CPU, older GPUs)", "group": "H-Neurons",
+        "argv": [S / "neuron_attrib.py", "saliency"],
+        "help": "Gradient x activation (or integrated gradients) on the answer: runs in float32 on a CPU or a GPU "
+                "without bfloat16. Same output files as extraction; train on one measure only.",
+        "fields": [U("model_path", req=True), U("input_path", default="data/answer_tokens.jsonl"),
+                   U("ids_path", default="data/train_qids.json"), U("output_root", default="data/saliency"),
+                   U("locations", multi=True, choices=LOCS, default=["answer_tokens", "all_except_answer_tokens"]),
+                   U("method", choices=["grad_x_act", "integrated"], default="grad_x_act",
+                     help="integrated is steps times slower and more faithful"),
+                   U("steps", kind="int", default=8), U("dtype", choices=["float32", "float16", "bfloat16"],
+                                                         default="float32"),
+                   U("device", default="auto", help="cpu, cuda, cuda:1, mps… (auto: a GPU when PyTorch sees one)"),
+                   U("max_tokens", kind="int", default=1024), TRUST]},
+    "attrib_weights": {
+        "title": "4 · Weights-only attribution (no forward pass)", "group": "H-Neurons",
+        "argv": [S / "neuron_attrib.py", "weights"],
+        "help": "How strongly each neuron writes each answer token, from the GGUF's weights alone (numpy, any "
+                "computer). A static measure: what a neuron can promote, not what it did.",
+        "fields": [U("gguf", req=True), U("input_path", default="data/answer_tokens.jsonl"),
+                   U("ids_path", default="data/train_qids.json"), U("output_root", default="data/dla"),
+                   U("abs", kind="bool", help="magnitude only (default keeps the sign)")]},
+    "attrib_quant_noise": {
+        "title": "Quantization noise per neuron", "group": "H-Neurons",
+        "argv": [S / "neuron_attrib.py", "quant-noise"],
+        "help": "How far each neuron's weights moved between a reference GGUF (F16/BF16/Q8_0) and a quant, and "
+                "whether the H-Neurons were hit harder than the rest.",
+        "fields": [U("ref", req=True, help="F16, BF16 or Q8_0 GGUF"), U("quant", req=True, help="the quantized GGUF"),
+                   U("neurons", default="models/h_neurons.json"), U("out", default="runs/quant-noise")]},
     "classify": {
         "title": "5 · Find H-Neurons", "group": "H-Neurons", "argv": [S / "classifier.py"],
         "help": "Sparse classifier on the activations; writes models/h_neurons.json and classifier.npz.",

@@ -20,6 +20,9 @@ Something missing or credited wrongly? Please open an issue.
 | nostalgebraist (2020), [*interpreting GPT: the logit lens*](https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens) | `logit_lens.py`; the per-layer logits SLED compares |
 | Belrose et al. (2023), *Eliciting Latent Predictions from Transformers with the Tuned Lens*, [arXiv:2303.08112](https://arxiv.org/abs/2303.08112) | Named in `logit_lens.py` and [CONFIDENCE.md](CONFIDENCE.md) as the more accurate lens for early layers |
 | Xiao et al. (2024), *Efficient Streaming Language Models with Attention Sinks* (StreamingLLM), ICLR, [arXiv:2309.17453](https://arxiv.org/abs/2309.17453) | `when.py` ignores the first position (the attention sink); the engine's "tokens to keep" with context shift |
+| Elhage et al. (2021), *A Mathematical Framework for Transformer Circuits*, [transformer-circuits.pub/2021/framework](https://transformer-circuits.pub/2021/framework/index.html) | Direct logit attribution from weights alone (`neuron_attrib.py weights`) |
+| Sundararajan, Taly & Yan (2017), *Axiomatic Attribution for Deep Networks*, ICML, [arXiv:1703.01365](https://arxiv.org/abs/1703.01365) | Integrated gradients over neuron activations (`neuron_attrib.py saliency --method integrated`) |
+| Nanda (2023), *Attribution Patching: Activation Patching At Industrial Scale*, [neelnanda.io](https://www.neelnanda.io/mechanistic-interpretability/attribution-patching) | Gradient × activation as a first-order estimate of patching each neuron (`neuron_attrib.py saliency`) |
 
 ## Features, circuits and emotion concepts
 
