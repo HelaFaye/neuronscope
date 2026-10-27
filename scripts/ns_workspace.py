@@ -56,7 +56,7 @@ FIELDS = {
 }
 # Studio state folders, under state_dir.
 STATE_SUBDIRS = {"chats_dir": "chats", "traces_dir": "traces", "review_dir": "review", "projects_dir": "projects",
-                 "jobs_dir": "jobs", "stats_dir": "stats", "rag_dir": "rag"}
+                 "jobs_dir": "jobs", "stats_dir": "stats", "rag_dir": "rag", "graphs_dir": "graphs"}
 
 
 def config_path() -> Path:

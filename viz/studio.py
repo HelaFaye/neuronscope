@@ -3230,6 +3230,33 @@ def next_model_fn(t):
                      exclude=tuple(x for x in tried if x))
 
 
+def screen_result(graph_name: str, t: dict, text: str, model: str | None) -> dict:
+    """A project's verification graph over one result (scripts/graph_engine.py): "accepted" passes it,
+    "feedback" fails it; a graph that stops to ask a person, or breaks, leaves it to the reviewer."""
+    import graph_engine as G
+    import graphs_api
+    import ns_mcp as studio_client
+    import permissions as P
+    try:
+        store = graphs_api.Store(STATE.get("graphs_dir") or os.path.expanduser("~/.neuronscope/graphs"))
+        G.sync_plugins(plugins())
+        g = store.get(graph_name)
+        base = f"{'https' if STATE['tls'] else 'http'}://127.0.0.1:{STATE.get('port') or 7870}"
+        env = G.Env(studio_client.Studio(base, STATE.get("token"), insecure_loopback=True), P.Policy(STATE.get("permissions_path")),
+                    model=model or "", graph_loader=store.get)
+        run = G.Runner(g, env).start({"task": f"{t['title']}\n\n{t.get('detail') or ''}".strip(), "result": text})
+        store.save_run(G.public_run(run) | {"kind": "screen"})
+        out = run.get("outputs") or {}
+        if run["status"] == "done" and "feedback" in out:
+            return {"status": "failed", "feedback": G._text(out["feedback"])[:3000], "run": run["id"], "graph": graph_name}
+        if run["status"] == "done" and "accepted" in out:
+            return {"status": "passed", "run": run["id"], "graph": graph_name}
+        return {"status": "person" if run["status"] == "waiting" else "error", "run": run["id"], "graph": graph_name,
+                "feedback": run.get("error") or "the graph gave neither accepted nor feedback"}
+    except Exception as e:                                                     # noqa: BLE001
+        return {"status": "error", "graph": graph_name, "feedback": f"{type(e).__name__}: {e}"[:500]}
+
+
 def run_task(pid, tid, wid=None, t0=None):
     """One attempt at one task, on its assigned worker. Runs in a thread. The director
     counted the task against worker wid at t0 (Workers page); every way out uncounts it."""
@@ -3238,7 +3265,7 @@ def run_task(pid, tid, wid=None, t0=None):
     reg, usage, label = workers_registry(), {}, f"{pid}/{tid}"
     if t0 is None and wid:
         t0 = reg.begin(wid, label)
-    text = err = check = None
+    text = err = check = screen = None
     fatal = False
     try:
         with store.lock(pid):
@@ -3269,6 +3296,8 @@ def run_task(pid, tid, wid=None, t0=None):
                 check = None            # no classifier for this model: unchecked, and the page says so
             except Exception as e:
                 check = {"error": str(e)[:300]}
+        if policy.get("verify_graph") and text:
+            screen = screen_result(policy["verify_graph"], t, text, mid)
     except ContextTooLong as e:
         err, fatal = str(e), True
     except Exception as e:
@@ -3293,7 +3322,7 @@ def run_task(pid, tid, wid=None, t0=None):
                     dr.yield_attempt(plan, t, why)
                     reg.event(wid, "requeued", f"{label}: {why}"[:300])
                 else:
-                    dr.finish_attempt(plan, t, text, check=check, error=err, fatal=fatal)
+                    dr.finish_attempt(plan, t, text, check=check, error=err, fatal=fatal, screen=screen)
                 store.save(plan)
         with DIRECTOR["lock"]:
             DIRECTOR["running"].discard((pid, tid))
@@ -4029,6 +4058,83 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(502, {"error": str(e)})
         return self._json(404, {"error": "not found"})
 
+    # ---------------------------------------------------------- node graphs (graph_engine.py)
+
+    def _graph_env(self, req):
+        import graph_engine as G
+        import ns_mcp as studio_client
+        token = (self._presented() or [None])[0] if STATE["token"] else None
+        st = studio_client.Studio(self._self_url(), token, insecure_loopback=True)
+
+        def mcp_call(server, tool, args):
+            import mcp_client
+            hub = mcp_hub()
+            if hub is None:
+                raise G.GraphError("no MCP servers are configured (Settings -> Connectors)")
+            fn = server + mcp_client.SEP + mcp_client._safe(tool)
+            info = hub.tool_info(fn)
+            d = tool_rules().decide(info["server"], info["tool"], args, info["annotations"], auto_approve=info["auto_approve"])
+            if d["action"] != "allow":
+                raise G.GraphError(f"tool approval says {d['action']}: {d['reason']} (Settings -> Tool approval)")
+            return hub.call(fn, args)
+        store = self._graph_store()
+        return G.Env(st, permissions(), model=str(req.get("model") or ""), profile=str(req.get("profile") or ""),
+                     workdir=req.get("workdir") or None, mcp_call=mcp_call, graph_loader=store.get)
+
+    def _graph_store(self):
+        import graphs_api
+        return graphs_api.Store(STATE.get("graphs_dir") or os.path.expanduser("~/.neuronscope/graphs"))
+
+    def _graphs(self, req):
+        import graph_engine as G
+        import graphs_api as GA
+        store = self._graph_store()
+        G.sync_plugins(plugins())                  # node types from enabled plugins
+        path = urllib.parse.urlsplit(self.path).path
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        try:
+            if req is None:
+                if path == "/graphs":
+                    import graphs_page
+                    return self._html(graphs_page.PAGE)
+                if path == "/api/graphs":
+                    return self._json(200, GA.catalog(store))
+                if path == "/api/graphs/get":
+                    return self._json(200, store.get((q.get("name") or [""])[0]))
+                if path == "/api/graphs/runs":
+                    return self._json(200, {"runs": store.runs(50)})
+                m = re.fullmatch(r"/api/graphs/runs/([0-9a-f]{12})", path)
+                if m:
+                    return self._json(200, store.run(m.group(1)))
+                return self._json(404, {"error": "not found"})
+            graph = req.get("graph") or (store.get(str(req["name"])) if req.get("name") else None)
+            if path == "/api/graphs/save":
+                return self._json(200, store.save(req.get("graph") or {}))
+            if path == "/api/graphs/delete":
+                store.delete(str(req.get("name") or ""))
+                return self._json(200, {"ok": True})
+            if path == "/api/graphs/run":
+                return self._json(200, {"id": GA.start(store, graph, req.get("inputs") or {}, self._graph_env(req))})
+            if path == "/api/graphs/eval":
+                cases = req.get("cases")
+                if isinstance(cases, str):
+                    cases = [json.loads(x) for x in cases.splitlines() if x.strip()]
+                return self._json(200, {"id": GA.start_eval(store, graph, cases or [], self._graph_env(req),
+                                                            str(req.get("expect") or ""), str(req.get("output") or "result"),
+                                                            str(req.get("grade") or "contains"))})
+            if path == "/api/graphs/node":
+                return self._json(200, GA.run_node(graph, str(req.get("node") or ""), req.get("inputs") or {},
+                                                   self._graph_env(req)))
+            m = re.fullmatch(r"/api/graphs/runs/([0-9a-f]{12})/decide", path)
+            if m:
+                return self._json(200, GA.decide(store, m.group(1), str(req.get("node") or ""), bool(req.get("approve")),
+                                                 req.get("value"), str(req.get("note") or "")))
+        except FileNotFoundError as e:
+            return self._json(404, {"error": f"not found: {e}"})
+        except (ValueError, KeyError, TypeError) as e:
+            return self._json(400, {"error": str(e)[:500]})
+        return self._json(404, {"error": "not found"})
+
     def _features_post(self, req):
         import features_api as FA
         root, extra = self._features_ws()
@@ -4620,7 +4726,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     PAGES = {"/", "/setup", "/settings", "/lab", "/review", "/projects", "/workers", "/jobs", "/connect", "/remote",
-             "/link", "/system", "/features"}
+             "/link", "/system", "/features", "/graphs"}
 
     def do_GET(self):
         self._route = None
@@ -4813,6 +4919,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._features_get()
+        if self.path == "/graphs" or self.path.startswith("/api/graphs"):
+            if not self._owner_only():
+                return
+            return self._graphs(None)
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
             if self._role != "owner":
                 return self._json(403, {"error": "jobs need the owner"})
@@ -5097,6 +5207,11 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 if not self._owner_only():
                     return
                 return self._features_post(self._read())
+
+            if self.path.startswith("/api/graphs"):
+                if not self._owner_only():
+                    return
+                return self._graphs(self._read())
 
             if self.path.startswith("/api/automation/"):
                 if not self._owner_only():
@@ -6573,6 +6688,8 @@ def build_parser():
     p.add_argument("--hardware", default=os.path.expanduser("~/.neuronscope/hardware.json"),
                    help="accelerators for worker models: llama-server per backend (rocm, vulkan, cuda, metal, "
                         "cpu), per-device settings, devices to skip (see scripts/accelerators.py)")
+    p.add_argument("--graphs-dir", default=os.path.expanduser("~/.neuronscope/graphs"),
+                   help="node graphs and their runs (/graphs)")
     p.add_argument("--traces-dir", default=os.path.expanduser("~/.neuronscope/traces"),
                    help="where per-reply checks are saved (open them in the 3D view or timeline.py)")
     p.add_argument("--review-dir", default=os.path.expanduser("~/.neuronscope/review"),
@@ -6629,7 +6746,7 @@ def main(argv=None):
     # Where things are comes from the workspace; the "studio" section holds behaviour.
     # Precedence: flags, then the studio section, then the workspace.
     WS_FLAGS = {"models_dir", "server", "cett", "download_dir", "chats_dir", "traces_dir", "review_dir",
-                "projects_dir", "jobs_dir", "stats_dir", "rag_dir"}
+                "projects_dir", "jobs_dir", "stats_dir", "rag_dir", "graphs_dir"}
     builtin = {d: p.get_default(d) for d in WS_FLAGS}
     cfg = load_studio_config(pre.config)
     dests = {x.dest for x in p._actions}
@@ -6666,6 +6783,7 @@ def main(argv=None):
                  hardware_path=os.path.expanduser(a.hardware))
     import director
     DIRECTOR["store"] = director.ProjectStore(os.path.expanduser(a.projects_dir))
+    STATE["graphs_dir"] = os.path.expanduser(a.graphs_dir)
     os.environ.setdefault(sec.TOKEN_ENV, os.environ.get("NS_STUDIO_TOKEN", ""))
     STATE["token"] = sec.resolve_token(a.token, a.token_file) or None
     STATE["download_dir"] = (os.path.expanduser(a.download_dir)
@@ -6744,6 +6862,7 @@ def main(argv=None):
         print("authentication enabled")
 
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    STATE["port"] = srv.server_address[1]
     if tls:
         srv.socket = sec.server_ssl_context(a.tls_cert, a.tls_key).wrap_socket(
             srv.socket, server_side=True, do_handshake_on_connect=False)

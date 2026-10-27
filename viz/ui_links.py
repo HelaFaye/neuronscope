@@ -82,8 +82,9 @@ const NS_NAV=[
     {href:'/jobs',label:'Jobs',tip:'Evaluation, retraining, benchmark and analysis jobs'},
     {href:'/projects',label:'Projects',tip:'Split a project into tasks for worker models'},
     {href:'/workers',label:'Workers',tip:'Where tasks run; GPU temperatures'}]},
-  {label:'Studio',icon:'spark',tip:'Studio tools: features and emotions, neuron review, labs and 3D views',kids:[
+  {label:'Studio',icon:'spark',tip:'Studio tools: features and emotions, graphs, neuron review, labs and 3D views',kids:[
     {href:'/features',label:'Features',tip:'Feature dictionaries, what a reply was made of, circuits, emotion vectors, steering'},
+    {href:'/graphs',label:'Graphs',tip:'Node graphs: screen, verify and route model inputs and outputs'},
     {href:'/review',label:'Review',tip:'How neurons behave across tests, by subject and over time'},
     {href:'/lab',label:'Lab',tip:'Labs, live and 3D views'}]},
   {sep:1},

@@ -9,6 +9,7 @@ policy is used everywhere a model acts:
 | Studio chat, when the model calls a tool | the tool, plus every path, command line, program and URL in its arguments. Tool approval ([CONNECT.md](CONNECT.md)) answers first; the stricter of the two wins. |
 | TestQA with `--allow-exec` | starting the program that runs the model's code (the sandbox engine, or Python), for job `testqa` |
 | Project tasks (the director) | each worker is told what its task may do, from job `project_task` and the task's own `permissions` field |
+| Graphs | every node that reads or writes files, fetches URLs, starts the code sandbox or calls MCP tools, for job `graph`, the run's profile and the node's own ([GRAPHS.md](GRAPHS.md#permissions)) |
 | Anything else | `check_permission` over MCP, `POST /api/settings/permissions/check`, or `python scripts/permissions.py check` |
 
 ## Actions

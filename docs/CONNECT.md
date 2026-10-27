@@ -91,7 +91,7 @@ compare yours (`model_stats` shows the results to an agent).
       "disabled": false,
       "autoApprove": ["studio_status", "list_models", "route_prompt", "model_stats", "devices", "doctor",
                       "job_kinds", "job_status", "job_log", "list_projects", "get_project", "list_traces",
-                      "list_features", "requirements", "project_requirements", "review_sources",
+                      "list_features", "list_graphs", "requirements", "project_requirements", "review_sources",
                       "review_summary"]
     }
   }
@@ -182,6 +182,9 @@ HTTP) or start `scripts/ns_mcp.py` (stdio).
 | `answer_task` | changes state | Answer a blocked task's questions; it goes back in the queue. |
 | `list_traces` | reads | Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/. |
 | `check_permission` | reads | Whether the permission policy lets a model read, write, run, start, reach or call something, and which rule decided. |
+| `list_graphs` | reads | Saved node graphs, the templates, and recent runs. |
+| `run_graph` | changes state | Run a graph with inputs and wait for its outputs; a run paused for approval returns its id. |
+| `decide_graph` | changes state | Approve or reject a graph run that waits for a person. |
 | `list_features` | reads | Feature dictionaries, emotion vectors, recorded activations and attribution graphs in the workspace, with their checks. |
 | `requirements` | reads | What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), what is missing and the fix for this OS. |
 | `project_requirements` | reads | Check a project's own requirements (toolchain, libraries, packages, hardware, features, notes) on this machine. |

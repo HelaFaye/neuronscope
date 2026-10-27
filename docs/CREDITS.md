@@ -110,6 +110,18 @@ What [FEATURES.md](FEATURES.md) implements, and where it departs from these work
 | Krizhevsky (2009), *Learning Multiple Layers of Features from Tiny Images* (CIFAR-10/100) | Vision benchmarks through CLIP_benchmark |
 | [BenchLM](https://benchlm.ai/benchmarks) and other published leaderboards | `benchmarks.py leaderboard import`. Imported scores keep their benchmark's name (HumanEval, MMLU, GSM8K, SimpleQA…) only to sort them by subject; NeuronScope does not use those datasets itself |
 
+## Workflows and graphs
+
+[GRAPHS.md](GRAPHS.md) takes these ideas; none of their code is included.
+
+| Project | What NeuronScope took |
+|---|---|
+| [PySpur](https://github.com/PySpur-Dev/PySpur) (PySpur-Dev) | Human-in-the-loop breakpoints that pause a workflow until a person approves; node-level debugging; test cases and evals over a workflow; execution traces; loops; JSON-schema structured outputs; adding a node as one file |
+| [comfyui_LLM_party](https://github.com/heshengtao/comfyui_LLM_party) (heshengtao) | An MCP tool node; the reasoning of thinking models split from the answer; workflows saved as files and reused as steps |
+| [ComfyUI-LLMs-Toolkit](https://github.com/ComfyUI-Kelin/ComfyUI-LLMs-Toolkit) (ComfyUI-Kelin) | Nodes that report an error instead of breaking the workflow; JSON build, extract and combine nodes; a translator node |
+| [ComfyUI-LLMs](https://github.com/leoleelxh/ComfyUI-LLMs) (leoleelxh) | One model node for any OpenAI-compatible endpoint, with the model switchable per node |
+| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | The node-graph way of wiring models together that all of these build on |
+
 ## Software it builds on
 
 | Project | Used for |

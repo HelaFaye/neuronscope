@@ -182,3 +182,14 @@ Owner only (a paired device gets 403), like Jobs.
 | `GET /api/workers`, `POST /api/workers/stop` | running workers and detected devices |
 
 Plans live in `--projects-dir` (default `~/.neuronscope/projects/<id>/plan.json`).
+
+## Verification graphs
+
+A project's policy can name a node graph that screens every result before
+review: secrets, length, a judge, a hallucination check, anything a graph can
+do. The graph sees `task` and `result`; an `accepted` output passes the result
+and a `feedback` output fails it. With *send failures back automatically*, a
+failed result returns to the worker with the feedback. The verdict and a link
+to the graph show on each attempt. See [GRAPHS.md](GRAPHS.md#projects-delegation).
+Workers are also told what their task may do ([PERMISSIONS.md](PERMISSIONS.md)).
+

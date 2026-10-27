@@ -118,9 +118,11 @@ function attemptHtml(t,a,last){
   const rep=a.report||{}; const ck=a.check;
   const risk=ck&&ck.max!=null?`<a class="risk ${ck.flagged?'hi':'lo'}" href="${esc(ck.url)}" target="_blank" title="activation check: open the 3D view">${ck.flagged?ck.n_flagged+' flagged token(s)':'no flags'} · peak ${(ck.max*100).toFixed(0)}%</a>`
     :ck&&ck.error?`<span class="risk hi">check failed</span>`:(meta.checks?'<span class="note">unchecked (no classifier for this model)</span>':'');
+  const sc=a.screen, scr=sc?`<a class="risk ${sc.status==='passed'?'lo':'hi'}" href="/graphs#graph=${encodeURIComponent(sc.graph||'')}" title="${esc(sc.feedback||'')}">graph ${esc(sc.graph||'')}: ${esc({passed:'passed',failed:'failed',person:'asks a person',error:'did not finish'}[sc.status]||sc.status)}</a>`:'';
   const rv=a.review?(a.review.accepted?`<span class="st done">accepted by ${esc(a.review.by)}</span>`:`<span class="st rework">sent back</span> <span class="note">${esc(a.review.feedback)}</span>`):'';
   let h=`<div style="margin:.5rem 0"><div class="row"><b>attempt ${a.n}</b><span class="note">${esc(a.model)} · ${dur}</span>
-    ${rep.status?`<span class="st ${rep.status==='done'?'done':rep.status==='blocked'?'blocked':'todo'}">reported ${esc(rep.status)}</span>`:''}${risk}${rv}</div>`;
+    ${rep.status?`<span class="st ${rep.status==='done'?'done':rep.status==='blocked'?'blocked':'todo'}">reported ${esc(rep.status)}</span>`:''}${risk}${scr}${rv}</div>`;
+  if(sc&&sc.status!=='passed'&&sc.feedback) h+=`<div class="note">verification: ${esc(sc.feedback).slice(0,600)}</div>`;
   if(a.error) h+=`<div class="err">${esc(a.error)}</div>`;
   if(rep.summary) h+=`<div class="note">${esc(rep.summary)}</div>`;
   if(a.text) h+=`<details ${last?'open':''}><summary>worker's reply (${a.text.length} chars)</summary><pre>${esc(a.text)}</pre></details>`;
@@ -174,6 +176,11 @@ function render(){
       <div><label>attempts</label><input data-p="max_attempts" type="number" min="1" max="16" value="${p.policy.max_attempts}" style="width:5rem"></div>
       <div class="grow"><label>default model (when none has graded results)</label><select data-p="default_model">${modelOpts(p.policy.default_model,'largest that fits')}</select></div>
       <div><label><input type="checkbox" data-p="check" ${p.policy.check?'checked':''}>activation check</label></div></div>
+    <div class="row"><div class="grow"><label>verification graph (screens each result before review; inputs task and result, outputs accepted or feedback)</label>
+      <input data-p="verify_graph" list="graphList" value="${esc(p.policy.verify_graph||'')}" placeholder="none · e.g. template:verify-delegated-result"></div>
+      <div><label><input type="checkbox" data-p="verify_auto" ${p.policy.verify_auto?'checked':''}>send failures back automatically</label></div>
+      <a class="note" href="/graphs#graph=template:verify-delegated-result" style="align-self:end">edit graphs</a></div>
+    <datalist id="graphList"></datalist>
       <label>devices this project may use (none ticked = any enabled device; AMD first)</label>
       <div class="row">${devices.map(d=>`<label style="margin:0"><input type="checkbox" data-dev="${esc(d.id)}" ${(p.policy.devices||[]).includes(d.id)?'checked':''} ${d.enabled?'':'disabled'}>${esc(d.id)}</label>`).join('')||'<span class="note">no devices detected</span>'}</div>
       <label>llama-server settings per device for this project, JSON (ngl, ctx, batch, threads, flash_attn, cache_type, parallel)</label>
@@ -250,6 +257,7 @@ function wire(){
   on('#add',()=>act('edit',{changes:[{op:'add',task:{title:$('#atitle').value,detail:$('#adetail').value}}],reason:'added by hand'}));
   document.querySelectorAll('[data-p]').forEach(e=>e.onchange=()=>{const k=e.dataset.p; let v=e.type==='checkbox'?e.checked:e.value; if(e.type==='number') v=+v; if(k==='default_model'&&!v) v=null; act('policy',{policy:{[k]:v}})});
   document.querySelectorAll('[data-dev]').forEach(e=>e.onchange=()=>act('policy',{policy:{devices:[...document.querySelectorAll('[data-dev]:checked')].map(x=>x.dataset.dev)}}));
+  fetch('/api/graphs').then(r=>r.json()).then(j=>{ const d=document.getElementById('graphList'); if(d) d.innerHTML=[...(j.graphs||[]).map(g=>g.name),...(j.templates||[]).map(t=>'template:'+t.name)].map(n=>`<option value="${esc(n)}">`).join(''); }).catch(()=>{});
   on('#savedev',()=>{ let v={}; const t=$('#devset').value.trim(); if(t){ try{ v=JSON.parse(t) }catch(e){ return alert('not JSON: '+e.message) } } act('policy',{policy:{device_settings:v}}) });
   document.querySelectorAll('[data-pa]').forEach(b=>b.onclick=()=>act('decide',{proposal:b.dataset.pa,accept:true}));
   document.querySelectorAll('[data-pr]').forEach(b=>b.onclick=()=>act('decide',{proposal:b.dataset.pr,accept:false}));

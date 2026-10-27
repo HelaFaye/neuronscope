@@ -6,7 +6,9 @@ A plugin is a folder with a plugin.json (docs/PLUGINS.md):
      "jobs":   [{"kind": "count", "title": "...", "script": "count.py", "fields": [...]}],
      "checks": [{"name": "length", "title": "...", "script": "check.py"}],
      "page":   "page",
-     "mcp":    {"command": "python", "args": ["server.py"]}}
+     "mcp":    {"command": "python", "args": ["server.py"]},
+     "nodes":  [{"type": "word_count", "title": "...", "script": "node.py", "inputs": [["text", "text", true]],
+                 "outputs": [["count", "number"]], "params": [{"name": "min", "kind": "int", "default": 1}]}]}
 
 Plugins run code, so none is used until the owner turns it on in Settings ->
 Plugins. Turning one on records a SHA-256 of its files; if they change
@@ -76,6 +78,13 @@ def read_manifest(folder: Path) -> dict:
         if not NAME.match(str(c.get("name", ""))) or not c.get("script"):
             raise PluginError(f"check {c.get('name')!r}: needs a name and a script")
         _inside(folder, c["script"])
+    for n in m.get("nodes") or []:
+        if not NAME.match(str(n.get("type", ""))) or not n.get("script"):
+            raise PluginError(f"node {n.get('type')!r}: needs a type (like a name) and a script")
+        _inside(folder, n["script"])
+        for port in (n.get("inputs") or []) + (n.get("outputs") or []):
+            if not (isinstance(port, list) and port and re.fullmatch(r"[a-z][a-z0-9_]{0,30}", str(port[0]))):
+                raise PluginError(f"node {n['type']}: ports are [name, type(, required)]")
     if m.get("page"):
         _inside(folder, m["page"])
     if m.get("mcp") is not None and not (isinstance(m["mcp"], dict) and (m["mcp"].get("command") or m["mcp"].get("url"))):
@@ -212,6 +221,37 @@ class Plugins:
         res["spans"] = spans[:500]
         return res
 
+    def graph_nodes(self) -> list[dict]:
+        """Node types from enabled plugins, for graph_engine.py: one script per node type."""
+        return [{"plugin": p["name"], **n} for p in self.enabled() for n in p["manifest"].get("nodes") or []]
+
+    def run_node(self, plugin: str, node_type: str, payload: dict, timeout: float = 300) -> dict:
+        """A graph node: the script reads {"params", "inputs"} as JSON on stdin and prints its outputs as a
+        JSON object (a missing output is skipped; {"error": "..."} fails the node)."""
+        p = self.get(plugin)
+        n = next((x for x in p["manifest"].get("nodes") or [] if x["type"] == node_type), None)
+        if n is None:
+            raise PluginError(f"plugin {plugin} has no node {node_type!r}")
+        folder = Path(p["folder"])
+        script = _inside(folder, n["script"])
+        interp = n["interp"] if isinstance(n.get("interp"), list) else ([sys.executable] if script.suffix == ".py" else [])
+        try:
+            r = subprocess.run([*interp, str(script)], input=json.dumps(payload, default=str), capture_output=True,
+                               text=True, timeout=timeout, cwd=str(folder), env=dict(os.environ, PYTHONUNBUFFERED="1"))
+        except subprocess.TimeoutExpired:
+            raise PluginError(f"{plugin}/{node_type} took longer than {timeout:.0f}s") from None
+        if r.returncode != 0:
+            raise PluginError(f"{plugin}/{node_type} failed: {(r.stderr or r.stdout).strip()[-400:]}")
+        try:
+            out = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise PluginError(f"{plugin}/{node_type} printed no JSON") from None
+        if not isinstance(out, dict):
+            raise PluginError(f"{plugin}/{node_type} printed {type(out).__name__}, not an object")
+        if out.get("error"):
+            raise PluginError(str(out["error"])[:1000])
+        return out
+
     def page_file(self, plugin: str, rel: str) -> Path | None:
         p = self.get(plugin)
         page = p["manifest"].get("page")
@@ -244,5 +284,6 @@ class Plugins:
                          "author": m.get("author", ""), "sha256": p.get("sha256"),
                          "adds": {"jobs": [j.get("title") or j["kind"] for j in m.get("jobs") or []],
                                   "checks": [c.get("title") or c["name"] for c in m.get("checks") or []],
-                                  "page": bool(m.get("page")), "mcp": bool(m.get("mcp"))}})
+                                  "page": bool(m.get("page")), "mcp": bool(m.get("mcp")),
+                                  "nodes": [n.get("title") or n["type"] for n in m.get("nodes") or []]}})
         return rows

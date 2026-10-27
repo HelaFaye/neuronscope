@@ -128,3 +128,19 @@ They follow the tool-approval rules like any other tool.
 | `GET /plugins/<name>/<path>` | signed in | the plugin's page (plugins that are on only) |
 
 Plugin jobs go through `/api/jobs` as `plugin:<name>:<kind>`.
+
+## Graph nodes
+
+`"nodes"` adds node types to Studio's Graphs ([GRAPHS.md](GRAPHS.md)):
+
+```json
+"nodes": [{"type": "word_count", "title": "Count words", "script": "node.py",
+           "inputs": [["text", "text", true]], "outputs": [["count", "number"], ["long", "text"]],
+           "params": [{"name": "over", "kind": "int", "default": 100}], "help": "..."}]
+```
+
+The script reads `{"params": {...}, "inputs": {...}}` as JSON on stdin and
+prints one JSON object of outputs. An output it leaves out is skipped, so a
+node can route; printing `{"error": "..."}` fails the node. The node type
+appears as `plugin:<plugin>:<type>` while the plugin is on.
+

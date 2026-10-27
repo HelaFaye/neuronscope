@@ -142,6 +142,19 @@ def _check(st, a):
             "view_3d": st.base + "/" + r["url"], "trace_id": r.get("id"), "review": r.get("review")}
 
 
+def _run_graph(st, a):
+    import time
+    r = st.call("POST", "/api/graphs/run", {k: a[k] for k in ("name", "inputs", "model", "profile") if a.get(k) is not None})
+    end = time.time() + max(1, min(1800, int(a.get("wait_seconds") or 300)))
+    while True:
+        run = st.call("GET", f"/api/graphs/runs/{r['id']}")
+        if run.get("status") not in ("running", "queued") or time.time() > end:
+            break
+        time.sleep(1)
+    return {"run": r["id"], "status": run.get("status"), "outputs": run.get("outputs"), "error": run.get("error"),
+            "waiting": run.get("waiting"), "nodes": [(t["node"], t["status"]) for t in run.get("trace") or []]}
+
+
 def _requirements(st, a):
     r = st.call("GET", "/api/requirements")
     feats = r["features"]
@@ -275,6 +288,17 @@ TOOLS = [
      _s({"action": {"type": "string", "enum": ["read", "write", "run", "exec", "net", "system", "tool"]},
          "target": STR, "model": STR, "job": STR, "profile": STR, "workdir": STR, "repo": STR}, ["action", "target"]),
      READ, lambda st, a: st.call("POST", "/api/settings/permissions/check", a)),
+    ("list_graphs", "Node graphs that screen, verify and route model inputs and outputs (Studio's /graphs), "
+     "the ready-made templates, and recent runs.", _s({}), READ,
+     lambda st, a: {k: v for k, v in st.call("GET", "/api/graphs").items() if k != "types"}),
+    ("run_graph", "Run a saved graph (or template:<name>) with inputs by name, e.g. {\"question\": \"...\"}, and "
+     "wait up to wait_seconds for it. Returns its outputs and each node's status; a graph that stops for a "
+     "person's approval returns status waiting and its run id (answer with decide_graph).",
+     _s({"name": STR, "inputs": {"type": "object"}, "model": STR, "profile": STR, "wait_seconds": INT}, ["name"]),
+     WRITE, _run_graph),
+    ("decide_graph", "Approve or reject a graph run that waits for a person, optionally with an edited value.",
+     _s({"run": STR, "node": STR, "approve": {"type": "boolean"}, "value": STR, "note": STR}, ["run", "node", "approve"]),
+     WRITE, lambda st, a: st.call("POST", f"/api/graphs/runs/{a['run']}/decide", a)),
     ("list_features", "Feature dictionaries (sparse autoencoders and transcoders), emotion vectors, recorded "
      "activations and attribution graphs in the workspace, with their checks (how much of the model's behaviour a "
      "dictionary keeps, how accurately the emotion vectors classify). Make them with start_job kinds feat_* and "
