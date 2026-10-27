@@ -313,6 +313,16 @@ def run_code(code: str, tests: list[str], timeout: float = 10.0, mem_mb: int = 1
         return "wrong", (err[-1] if err else f"exit {p.returncode}")[:200]
 
 
+def exec_permitted(model: str, a) -> tuple[bool, str]:
+    """May this model's code run here? The permission policy for job testqa (scripts/permissions.py),
+    for the program that runs it: the sandbox engine, or Python. A batch run has no one to ask, so
+    only allow runs it."""
+    import permissions as P
+    prog = SANDBOX["engine"] or sys.executable
+    d = P.Policy().check("exec", prog, model=model, job="testqa", profile=getattr(a, "permissions", "") or "")
+    return d["effect"] == "allow", f"exec {prog}: {d['effect']} ({d['why']})"
+
+
 def grade_code_exec(text: str, task: dict, allow_exec: bool, timeout: float) -> tuple[str, str]:
     code = _code_blocks(strip_think(text))
     if not code.strip():
@@ -637,6 +647,7 @@ def main(argv=None) -> int:
     p.add_argument("--list", action="store_true", help="show bank coverage by subject and kind, then exit")
     p.add_argument("--reference", help="label compared against (default: first endpoint)")
     p.add_argument("--allow-exec", action="store_true", help="run code_exec tasks (executes model-written code)")
+    p.add_argument("--permissions", default="", help="permission profile for running code (default: the policy for job testqa; docs/PERMISSIONS.md)")
     p.add_argument("--exec-timeout", type=float, default=10.0)
     p.add_argument("--sandbox", choices=["none", "docker", "podman"], default="none",
                    help="run --allow-exec code in a locked-down container (no network, read-only, unprivileged)")
@@ -692,7 +703,13 @@ def main(argv=None) -> int:
     raw, summ = {}, {}
     for label, url, model in eps:
         print(f"querying {label} ({url}{' @ ' + model if model else ''})")
-        raw[label] = run_endpoint(label, url, model, tasks, a, cache_dir)
+        a_ep = a
+        if kinds.get("code_exec") and a.allow_exec:
+            ok, why = exec_permitted(model or label, a)
+            if not ok:
+                print(f"  not running {label}'s code: {why} (docs/PERMISSIONS.md)")
+                a_ep = argparse.Namespace(**{**vars(a), "allow_exec": False})
+        raw[label] = run_endpoint(label, url, model, tasks, a_ep, cache_dir)
         summ[label] = summarise(raw[label])
         if a.record_stats is not None or a.publish_stats:
             mid = dict(x.split("=", 1) for x in a.stats_model).get(label) or model or label

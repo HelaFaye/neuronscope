@@ -181,6 +181,7 @@ HTTP) or start `scripts/ns_mcp.py` (stdio).
 | `decide_proposal` | changes state | Accept or reject a change the director proposed. |
 | `answer_task` | changes state | Answer a blocked task's questions; it goes back in the queue. |
 | `list_traces` | reads | Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/. |
+| `check_permission` | reads | Whether the permission policy lets a model read, write, run, start, reach or call something, and which rule decided. |
 | `list_features` | reads | Feature dictionaries, emotion vectors, recorded activations and attribution graphs in the workspace, with their checks. |
 | `requirements` | reads | What each feature needs (packages, programs, llama.cpp backends, drivers, devices, memory), what is missing and the fix for this OS. |
 | `project_requirements` | reads | Check a project's own requirements (toolchain, libraries, packages, hardware, features, notes) on this machine. |

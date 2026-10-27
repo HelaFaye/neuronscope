@@ -268,6 +268,13 @@ TOOLS = [
      _pact("answer")),
     ("list_traces", "Saved per-reply checks and traces, viewable in 3D at <studio>/viz/<id>/.", _s({}), READ,
      lambda st, a: st.call("GET", "/api/traces")),
+    ("check_permission", "Would the permission policy let a model do this? action: read, write, run (a command "
+     "line), exec (a program), net (host or URL), system (gpu, docker, packages, power…) or tool (server/tool); "
+     "target: the path, command, program, URL, component or tool. Optional model, job (a job kind), profile, and "
+     "workdir/repo for patterns that use them. Returns allow, ask or deny and the rule that decided.",
+     _s({"action": {"type": "string", "enum": ["read", "write", "run", "exec", "net", "system", "tool"]},
+         "target": STR, "model": STR, "job": STR, "profile": STR, "workdir": STR, "repo": STR}, ["action", "target"]),
+     READ, lambda st, a: st.call("POST", "/api/settings/permissions/check", a)),
     ("list_features", "Feature dictionaries (sparse autoencoders and transcoders), emotion vectors, recorded "
      "activations and attribution graphs in the workspace, with their checks (how much of the model's behaviour a "
      "dictionary keeps, how accurately the emotion vectors classify). Make them with start_job kinds feat_* and "

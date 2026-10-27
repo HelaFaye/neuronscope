@@ -1549,6 +1549,33 @@ def sse(wfile, obj) -> None:
     wfile.flush()
 
 
+def permissions():
+    import permissions as P
+    return P.Policy(STATE.get("permissions_path"))
+
+
+def permissions_state() -> dict:
+    import permissions as P
+    pol = permissions()
+    return {"policy": pol.load(), "path": str(pol.path), "presets": P.presets(), "actions": P.ACTIONS,
+            "effects": list(P.EFFECTS), "matches": list(P.MATCHES), "job_presets": P.JOB_PRESETS,
+            "job_kinds": sorted(ns_jobs.all_specs()), "models": [m["id"] for m in scan_models()][:300]}
+
+
+def with_permissions(decision: dict, model: str, info: dict, args: dict) -> dict:
+    """Tool approval's answer, made stricter by the permission policy for this model
+    (scripts/permissions.py): what the call would read, write, run or reach."""
+    import permissions as P
+    model = model if model and model != "auto" else str((PROC.get("model") or {}).get("name") or "")
+    p = P.check_call(permissions(), model, info["server"], info["tool"], args,
+                     read_only=(info.get("annotations") or {}).get("readOnlyHint"))
+    # what the call would do, shown in the prompt; rules_action is tool approval's own answer
+    out = {**decision, "rules_action": decision["action"], "model": model, "checks": p["checks"]}
+    if P.RANK[p["effect"]] > P.RANK.get(decision["action"], 1):
+        out.update({"action": p["effect"], "by": "permissions", "reason": p["why"]})
+    return out
+
+
 def chat_with_tools(wfile, payload: dict, msgs: list, hub, upstream=None) -> dict:
     """Stream a chat in which the model may call MCP tools. Each call is shown
     to the user and, unless auto-approved, waits for Allow/Deny."""
@@ -1580,17 +1607,21 @@ def chat_with_tools(wfile, payload: dict, msgs: list, hub, upstream=None) -> dic
                     info = hub.tool_info(c["name"])
                     decision = tool_rules().decide(info["server"], info["tool"], args, info["annotations"],
                                                    auto_approve=info["auto_approve"])
+                    decision = with_permissions(decision, payload.get("model") or "", info, args)
                 except KeyError as e:
                     err = str(e).strip("'\"")
             need = err is None and decision["action"] == "ask"
             sse(wfile, {"tool_call": {"key": key, "name": c["name"], "arguments": args if args is not None
                                       else c["arguments"], "needs_approval": need,
-                                      "decision": decision and {k: decision[k] for k in ("action", "by", "reason")}}})
+                                      "decision": decision and {k: decision[k] for k in ("action", "by", "reason")},
+                                      "checks": (decision or {}).get("checks") or []}})
             if err is None and decision["action"] == "deny":
                 err = f"not allowed: {decision['reason']} (Settings -> Tool approval)"
             elif err is None and need:
                 with APPROVALS_LOCK:
-                    PENDING_CALLS[key] = {"server": info["server"], "tool": info["tool"], "args": args}
+                    PENDING_CALLS[key] = {"server": info["server"], "tool": info["tool"], "args": args,
+                                          "model": decision.get("model", ""), "checks": decision.get("checks") or [],
+                                          "rules_action": decision.get("rules_action", "ask")}
                 try:
                     if not wait_approval(key):
                         err = "the user declined this tool call"
@@ -4425,6 +4456,8 @@ class Handler(BaseHTTPRequestHandler):
                                                    for m in scan_models() if m.get("format") != "hf"],
                                         "results": sharing_results(), "history": score_cards.submissions(),
                                         "errors": STATE.get("sharing_errors", [])[-10:]})
+            if self.path == "/api/settings/permissions":
+                return self._json(200, permissions_state())
             return self._json(200, settings_state())
         req = self._read()
         path = _ws_path()
@@ -4511,6 +4544,16 @@ class Handler(BaseHTTPRequestHandler):
             save_studio_config({"theme": name})
             STATE["studio_theme"], STATE["viz_theme"] = name, th[name].get("viz") or "dark"
             return self._json(200, {"default": name})
+        if self.path == "/api/settings/permissions":
+            # replaced whole: profiles, model bindings, job profiles, base (scripts/permissions.py)
+            permissions().save(req.get("policy") or {})
+            return self._json(200, permissions_state())
+        if self.path == "/api/settings/permissions/check":
+            import permissions as P
+            ctx = P.context(workdir=req.get("workdir"), repo=req.get("repo"))
+            return self._json(200, permissions().check(str(req.get("action") or ""), str(req.get("target") or ""),
+                                                      str(req.get("model") or ""), str(req.get("job") or ""),
+                                                      str(req.get("profile") or ""), ctx))
         if self.path == "/api/settings/widgets":
             # the owner's widget settings, served with every 3D theme (viz/widgets.py)
             import widgets
@@ -4731,7 +4774,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._review_get()
         if self.path.startswith("/api/requirements"):
             return self._requirements()
-        if self.path in ("/settings", "/api/workspaces", "/api/settings", "/api/settings/sharing"):
+        if self.path in ("/settings", "/api/workspaces", "/api/settings", "/api/settings/sharing", "/api/settings/permissions"):
             return self._settings()
         if self.path.startswith("/api/fs/"):
             # The folder browser: the owner's own files on Studio's computer.
@@ -5250,8 +5293,18 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                     if call is None:
                         return self._json(404, {"error": "that call is no longer waiting"})
                     try:
-                        rule = tool_rules().add(tr.rule_from_call(str(remember), call["server"], call["tool"],
-                                                                  call["args"]))
+                        if remember == "always":
+                            # the quick "Always allow": this exact call stops asking, in both places
+                            import permissions as P
+                            asks = [(c["action"], c["target"]) for c in call.get("checks") or [] if c["effect"] == "ask"]
+                            if asks:
+                                rule = {"permissions": P.remember(permissions(), call.get("model", ""), asks)}
+                            if call.get("rules_action") == "ask":
+                                rule = {**(rule or {}), "tool_rule": tool_rules().add(
+                                    tr.rule_from_call("args", call["server"], call["tool"], call["args"]))}
+                        else:
+                            rule = tool_rules().add(tr.rule_from_call(str(remember), call["server"], call["tool"],
+                                                                      call["args"]))
                     except ValueError as e:
                         return self._json(400, {"error": str(e)})
                 allow = bool(req.get("allow")) and remember != "deny"
@@ -5650,6 +5703,9 @@ table.st{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:.4rem}
 table.st th,table.st td{text-align:left;padding:.15rem .3rem;border-bottom:1px solid var(--line)}
 #modelPick{width:auto;max-width:260px}
 .tool{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:.35rem .5rem;margin:.3rem 0;background:var(--code)}
+.tool .will{margin:.3rem 0}.tool .wl{display:flex;gap:.4rem;align-items:baseline;margin:.15rem 0}.tool .wl code{flex:1;white-space:pre-wrap;word-break:break-all;background:var(--bg);padding:.15rem .35rem;border-radius:4px}
+.tool .wl.deny code{outline:1px solid var(--no)}.tool .wl.ask code{outline:1px solid var(--warn,#e7b65c)}
+.tool .qp{display:flex;gap:.35rem;flex-wrap:wrap;align-items:center;margin-top:.3rem}
 .tool .tn{font:600 12px ui-monospace,monospace}.tool pre{white-space:pre-wrap;margin:.2rem 0;font:12px ui-monospace,monospace;max-height:220px;overflow:auto}
 .tool button{font-size:11px;padding:.1rem .5rem;margin-right:.3rem}
 .src{font-size:12px;color:var(--mut);margin-top:.3rem}.src details{margin:.1rem 0}.src summary{cursor:pointer}
@@ -6095,14 +6151,20 @@ function toolCard(box,t){
   if(!el){ el=document.createElement('div'); el.className='tool'; el.dataset.k=t.key; box.appendChild(el); }
   const args=typeof t.arguments==='string'?t.arguments:JSON.stringify(t.arguments,null,1);
   const state=t.result?(t.result.ok?'<span class="okc">done</span>':'<span class="bad">failed</span>'):(t.needs_approval&&!t.decided?'<span class="warn">waiting for you</span>':'<span>running…</span>');
-  el.innerHTML=`<span class="tn">🔧 ${esc(t.name)}</span> ${state}<details ${t.needs_approval&&!t.decided?'open':''}><summary>arguments</summary><pre>${esc(args)}</pre></details>`+
-    (t.needs_approval&&!t.decided&&!t.result?`<button class="pri" data-a="1">Allow once</button><button data-a="0">Deny</button>
-      <select data-r title="make it a standing rule (Settings → Tool approval)"><option value="">always…</option>
-      <option value="tool">always allow this tool</option><option value="args">always allow these exact arguments</option>
-      <option value="deny">always deny this tool</option></select>`:'')+
+  // what the call would do (Settings → Permissions): the command line, paths, programs, hosts, each with its answer
+  const acts=(t.checks||[]).filter(c=>c.action!=='tool');
+  const will=acts.length?`<div class="will">${acts.map(c=>`<div class="wl ${c.effect}"><span class="tag">${esc(c.action)}</span><code>${esc(c.target)}</code><span class="note" title="${esc(c.why)}">${esc(c.effect)}</span></div>`).join('')}</div>`:'';
+  const waiting=t.needs_approval&&!t.decided&&!t.result;
+  el.innerHTML=`<span class="tn">🔧 ${esc(t.name)}</span> ${state}${waiting?will:''}<details ${waiting&&!acts.length?'open':''}><summary>${!waiting&&acts.length?'what it does, ':''}arguments</summary>${waiting?'':will}<pre>${esc(args)}</pre></details>`+
+    (waiting?`<div class="qp"><button class="pri" data-a="1" title="just this time">Allow once</button><button data-q="always" title="this exact call stops asking for this model (Settings → Permissions, Tool approval)">Always allow</button><button class="bad" data-a="0">Deny</button>
+      <select data-r title="a broader standing rule (Settings → Tool approval)"><option value="">more…</option>
+      <option value="tool">always allow this tool, any arguments</option><option value="args">always allow these exact arguments</option>
+      <option value="deny">always deny this tool</option></select></div>`:'')+
     (!t.needs_approval&&t.decision&&t.decision.by!=='default'?`<div class="note">${esc(t.decision.action==='deny'?'blocked':'allowed')} by ${esc(t.decision.reason)} · <a href="/settings#tools">rules</a></div>`:'')+
     (t.result?`<details><summary>result</summary><pre>${esc(t.result.text)}</pre></details>`:'');
   el.querySelectorAll('button[data-a]').forEach(b=>b.onclick=async()=>{ t.decided=true; toolCard(box,t); await post('/api/tools/approve',{key:t.key,allow:b.dataset.a==='1'}); });
+  el.querySelectorAll('button[data-q]').forEach(b=>b.onclick=async()=>{ t.decided=true; toolCard(box,t);
+    const r=await post('/api/tools/approve',{key:t.key,allow:true,remember:'always'}); if(!r.ok){ try{ alert((await r.json()).error) }catch{} } });
   const rs=el.querySelector('select[data-r]'); if(rs) rs.onchange=async()=>{ const v=rs.value; if(!v) return; t.decided=true; toolCard(box,t);
     const r=await post('/api/tools/approve',{key:t.key,allow:v!=='deny',remember:v}); if(!r.ok){ try{ alert((await r.json()).error) }catch{} } };
 }
@@ -6587,6 +6649,7 @@ def main(argv=None):
     except ValueError:
         STATE["widgets"] = {}
     STATE["tool_rules_path"] = cfg.get("tool_rules") or None
+    STATE["permissions_path"] = cfg.get("permissions") or None
     os.environ.update(ns_workspace.env_for(ws))
 
     STATE["models_dirs"] = [os.path.expanduser(d) for d in a.models_dir] or ws["models_dirs"]

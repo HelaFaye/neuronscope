@@ -56,7 +56,7 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
 </style>
 <header><h1>Studio · Settings</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
-<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#connectors">Connectors</a><a href="#tools">Tool approval</a><a href="#sharing">Sharing results</a><a href="#plugins">Plugins</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
+<nav class="toc"><a href="#appearance">Appearance</a><a href="#workspaces">Workspaces</a><a href="#subjects">Models per subject</a><a href="#connectors">Connectors</a><a href="#tools">Tool approval</a><a href="#permissions">Permissions</a><a href="#sharing">Sharing results</a><a href="#plugins">Plugins</a><span class="note">Behaviour (unloading, routing thresholds, workers) and building llama.cpp are on <a href="/setup">Setup</a>.</span></nav>
 
 <section class="card" id="appearance"><h2>Appearance</h2>
 <div class="note">A theme colours Studio's pages, its charts (the model radar) and the 3D views of activations and hallucination risk. Your choice is kept in this browser; <b>Make default</b> sets it for browsers that have not chosen one, and for the Godot client's 3D view.</div>
@@ -107,6 +107,23 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
   <div id="cnerr" class="err"></div>
   <div class="row" style="margin-top:.8rem;justify-content:flex-end"><button value="cancel" formnovalidate>Cancel</button><button class="pri" id="cnsave" value="default">Add</button></div>
 </form></dialog></section>
+
+<section class="card" id="permissions"><h2>Permissions</h2>
+<div class="note">What a model may <b>read</b>, <b>write</b>, <b>run</b> (command lines), <b>exec</b> (programs), reach on the <b>net</b>, touch in the <b>system</b> (GPU, Docker, packages, power…) and which <b>tool</b>s it may call. A <b>profile</b> is a set of rules (allow = whitelist, deny = blacklist; exact, prefix, glob or regex) and a default per action. A check stacks the base profile, the profiles bound to the model, the job's profile and any profile asked for. Every matching rule counts and the strictest wins, so a job can open what it needs but never lift a deny. Patterns may use {workdir}, {repo}, {home}, {tmp}. Chat tool calls, TestQA's code runs and project tasks all check here (docs/PERMISSIONS.md).</div>
+<div class="row" style="margin:.6rem 0 .3rem;gap:.5rem;flex-wrap:wrap"><span class="note">profile</span><select id="pmProf"></select><button id="pmCopy" title="A built-in profile cannot be changed; copy it to edit">Copy as…</button><button class="bad" id="pmDel">Delete</button><span class="grow"></span><span class="note">base for every check</span><select id="pmBase"></select></div>
+<div id="pmDesc" class="note"></div>
+<div id="pmDefaults" class="row" style="flex-wrap:wrap;gap:.6rem;margin:.4rem 0"></div>
+<div style="overflow-x:auto"><table id="pmRules"></table></div>
+<div class="row" style="margin:.3rem 0"><button id="pmAdd">+ Rule</button></div>
+<h3 style="margin:.8rem 0 .2rem">Models</h3><div class="note">Profiles for models whose id matches a glob, e.g. <code>*coder*</code>.</div>
+<div style="overflow-x:auto"><table id="pmBind"></table></div><div class="row"><button id="pmBindAdd">+ Model</button></div>
+<h3 style="margin:.8rem 0 .2rem">Jobs</h3><div class="note">Each job kind starts with the preset that fits it (TriviaQA and other QA runs: no actions; TestQA code: a sandbox; SWE-bench evaluation: git, Python and Docker in the checkout). Change one here.</div>
+<details><summary class="note">job profiles</summary><div style="overflow-x:auto"><table id="pmJobs"></table></div></details>
+<h3 style="margin:.8rem 0 .2rem">Try it</h3>
+<div class="row" style="flex-wrap:wrap;gap:.4rem"><select id="ptAct"></select><input id="ptTarget" placeholder="target: a path, command line, program, URL, component or server/tool" style="flex:1;min-width:14rem"><input id="ptModel" placeholder="model" list="pmModels" style="width:10rem"><input id="ptJob" placeholder="job kind" list="pmJobList" style="width:9rem"><input id="ptRepo" placeholder="{repo} / {workdir}" style="width:10rem"><button id="ptGo">Check</button></div>
+<div id="ptOut" class="note"></div>
+<div class="row" style="margin-top:.6rem"><button class="pri" id="pmSave">Save permissions</button><span id="pmMsg"></span></div>
+<datalist id="pmModels"></datalist><datalist id="pmJobList"></datalist></section>
 
 <section class="card" id="tools"><h2>Tool approval</h2>
 <div class="note">When a model calls an MCP tool in chat (Studio → Tools), each call is decided in order: <b>1</b> your rules below, first match wins; <b>2</b> a server's <code>autoApprove</code> in mcp.json; <b>3</b> the quick setting for the tool's kind of operation (from its MCP annotations); <b>4</b> the default. <i>Ask</i> shows Allow/Deny in the chat, where <i>always…</i> adds a rule here. Command line: <code>python scripts/tool_rules.py</code>.</div>
@@ -328,6 +345,47 @@ async function themes(){ const j=await (await fetch('/api/themes')).json(); cons
   document.querySelectorAll('[data-def]').forEach(b=>b.onclick=async()=>{ const r=await fetch('/api/settings/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:b.dataset.def})});
     $('#themeMsg').textContent=r.ok?'Default theme saved.':(await r.json()).error; themes(); }); }
 themes();
+
+// ---- permissions (scripts/permissions.py)
+let PM=null, pmCur='';
+const opt=(vals,cur)=>vals.map(v=>`<option${v===cur?' selected':''}>${esc(v)}</option>`).join('');
+function pmProfiles(){ return Object.assign({}, PM.presets, PM.policy.profiles); }
+function pmDraw(){ const all=pmProfiles(), names=Object.keys(all), user=PM.policy.profiles, acts=Object.keys(PM.actions);
+  if(!all[pmCur]) pmCur=PM.policy.base;
+  $('#pmProf').innerHTML=names.map(n=>`<option value="${esc(n)}"${n===pmCur?' selected':''}>${esc(n)}${user[n]?'':' (built-in)'}</option>`).join('');
+  $('#pmBase').innerHTML=opt(names, PM.policy.base);
+  const p=all[pmCur], ro=!user[pmCur]; $('#pmDel').disabled=ro; $('#pmAdd').disabled=ro;
+  $('#pmDesc').textContent=(p.description||'')+(ro?' Built in: copy it to change it.':'');
+  $('#pmDefaults').innerHTML=acts.map(a=>`<label title="${esc(PM.actions[a])}">${a} <select data-def="${a}"${ro?' disabled':''}><option value="">(inherit)</option>${opt(PM.effects, p.defaults[a]||'')}</select></label>`).join('');
+  $('#pmRules').innerHTML='<tr><th>action</th><th>effect</th><th>match</th><th>pattern</th><th>note</th><th></th></tr>'+p.rules.map((r,i)=>`<tr data-i="${i}">
+    <td><select data-k="action"${ro?' disabled':''}>${opt(['*',...acts], r.action)}</select></td><td><select data-k="effect"${ro?' disabled':''}>${opt(PM.effects, r.effect)}</select></td>
+    <td><select data-k="match"${ro?' disabled':''}>${opt(PM.matches, r.match)}</select></td><td><input data-k="pattern" value="${esc(r.pattern)}"${ro?' disabled':''} style="width:100%;min-width:12rem"></td>
+    <td><input data-k="note" value="${esc(r.note||'')}"${ro?' disabled':''}></td><td>${ro?'':'<button data-rm>×</button>'}</td></tr>`).join('');
+  if(!ro){ $('#pmRules').querySelectorAll('tr[data-i]').forEach(tr=>{ const r=p.rules[+tr.dataset.i];
+      tr.querySelectorAll('[data-k]').forEach(el=>el.oninput=()=>{ r[el.dataset.k]=el.value; });
+      tr.querySelector('[data-rm]').onclick=()=>{ p.rules.splice(+tr.dataset.i,1); pmDraw(); }; });
+    $('#pmDefaults').querySelectorAll('[data-def]').forEach(el=>el.onchange=()=>{ if(el.value) p.defaults[el.dataset.def]=el.value; else delete p.defaults[el.dataset.def]; }); }
+  $('#pmBind').innerHTML='<tr><th>model (glob)</th><th>profile</th><th></th></tr>'+PM.policy.bindings.map((b,i)=>`<tr data-i="${i}"><td><input data-k="model" value="${esc(b.model)}" list="pmModels"></td><td><select data-k="profile">${opt(names,b.profile)}</select></td><td><button data-rm>×</button></td></tr>`).join('');
+  $('#pmBind').querySelectorAll('tr[data-i]').forEach(tr=>{ const b=PM.policy.bindings[+tr.dataset.i];
+    tr.querySelectorAll('[data-k]').forEach(el=>el.oninput=()=>{ b[el.dataset.k]=el.value; });
+    tr.querySelector('[data-rm]').onclick=()=>{ PM.policy.bindings.splice(+tr.dataset.i,1); pmDraw(); }; });
+  const kinds=[...new Set([...Object.keys(PM.job_presets), ...PM.job_kinds])].sort();
+  $('#pmJobs').innerHTML='<tr><th>job</th><th>preset</th><th>use</th></tr>'+kinds.map(k=>`<tr><td>${esc(k)}</td><td class="note">${esc(PM.job_presets[k]||'(none: the model takes no actions)')}</td><td><select data-job="${esc(k)}"><option value="">(preset)</option>${opt(names, PM.policy.jobs[k]||'')}</select></td></tr>`).join('');
+  $('#pmJobs').querySelectorAll('[data-job]').forEach(el=>el.onchange=()=>{ if(el.value) PM.policy.jobs[el.dataset.job]=el.value; else delete PM.policy.jobs[el.dataset.job]; });
+  $('#ptAct').innerHTML=opt(acts, $('#ptAct').value||'run');
+  $('#pmModels').innerHTML=PM.models.map(m=>`<option value="${esc(m)}">`).join(''); $('#pmJobList').innerHTML=kinds.map(m=>`<option value="${esc(m)}">`).join(''); }
+async function pmLoad(){ try{ PM=await api('/api/settings/permissions'); pmDraw(); }catch(e){ msg('#pmMsg',esc(e.message),true); } }
+$('#pmProf').onchange=e=>{ pmCur=e.target.value; pmDraw(); };
+$('#pmBase').onchange=e=>{ PM.policy.base=e.target.value; };
+$('#pmCopy').onclick=()=>{ const n=(prompt('Name for the copy (lowercase, digits, - _ .)', pmCur+'-mine')||'').trim(); if(!n) return;
+  PM.policy.profiles[n]=JSON.parse(JSON.stringify(pmProfiles()[pmCur])); pmCur=n; pmDraw(); };
+$('#pmDel').onclick=()=>{ if(!PM.policy.profiles[pmCur]||!confirm('Delete profile '+pmCur+'?')) return; delete PM.policy.profiles[pmCur]; pmCur=PM.policy.base; pmDraw(); };
+$('#pmAdd').onclick=()=>{ pmProfiles()[pmCur].rules.push({action:'run',effect:'deny',match:'regex',pattern:'',note:''}); pmDraw(); };
+$('#pmBindAdd').onclick=()=>{ PM.policy.bindings.push({model:'*',profile:'read_only'}); pmDraw(); };
+$('#pmSave').onclick=async()=>{ try{ PM=await api('/api/settings/permissions',{policy:PM.policy}); pmDraw(); msg('#pmMsg','Saved.'); }catch(e){ msg('#pmMsg',esc(e.message),true); } };
+$('#ptGo').onclick=async()=>{ try{ const r=$('#ptRepo').value; const d=await api('/api/settings/permissions/check',{action:$('#ptAct').value,target:$('#ptTarget').value,model:$('#ptModel').value,job:$('#ptJob').value,repo:r,workdir:r});
+  $('#ptOut').innerHTML=`<b class="${d.effect==='deny'?'err':d.effect==='allow'?'okm':''}">${d.effect}</b> · ${esc(d.why)} <span class="note">(layers: ${esc(d.layers.join(' + '))}; target ${esc(d.target)})</span>`; }catch(e){ msg('#ptOut',esc(e.message),true); } };
+pmLoad();
 
 // ---- widgets (viz/widgets.py): a form drawn from the spec, and a jewel preview with made-up emotions
 let WD=null, prev=null;

@@ -60,7 +60,7 @@ import subject_classifier as sc
 PLAN_STATES = ("draft", "approved", "running", "paused", "done")
 TASK_STATES = ("todo", "running", "review", "rework", "done", "blocked", "dropped")
 REVIEW_POLICIES = ("all", "flagged", "none")
-EDITABLE = ("title", "detail", "labels", "depends_on", "acceptance", "model")
+EDITABLE = ("title", "detail", "labels", "depends_on", "acceptance", "model", "permissions")
 MAX_RESULT_CHARS = 100_000
 RETRY_DELAY = 15.0
 DEFAULT_POLICY = {"review": "all", "max_parallel": 2, "max_attempts": 3, "default_model": None,
@@ -636,6 +636,15 @@ def worker_messages(plan: dict, t: dict, max_input_chars: int = 12_000) -> list[
     lines += ["", f"Your task ({t['id']}): {t['title']}", t["detail"]]
     if t.get("acceptance"):
         lines += ["", f"Done means: {t['acceptance']}"]
+    # what the worker may do (scripts/permissions.py): job project_task, the task's own profile if set
+    try:
+        import permissions as perm
+        model = (t.get("assignee") or {}).get("model") or ""
+        lines += ["", perm.prompt_text(perm.Policy(), model=model, job="project_task",
+                                       profile=t.get("permissions") or "",
+                                       ctx=perm.context(workdir=plan.get("workdir") or plan.get("checkout")))]
+    except (ImportError, ValueError):
+        pass
     budget = max_input_chars
     for d in t["depends_on"]:
         dep = by_id[d]
