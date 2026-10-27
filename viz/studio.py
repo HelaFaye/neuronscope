@@ -2950,6 +2950,29 @@ def sharing_after_job(meta: dict) -> None:
                 STATE.setdefault("sharing_errors", []).append(f"{m['id']}: {type(e).__name__}: {e}"[:300])
 
 
+def job_suggestions(ws: dict) -> dict:
+    """Values the job forms offer in their dropdowns: models, finished TestQA results, H-Neuron sets and the
+    workspace's data files, so a field is picked rather than typed."""
+    root = Path(ws.get("root") or ".")
+    models = scan_models()
+
+    def files(patterns, limit=100):
+        out = []
+        for pat in patterns:
+            out += [str(p) for p in sorted(root.glob(pat))[:limit]]
+        return sorted(dict.fromkeys(out))[:limit]
+    try:
+        results = [r["file"] for r in sharing_results()][:50]
+    except Exception:
+        results = []
+    return {"models": [m["id"] for m in models][:200],
+            "hf_models": [m["path"] for m in models if m.get("format") == "hf"][:50],
+            "results": results,
+            "neuron_sets": files(["models/h_neurons*.json", "runs/**/h_neurons*.json"], 50),
+            "data_files": files(["data/*.jsonl", "data/*.json"], 100),
+            "subjects": sorted(__import__("subject_classifier").SUBJECTS)}
+
+
 def shared_board_rows() -> list[dict]:
     """The scoreboard's public rows (cached for an hour), whose speed measurements train the predictions.
     Empty unless sharing is on."""
@@ -4233,7 +4256,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "llama": ex(ws.get("llama_dir")), "studio": self._self_url(public=False) + "/v1",
                                     "workspace": STATE.get("workspace_name"), "root": ws.get("root"),
                                     "traces": STATE.get("traces_dir"),       # where the 3D views look
-                                    "ggufs": [m["path"] for m in scan_models()][:200]})
+                                    "ggufs": [m["path"] for m in scan_models()][:200], **job_suggestions(ws)})
         if runner is None and not self.path.startswith(("/api/jobs/targets", "/api/jobs/options")):
             return self._jobs_off()
         if self.path == "/api/jobs":
@@ -5208,6 +5231,13 @@ class Handler(BaseHTTPRequestHandler):
             sc["binary"] = STATE.get("server_bin") if engine == "llama" else STATE.get("vllm_bin")
             sc["vllm_installed"] = bool(shutil.which((STATE.get("vllm_bin") or "vllm").split()[0]))
             return self._json(200, sc)
+        if self.path == "/api/engine/devices":
+            # what llama-server --list-devices names, for the device fields' dropdowns (cached a minute)
+            c = STATE.setdefault("engine_devices", {"t": 0, "bin": None, "list": []})
+            if STATE.get("server_bin") and (c["bin"] != STATE["server_bin"] or time.time() - c["t"] > 60):
+                import draft_pick
+                c.update(t=time.time(), bin=STATE["server_bin"], list=draft_pick.list_devices(STATE["server_bin"]))
+            return self._json(200, {"devices": c["list"]})
         if self.path.startswith("/api/models/draft"):
             # compatible draft models for speculative decoding, and a device for the draft
             import draft_pick
@@ -6388,7 +6418,11 @@ let EO=null;
 async function loadEO(engine, values){
   const r=await fetch('/api/engine/options?engine='+engine); EO=await r.json(); renderEO(values||{});
 }
+let EO_DEVS=[];
+fetch('/api/engine/devices').then(r=>r.json()).then(j=>{EO_DEVS=j.devices||[]; if(EO_DEVS.length&&EO&&$('#eoForm').innerHTML) renderEO({...(sel&&sel.settings||{}),...readEO()})}).catch(()=>{});
+const EO_DEV_KEYS=['device','draft_device'];
 function eoInput(o,v){ const id='eo_'+o.key, dis=o.available?'':' disabled';
+  if(EO_DEV_KEYS.includes(o.key)&&EO_DEVS.length) return `<div class="eoRow" title="${esc(o.help)}"><label>${esc(o.label)} <code>${esc(o.flag)}</code></label><input id="${id}" value="${esc(v??'')}" list="eoDevs_${o.key}" placeholder="engine default"${dis}><datalist id="eoDevs_${o.key}">${EO_DEVS.map(d=>`<option value="${esc(d.name)}">${esc(d.desc)} · ${d.free_mb} of ${d.total_mb} MiB free</option>`).join('')}</datalist>${o.help?`<div class="note">${esc(o.help)}</div>`:''}</div>`;
   if(o.kind==='bool') return `<label class="eoRow" title="${esc(o.help)}"><input type="checkbox" id="${id}"${v?' checked':''}${dis}> ${esc(o.label)} <code>${esc(o.flag)}</code></label>`;
   const ctl = o.kind==='choice' ? `<select id="${id}"${dis}><option value="">${o.default?esc(o.default)+' (default)':'engine default'}</option>${o.choices.map(c=>`<option${String(v)===c?' selected':''}>${esc(c)}</option>`).join('')}</select>`
     : `<input id="${id}" value="${esc(v??'')}" placeholder="${o.kind==='text'?'':'engine default'}"${dis}>`;

@@ -403,6 +403,29 @@ function nsEnhancePickers(root){ (root||document).querySelectorAll('input[data-p
       onchange:v=>{ t.value=v.join('\n'); t.dispatchEvent(new Event('input',{bubbles:true})); }}); }); }
 (function(){ const start=()=>{ nsEnhancePickers(document); try{ new MutationObserver(ms=>{ for(const m of ms) for(const n of m.addedNodes) if(n.nodeType===1){ if(n.matches&&n.matches('input[data-pick]')) nsEnhancePickers(n.parentNode); else nsEnhancePickers(n); } }).observe(document.body,{childList:true,subtree:true}); }catch(e){} };
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start(); })();
+// ---- text that does not fit: long unbroken text (paths, ids, hashes) in a cell is cut with … and every cut
+// text, cell or field gets a tooltip with all of it, also for what pages add later
+function nsFit(root){
+  root=root||document;
+  root.querySelectorAll('td,th').forEach(el=>{ if(!el.childElementCount&&!el.classList.contains('ns-clip')&&/\S{40,}/.test(el.textContent)) el.classList.add('ns-clip'); });
+  root.querySelectorAll('td,th,code,a,button,summary,h2,h3,.chip,.name,.note,label,option').forEach(el=>{
+    if(el.dataset.nsTip==='own'||(el.title&&el.dataset.nsTip!=='auto')) { if(el.title) el.dataset.nsTip='own'; return; }
+    const full=(el.textContent||'').trim();
+    if(full&&el.clientWidth&&el.scrollWidth>el.clientWidth+1){ el.title=full; el.dataset.nsTip='auto'; }
+    else if(el.dataset.nsTip==='auto'){ el.removeAttribute('title'); delete el.dataset.nsTip; } });
+  root.querySelectorAll('input:not([type]),input[type=text],input[type=url],input[type=search]').forEach(nsFitInput); }
+function nsFitInput(i){
+  if(i.dataset.nsHelp===undefined){ i.dataset.nsHelp=i.title||''; i.addEventListener('input',()=>nsFitInput(i)); i.addEventListener('change',()=>nsFitInput(i)); }
+  const help=i.dataset.nsHelp, over=i.value&&i.clientWidth&&i.scrollWidth>i.clientWidth+1;
+  i.title=over?(help?help+'\n\n':'')+i.value:help; }
+(function(){ const css=document.createElement('style');
+  css.textContent='.ns-clip{max-width:min(26rem,55vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
+  let t=null; const later=()=>{ clearTimeout(t); t=setTimeout(()=>{ if(!document.hidden) nsFit(document); },250); };
+  const start=()=>{ document.head.appendChild(css); nsFit(document);
+    try{ new MutationObserver(ms=>{ if(ms.some(m=>[...m.addedNodes].some(n=>n.nodeType===1||n.nodeType===3))) later(); })
+      .observe(document.body,{childList:true,subtree:true,characterData:true}); }catch(e){}
+    addEventListener('resize',later); };
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start(); })();
 // ---- the tour: optional, offered once, restartable from the ? button on every page
 const NS_TOUR=[
  {path:'/', sel:'header', title:'Welcome to NeuronScope Studio', body:'Studio runs your local models, lets you chat with them, and shows what happens inside them: which neurons fire, and how likely a reply is to be a confident guess. Two minutes, eleven stops. Skip any time.'},

@@ -1149,6 +1149,15 @@ const PICK={gguf:'file',from:'file',imatrix:'file',testqa:'file',file:'file',ser
   model:'any',base:'any',teacher:'any',student:'any',review_model:'any'};
 function pickFor(f){ const w=PICK[f.name]; if(!w||f.multi||f.choices) return '';
   return ` data-pick="${w}"`+(f.name==='gguf'?' data-ext="gguf" list="dl-ggufs"':''); }
+// Fields with known values get a dropdown of them (still free to type): models, endpoints, results, data files.
+const SUGGEST={model:'models',base:'models',teacher:'models',student:'models',review_model:'models',stats_model:'models',
+  model_path:'hf_models',results:'results',testqa:'results',neurons:'neuron_sets',h_neurons:'neuron_sets',
+  input_path:'data_files',ids_path:'data_files',train_ids:'data_files',test_ids:'data_files',items:'data_files',exclude:'data_files'};
+function sugList(f){ if(f.choices||f.name==='gguf') return [];
+  if(f.name==='endpoint'||f.name==='pool') return (DEF.models||[]).map(m=>`${m.split('/').pop().replace(/[^\w.-]/g,'-').slice(0,24)}=${DEF.studio||''}@${m}`);
+  if(f.name==='model_path') return [...(DEF.hf_models||[]),...(DEF.models||[])];
+  return DEF[SUGGEST[f.name]]||[]; }
+function sugAttr(f){ return sugList(f).length&&f.name!=='gguf'?` list="dl-f-${f.name}"`:''; }
 // Help goes in a tooltip (and under the field while it has focus), so it never overflows the input.
 const tip=h=>h?`<span class="tip" title="${esc(h)}" aria-label="${esc(h)}" tabindex="0">i</span>`:'';
 const ph=h=>h&&h.length<=38?h:'';
@@ -1159,7 +1168,8 @@ function renderForm(prefill){const k=$('#kind').value, s=specs[k]; prefill=prefi
   const d=f.name in prefill?prefill[f.name]:Array.isArray(f.default)?f.default.join(' '):(f.default??sg??'');
   if(f.kind==='bool')return `<label><input type="checkbox" id="${id}" ${[true,'1','true','on'].includes(prefill[f.name])?'checked':''}>${lab}${tip(f.help)}</label>`;
   const inp=f.choices?`<select id="${id}">${f.choices.map(c=>`<option ${c===d?'selected':''}>${esc(c)}</option>`).join('')}</select>`
-   :`<input id="${id}" value="${esc(Array.isArray(d)?d.join(' '):d)}" placeholder="${esc(ph(f.help))}" title="${esc(f.help||'')}"${pickFor(f)}>`;
+   :`<input id="${id}" value="${esc(Array.isArray(d)?d.join(' '):d)}" placeholder="${esc(ph(f.help))}" title="${esc(f.help||'')}"${pickFor(f)}${sugAttr(f)}>`
+    +(sugList(f).length?`<datalist id="dl-f-${f.name}">${sugList(f).slice(0,200).map(x=>`<option value="${esc(x)}">`).join('')}</datalist>`:'');
   return `<label for="${id}">${lab}${f.multi?' <span class="note">(space-separated)</span>':''}${tip(f.help)}</label>${inp}`}).join('')
   +`<datalist id="dl-ggufs">${(DEF.ggufs||[]).map(p=>`<option value="${esc(p)}">`).join('')}</datalist>`;
  $('#form').querySelectorAll('input[title],select').forEach(el=>{ el.onfocus=()=>{ const h=el.title||''; if(h.length>38){ let n=el.parentNode.querySelector('.fhelp[data-for="'+el.id+'"]');

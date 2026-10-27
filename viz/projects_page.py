@@ -33,6 +33,9 @@ button:disabled{opacity:.5;cursor:default}
 .st{font-size:11px;padding:0 .4rem;border-radius:4px;border:1px solid var(--line);white-space:nowrap}
 .st.running,.st.review{color:var(--acc)}.st.done,.st.approved{color:var(--ok)}.st.blocked,.st.rework{color:var(--warn)}
 .st.dropped{opacity:.5;text-decoration:line-through}.st.draft,.st.paused,.st.todo{color:var(--mut)}
+.chips{display:flex;flex-wrap:wrap;gap:.25rem;margin-top:.15rem}
+.chipb{font-size:12px;padding:.1rem .5rem;border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer;max-width:14rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chipb.on{background:var(--chip);color:var(--fg);border-color:var(--acc,var(--line))}
 .chip{display:inline-block;font-size:11px;padding:0 .45rem;border-radius:9px;background:var(--chip);margin:0 .2rem .2rem 0}
 .chip.unknown{background:transparent;border:1px dashed var(--line);color:var(--mut)}
 table{width:100%;border-collapse:collapse}td,th{padding:.4rem .35rem;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-size:13px}
@@ -129,13 +132,23 @@ function attemptHtml(t,a,last){
   return h+'</div>';
 }
 
+// A set picked from known values: toggle chips over a hidden input that holds "a, b, c" for the save code.
+function chipPick(field,options,selected,tipFor){
+  const on=new Set(selected||[]), extra=[...on].filter(x=>!options.includes(x));
+  return `<input type="hidden" data-f="${field}" value="${esc([...on].join(', '))}"><div class="chips">`+
+    [...options,...extra].map(o=>`<button type="button" class="chipb${on.has(o)?' on':''}" data-chip="${field}" data-v="${esc(o)}" title="${esc((tipFor&&tipFor(o))||o)}">${esc(o)}</button>`).join('')+
+    (options.length||extra.length?'':'<span class="note">none</span>')+'</div>'; }
+document.addEventListener('click',e=>{ const b=e.target.closest('[data-chip]'); if(!b) return;
+  b.classList.toggle('on'); const box=b.parentNode, inp=box.previousElementSibling;
+  inp.value=[...box.querySelectorAll('.chipb.on')].map(x=>x.dataset.v).join(', '); });
+
 function taskDetail(t){
   const draft=plan.status==='draft';
   let h=`<div class="detail">`;
   h+=`<label>detail</label><textarea data-f="detail">${esc(t.detail)}</textarea>
    <label>done means (acceptance criteria a reviewer can check)</label><input data-f="acceptance" value="${esc(t.acceptance)}">
-   <div class="row"><div class="grow"><label>skills (${esc(meta.subjects.join(', '))})</label><input data-f="labels" value="${esc(t.labels.join(', '))}"></div>
-   <div class="grow"><label>after tasks</label><input data-f="depends_on" value="${esc(t.depends_on.join(', '))}" placeholder="T1, T2"></div>
+   <div class="row"><div class="grow"><label title="Pick the skills this task needs: they decide which model takes it">skills</label>${chipPick('labels',meta.subjects,t.labels)}</div>
+   <div class="grow"><label title="Tasks that must be done before this one starts">after tasks</label>${chipPick('depends_on',plan.tasks.map(x=>x.id).filter(x=>x!==t.id),t.depends_on,id=>{const o=plan.tasks.find(x=>x.id===id);return o?o.title:''})}</div>
    <div class="grow"><label>model (pin)</label><select data-f="model">${modelOpts(t.model,'assign automatically')}</select></div></div>
    <div class="row" style="margin-top:.5rem"><button class="pri" data-a="save">Save task</button>
    ${t.status!=='dropped'&&t.status!=='running'?'<button class="bad" data-a="drop">Drop</button>':''}

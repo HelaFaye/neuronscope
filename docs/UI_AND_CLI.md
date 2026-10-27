@@ -152,3 +152,24 @@ filled in. Addresses you can use yourself:
 
 `doctor.py` prints the matching Studio address after the first problem it
 finds.
+
+## Long text and known values
+
+Fields and tables never spill text past their edges:
+
+- **Cut text has a tooltip.** A table cell, link, button, note or label too
+  narrow for its text shows all of it on hover. A long unbroken value in a
+  cell, such as a path, id or hash, is cut with … instead of widening the
+  table. A text field whose value is longer than the box adds the whole value
+  to its tooltip, after the field's help. This works on every page, including
+  for content a page adds later (`nsFit` in `viz/ui_links.py`).
+- **Help sits in tooltips.** A job field's help is in its ⓘ tooltip and shows
+  under the field while it has focus, so it never crowds the form.
+- **Known values come as dropdowns.** You can still type anything:
+  - **Job forms** list your models, the Studio endpoint for each model
+    (`label=URL@model`, for TestQA), finished TestQA results, H-Neuron sets
+    and the workspace's data files.
+  - **Engine device fields** (devices, draft device) list what
+    `llama-server --list-devices` reports, with free memory.
+  - **Project tasks** pick skills and prerequisite tasks as toggle chips, not
+    typed lists.
