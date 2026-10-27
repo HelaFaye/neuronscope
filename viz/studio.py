@@ -4105,7 +4105,8 @@ class Handler(BaseHTTPRequestHandler):
             name = c["ns_viz"].value if "ns_viz" in c else ""
         except Exception:
             name = ""
-        return bloom.THEMES.get(name) or default
+        import widgets
+        return widgets.with_widgets(bloom.THEMES.get(name) or default, STATE.get("widgets"))
 
     def _host_token(self):
         auth = self.headers.get("Authorization", "")
@@ -4510,6 +4511,16 @@ class Handler(BaseHTTPRequestHandler):
             save_studio_config({"theme": name})
             STATE["studio_theme"], STATE["viz_theme"] = name, th[name].get("viz") or "dark"
             return self._json(200, {"default": name})
+        if self.path == "/api/settings/widgets":
+            # the owner's widget settings, served with every 3D theme (viz/widgets.py)
+            import widgets
+            try:
+                clean = widgets.validate(req.get("widgets") or {})
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+            save_studio_config({"widgets": clean})
+            STATE["widgets"] = clean
+            return self._json(200, {"values": widgets.merged(None, clean)})
         if self.path == "/api/settings/tool-rules":
             rules = tool_rules().replace(req.get("rules") or {})
             return self._json(200, {"tool_rules": rules})
@@ -4670,8 +4681,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"path": path, "config": accelerators.load_config(path),
                                     "devices": POOL.devices(refresh=True)})
         if self.path == "/api/themes":
+            import widgets
             return self._json(200, {"themes": studio_themes(), "default": STATE.get("studio_theme") or "midnight",
-                                    "viz": sorted(__import__("bloom").THEMES)})
+                                    "viz": sorted(__import__("bloom").THEMES),
+                                    "widgets": {"spec": widgets.SPEC, "values": widgets.merged(None, STATE.get("widgets"))}})
         if self.path.startswith("/api/engine/options"):
             import engine_options as eo
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -6568,6 +6581,11 @@ def main(argv=None):
     STATE["subject_models"] = dict(cfg.get("subject_models") or {})
     STATE["studio_theme"] = cfg.get("theme") if cfg.get("theme") in studio_themes() else "midnight"
     STATE["viz_theme"] = (studio_themes().get(STATE["studio_theme"]) or {}).get("viz") or "dark"
+    try:
+        import widgets as _w
+        STATE["widgets"] = _w.validate(cfg.get("widgets") or {})
+    except ValueError:
+        STATE["widgets"] = {}
     STATE["tool_rules_path"] = cfg.get("tool_rules") or None
     os.environ.update(ns_workspace.env_for(ws))
 

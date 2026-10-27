@@ -60,7 +60,12 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
 
 <section class="card" id="appearance"><h2>Appearance</h2>
 <div class="note">A theme colours Studio's pages, its charts (the model radar) and the 3D views of activations and hallucination risk. Your choice is kept in this browser; <b>Make default</b> sets it for browsers that have not chosen one, and for the Godot client's 3D view.</div>
-<div id="themeGrid" class="themes"></div><div id="themeMsg" class="note"></div></section>
+<div id="themeGrid" class="themes"></div><div id="themeMsg" class="note"></div>
+<h3 id="widgets" style="margin:1rem 0 .3rem">Widgets</h3>
+<div class="note">The emotion jewel, the emotion graph and the 3D navigation, in the 3D replay, the live viewer and the Godot client. These are the defaults for every viewer; a viewer's own picks (right-click the jewel for its next style) stay in that browser or client.</div>
+<div class="row" style="align-items:flex-start;gap:1rem;margin-top:.5rem"><canvas id="wdPrev" style="width:120px;height:120px;flex:none;background:#05070d;border-radius:10px" title="a preview with made-up emotions"></canvas>
+<div id="wdForm" style="flex:1;min-width:16rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.5rem"></div></div>
+<div class="row" style="margin-top:.5rem"><button class="pri" id="wdSave">Save widgets</button><button id="wdReset">Back to the theme's</button><span id="wdMsg" class="note"></span></div></section>
 
 <section class="card" id="workspaces"><h2>Workspaces</h2>
 <div class="note">Where things are, by name: the models, the llama.cpp build, the folder that holds the pipeline's data (<code>data/</code>, <code>models/</code>, <code>runs/</code>…; jobs run there), Studio's own state, and environment for the GPU stack. Keep one per disk layout or machine, and switch instead of passing paths. Command line: <code>python scripts/ns_workspace.py</code>.</div>
@@ -324,6 +329,29 @@ async function themes(){ const j=await (await fetch('/api/themes')).json(); cons
     $('#themeMsg').textContent=r.ok?'Default theme saved.':(await r.json()).error; themes(); }); }
 themes();
 
+// ---- widgets (viz/widgets.py): a form drawn from the spec, and a jewel preview with made-up emotions
+let WD=null, prev=null;
+async function wdLoad(){ const j=await (await fetch('/api/themes')).json(); WD=j.widgets; if(!WD) return;
+  $('#wdForm').innerHTML=Object.entries(WD.spec).map(([w,sp])=>`<fieldset style="border:1px solid var(--line);border-radius:8px;margin:0;padding:.3rem .6rem;min-width:0"><legend class="note">${esc(w.replace('_',' '))}</legend>`+
+    Object.entries(sp).map(([k,s])=>{ const v=WD.values[w][k], id=`wd-${w}-${k}`;
+      const inp = s.kind==='choice' ? `<select id="${id}" style="width:auto;justify-self:start">${s.choices.map(c=>`<option${c===v?' selected':''}>${c}</option>`).join('')}</select>`
+        : s.kind==='bool' ? `<input type="checkbox" id="${id}"${v?' checked':''} style="justify-self:start">`
+        : `<input type="range" id="${id}" min="${s.min}" max="${s.max}" step="${s.kind==='int'?1:0.05}" value="${v}" style="width:100%"><span class="note" id="${id}-v">${v}</span>`;
+      return `<label title="${esc(s.help||'')}" style="display:grid;grid-template-columns:6.5rem minmax(0,1fr) 2.5rem;gap:.5rem;align-items:center;margin:.15rem 0"><span>${k.replace('_',' ')}</span>${inp}</label>`; }).join('')+'</fieldset>').join('');
+  $('#wdForm').querySelectorAll('input,select').forEach(el=>el.oninput=()=>{ const o=document.getElementById(el.id+'-v'); if(o) o.textContent=el.value; if(prev) prev.settings(wdValues().jewel); });
+  if(!prev){ prev=NSWidgets.create('jewel', $('#wdPrev'), {settings: WD.values.jewel});
+    const names=['happy','afraid','calm','angry','sad','desperate'], pal=['#FF4D1A','#3D8BFF','#1D9E75','#E7B65C','#B07CFF','#c9c9d2'];
+    setInterval(()=>{ const s=performance.now()/1000; prev.set(names.map((n,k)=>({name:n, color:pal[k], z: 2.2*Math.sin(s*0.5+k*1.3)*Math.sin(s*0.21+k)}))); }, 100); }
+  else prev.settings(WD.values.jewel); }
+function wdValues(){ const out={};
+  for(const [w,sp] of Object.entries(WD.spec)) for(const [k,s] of Object.entries(sp)){ const el=document.getElementById(`wd-${w}-${k}`); if(!el) continue;
+    (out[w]??={})[k] = s.kind==='bool' ? el.checked : s.kind==='choice' ? el.value : s.kind==='int' ? parseInt(el.value) : parseFloat(el.value); }
+  return out; }
+async function wdSave(values){ const r=await fetch('/api/settings/widgets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({widgets:values})});
+  const j=await r.json(); $('#wdMsg').textContent=r.ok?'Saved. Open 3D views pick it up when reloaded.':j.error; if(r.ok) wdLoad(); }
+$('#wdSave').onclick=()=>wdSave(wdValues()); $('#wdReset').onclick=()=>wdSave({});
+wdLoad();
+
 let SH=null;
 async function shLoad(){ const r=await fetch('/api/settings/sharing'); SH=await r.json(); const st=SH.settings;
   $('#shOn').checked=st.enabled; $('#shEp').value=st.endpoint; $('#shAuto').checked=st.auto_listed; $('#shUnl').checked=st.auto_unlisted;
@@ -362,4 +390,5 @@ plLoad();
 import os as _os, sys as _sys  # noqa: E401,E402
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from ui_links import inject as _inject_links  # noqa: E402
-PAGE = _inject_links(PAGE)
+from widgets import WIDGETS_JS as _WJS  # noqa: E402
+PAGE = _inject_links(PAGE.replace("<script>", "<script>" + _WJS, 1))

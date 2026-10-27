@@ -330,7 +330,8 @@ line-height:1.7}
 </header>
 <canvas id="cv"></canvas>
 <canvas id="sc"></canvas>
-<div id="emBox" hidden><div class="sec">Emotions (z against the stories)</div><canvas id="em"></canvas><div class="leg" id="leg"></div></div>
+<div id="emRow" hidden style="display:flex;align-items:center"><div id="emBox" style="flex:1;min-width:0"><div class="sec">Emotions (z against the stories)</div><canvas id="em"></canvas><div class="leg" id="leg"></div></div>
+<canvas id="jewel" style="width:84px;height:84px;flex:none;margin-right:10px"></canvas></div>
 <div id="ftBox" hidden><div class="sec">Features of this token</div><div class="feats" id="feats"></div></div>
 <div class="bar">
 <select id="tier"></select>
@@ -340,10 +341,14 @@ line-height:1.7}
 </div>
 <div class="stat" id="stat"></div>
 <div class="tok" id="toks"></div>
+<script>/*NS_WIDGETS*/</script>
 <script>
 const $=s=>document.querySelector(s);
 const cv=$('#cv'), cx=cv.getContext('2d'), sc=$('#sc'), sx=sc.getContext('2d'), em=$('#em'), ex=em.getContext('2d');
 const EMC=['#FF4D1A','#3D8BFF','#1D9E75','#E7B65C','#B07CFF','#c9c9d2'];
+// the emotion jewel (viz/widgets.py): click it to hide or show the lanes; it stays either way
+const jewel=NSWidgets.create('jewel', $('#jewel'), {onToggle(){ const b=$('#emBox'); b.hidden=!b.hidden;
+  NSWidgets.store.set('graph_hidden', b.hidden); if(!b.hidden) fit(em); }});
 const esc=t=>String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 let emoNames=new Set();
 let paused=false, frames=[], toks=[], last=0, bytes=0, t0=Date.now();
@@ -376,7 +381,8 @@ es.onmessage=e=>{
   frames.push(f); if(frames.length>160) frames.shift();
   if(f.tok!==undefined){ toks.push({s:f.s,tok:f.tok,emo:f.emo,ez:f.ez});
     if(toks.length>60) toks.shift(); }
-  if(f.emo){ if($('#emBox').hidden){ $('#emBox').hidden=false; fit(em); }
+  if(f.emo){ if($('#emRow').hidden){ $('#emRow').hidden=false; $('#emRow').style.display='flex';
+      $('#emBox').hidden=NSWidgets.store.get('graph_hidden',false); if(!$('#emBox').hidden) fit(em); }
     [...f.emo.map(e=>e[0]),...Object.keys(f.ez||{})].forEach(n=>{ if(!emoNames.has(n)){ emoNames.add(n); $('#colour').insertAdjacentHTML('beforeend',`<option value="${esc(n)}">tokens: ${esc(n)}</option>`); } }); }
   if(f.feat){ $('#ftBox').hidden=false; $('#feats').innerHTML=f.feat.slice(0,8).map(([d,id,r,l])=>`<span title="${esc(d)} #${id}">${esc(l||('#'+id))} <em>${(+r).toFixed(2)}</em></span>`).join(''); }
   draw();
@@ -422,17 +428,18 @@ function draw(){
   sx.strokeStyle='#2a2a34'; sx.lineWidth=1; sx.beginPath();
   sx.moveTo(0,sh/2); sx.lineTo(sw,sh/2); sx.stroke();
   // emotion lanes: the emotions most active over the visible window
+  // a frame's emotion values: all clearly active ones (ez), else its top three; absent counts as about 0
+  const ev=fr=>fr.ez||Object.fromEntries((fr.emo||[]).map(([n,z])=>[n,z]));
+  if(!$('#emRow').hidden){ const peak={}; frames.forEach(fr=>Object.entries(ev(fr)).forEach(([n,z])=>peak[n]=Math.max(peak[n]||0,Math.abs(z))));
+    const pick=Object.keys(peak).sort((a,b)=>peak[b]-peak[a]).slice(0,5), last=frames[frames.length-1];
+    jewel.set(pick.map((n,k)=>({name:n, z:ev(last)[n]??0, color:EMC[k]})));
   if(!$('#emBox').hidden){ const ew=em.clientWidth, eh=em.clientHeight; ex.clearRect(0,0,ew,eh);
-    // a frame's emotion values: all clearly active ones (ez), else its top three; absent counts as about 0
-    const ev=fr=>fr.ez||Object.fromEntries((fr.emo||[]).map(([n,z])=>[n,z]));
-    const peak={}; frames.forEach(fr=>Object.entries(ev(fr)).forEach(([n,z])=>peak[n]=Math.max(peak[n]||0,Math.abs(z))));
-    const pick=Object.keys(peak).sort((a,b)=>peak[b]-peak[a]).slice(0,5);
     const mx=Math.max(3,...pick.map(n=>peak[n]));
     ex.strokeStyle='#2a2a34'; ex.beginPath(); ex.moveTo(0,eh/2); ex.lineTo(ew,eh/2); ex.stroke();
     pick.forEach((n,k)=>{ ex.strokeStyle=EMC[k]; ex.lineWidth=1.6; ex.beginPath();
       frames.forEach((fr,i)=>{ const z=ev(fr)[n]??0;
         const x=ew*i/Math.max(frames.length-1,1), y=eh/2-z*(eh/2-4)/mx; i?ex.lineTo(x,y):ex.moveTo(x,y); }); ex.stroke(); });
-    $('#leg').innerHTML=pick.map((n,k)=>`<span><i style="background:${EMC[k]}"></i>${esc(n)}</span>`).join(''); }
+    $('#leg').innerHTML=pick.map((n,k)=>`<span><i style="background:${EMC[k]}"></i>${esc(n)}</span>`).join(''); } }
   const f=frames[frames.length-1];
   const scored=f.scored!==false;
   $('#stat').textContent=`${f.src==='lab'?'decoding lab · ':''}tier ${f.t} · frame ${f.i} · ${
@@ -444,6 +451,7 @@ function draw(){
     return (scored&&t.s>1.5)?`<b>${esc(t.tok)}</b>`:esc(t.tok); }).join('');
 }
 </script>"""
+PAGE = PAGE.replace("/*NS_WIDGETS*/", __import__("widgets").WIDGETS_JS)
 
 
 def main():

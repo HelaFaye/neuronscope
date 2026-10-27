@@ -18,6 +18,19 @@ extends Node3D
 ## Layout: x = neuron column (ordered by classifier weight when the trace has a
 ## classifier, so the H-neurons form a band at the left), y = layer. Flagged
 ## H-neurons are drawn as rings in a second MultiMesh on top of the field.
+##
+## Everything 2D sits on the UI CanvasLayer, so it stays put on screen however
+## the camera moves: the risk strip, the emotion graph with its jewel, the
+## navigation gizmo and the search line (widgets/, docs/WIDGETS.md).
+## Camera: drag to orbit, Shift + drag or middle-drag to pan, wheel to zoom;
+## numpad 1/3/7 front/right/top (Ctrl for the opposite side), 5 perspective or
+## orthographic, Home or numpad . to frame everything, S to sway.
+
+const Jewel := preload("res://widgets/jewel.gd")
+const EmotionGraph := preload("res://widgets/emotion_graph.gd")
+const NavGizmo := preload("res://widgets/nav_gizmo.gd")
+const ChatBox := preload("res://widgets/chat_box.gd")
+const EMO_PALETTE := ["#FF4D1A", "#3D8BFF", "#1D9E75", "#E7B65C", "#B07CFF", "#c9c9d2", "#5DCAA5", "#F28FAD"]
 
 const DEFAULT_API := "http://127.0.0.1:7880"
 # Shared with the three.js client (viz/bloom.py); tests/test_bloom_demo.py keeps them equal.
@@ -57,6 +70,19 @@ var flags: MultiMeshInstance3D
 var info: RichTextLabel
 var strip: RiskStrip
 var context: RichTextLabel
+var jewel
+var graph
+var gizmo
+var search
+var graph_hidden := false
+
+# camera: orbit around target; yaw 0 looks at the field from the front
+var yaw := 0.0
+var pitch := -0.29
+var dist := 520.0
+var target := Vector3.ZERO
+var sway_on := true
+var dragging := 0               # 1 orbit, 2 pan
 
 @onready var cells: MultiMeshInstance3D = $Cells
 @onready var hud: Label = $UI/HUD
@@ -93,21 +119,6 @@ class RiskStrip extends Control:
 			for i in n:
 				pts.append(Vector2(x.call(i), y.call(owner_node.prob[i])))
 			draw_polyline(pts, hal, 1.5, true)
-		elif owner_node.meta.get("emotions", {}).has("z"):
-			# a decoding-lab recording: emotion lanes instead of risk
-			var emo: Dictionary = owner_node.meta.emotions
-			var pal := [Color("#FF4D1A"), Color("#3D8BFF"), Color("#1D9E75"), Color("#E7B65C"), Color("#B07CFF"), Color("#c9c9d2")]
-			var mx := 3.0
-			for row in emo.z:
-				for v in row:
-					mx = maxf(mx, absf(float(v)))
-			draw_line(Vector2(0, h / 2), Vector2(w, h / 2), Color(0.16, 0.16, 0.2), 1.0)
-			for k in range(emo.names.size()):
-				var pts := PackedVector2Array()
-				for i in range(mini(n, emo.z.size())):
-					pts.append(Vector2(x.call(i), h / 2 - (h / 2 - 3) * float(emo.z[i][k]) / mx))
-				if pts.size() > 1:
-					draw_polyline(pts, pal[k % pal.size()], 1.4, true)
 		else:
 			draw_string(ThemeDB.fallback_font, Vector2(8, h / 2 + 4),
 				"no classifier scores in this trace: nothing can be flagged", HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
@@ -141,6 +152,8 @@ func open(base: String, tok: String = "") -> void:
 	cells.multimesh = null
 	strip.visible = false
 	context.visible = false
+	for w in [graph, jewel, gizmo, search]:
+		w.visible = false
 	info.text = ""
 	hud.text = "loading %s…" % api
 	_fetch("/api/meta", _on_meta)
@@ -197,6 +210,110 @@ func _build_ui() -> void:
 	$UI.add_child(context)
 	strip.visible = false
 	context.visible = false
+	# the emotion graph, with the jewel at its right; the jewel stays when the graph is hidden
+	graph = EmotionGraph.new()
+	graph.anchor_left = 0.0
+	graph.anchor_right = 1.0
+	graph.anchor_top = 1.0
+	graph.anchor_bottom = 1.0
+	graph.offset_left = 14
+	graph.offset_right = -124
+	graph.offset_top = -160
+	graph.offset_bottom = -106
+	graph.seek.connect(seek)
+	$UI.add_child(graph)
+	jewel = Jewel.new()
+	jewel.anchor_left = 1.0
+	jewel.anchor_right = 1.0
+	jewel.anchor_top = 1.0
+	jewel.anchor_bottom = 1.0
+	jewel.offset_left = -116
+	jewel.offset_right = -14
+	jewel.offset_top = -204
+	jewel.offset_bottom = -102
+	jewel.toggled.connect(_toggle_graph)
+	$UI.add_child(jewel)
+	graph_hidden = bool(jewel.load_state().get("graph_hidden", false))
+	gizmo = NavGizmo.new()
+	gizmo.anchor_left = 1.0
+	gizmo.anchor_right = 1.0
+	gizmo.offset_left = -110
+	gizmo.offset_right = -14
+	gizmo.offset_top = 52
+	gizmo.offset_bottom = 288
+	gizmo.orbit.connect(_orbit_by)
+	gizmo.view.connect(set_view)
+	gizmo.zoom.connect(_zoom)
+	gizmo.pan.connect(_pan)
+	gizmo.frame_all.connect(func(): set_view("home"))
+	gizmo.projection.connect(_toggle_projection)
+	gizmo.sway.connect(_toggle_sway)
+	$UI.add_child(gizmo)
+	search = ChatBox.new()
+	search.anchor_left = 1.0
+	search.anchor_right = 1.0
+	search.offset_left = -440
+	search.offset_right = -14
+	search.offset_top = 12
+	search.offset_bottom = 44
+	search.jump.connect(_jump)
+	$UI.add_child(search)
+	for w in [graph, jewel, gizmo, search]:
+		w.visible = false
+
+
+func _orbit_by(d: Vector2) -> void:
+	_user_moved()
+	yaw += d.x
+	pitch = clampf(pitch + d.y, -1.55, 1.55)
+
+
+## The sway button and S: on or off, remembered for next time.
+func _toggle_sway() -> void:
+	sway_on = not sway_on
+	gizmo.save_setting("sway", sway_on)
+
+
+func _jump(i: int) -> void:
+	playing = false
+	seek(i)
+
+
+func _toggle_graph() -> void:
+	graph_hidden = not graph_hidden
+	jewel.save_state({"graph_hidden": graph_hidden})
+	_layout_tracks()
+
+
+## Which bottom widgets show for this trace: the emotion graph and jewel need an
+## emotion track; the risk strip needs classifier scores, or shows why there are none.
+func _layout_tracks() -> void:
+	var emo: Dictionary = meta.get("emotions", {})
+	var has_emo: bool = emo.has("z") and n_cells > 0
+	var has_risk := prob.size() == n_frames and n_frames > 0
+	jewel.visible = has_emo
+	graph.visible = has_emo and not graph_hidden
+	strip.visible = n_cells > 0 and (has_risk or not has_emo)
+	# the graph takes the strip's place when there is no risk to draw
+	var top := -160 if strip.visible else -100
+	graph.offset_top = top
+	graph.offset_bottom = top + 54 if strip.visible else -54
+	jewel.offset_top = graph.offset_bottom - 102
+	jewel.offset_bottom = graph.offset_bottom
+	graph.offset_right = -124
+
+
+## Hand the widgets this trace's tracks.
+func _widget_data() -> void:
+	var emo: Dictionary = meta.get("emotions", {})
+	var names: Array = emo.get("names", [])
+	var cols := []
+	for k in names.size():
+		cols.append(EMO_PALETTE[k % EMO_PALETTE.size()])
+	var d := {"names": names, "z": emo.get("z", []), "colors": cols, "frame": frame}
+	graph.set_data(d)
+	jewel.set_data(d)
+	search.set_data({"labels": meta.get("labels", []), "features": meta.get("features", []), "emotions": emo})
 
 
 func _fetch(path: String, cb: Callable, binary := false) -> void:
@@ -239,6 +356,10 @@ func _on_theme(d) -> void:
 	if env:
 		env.background_color = Color(theme.bg)
 		env.fog_light_color = Color(theme.bg)
+	for w in [graph, jewel, gizmo, search]:
+		w.set_theme_data(theme)
+	sway_on = bool(gizmo.setting("sway", true))
+	gizmo.visible = bool(gizmo.setting("visible", true)) and n_cells > 0
 	_fetch("/api/trace", _on_trace, true)
 
 
@@ -262,10 +383,13 @@ func _on_trace(body: PackedByteArray) -> void:
 		frame = clampi(start.to_int(), 0, max(0, T - 1))
 	playing = OS.get_environment("NS_PAUSED") != "1"
 	hud.text = ""
-	strip.visible = true
 	context.visible = true
 	n_layers = L
 	_build(L)
+	gizmo.visible = bool(gizmo.setting("visible", true))
+	search.visible = true
+	_widget_data()
+	_layout_tracks()
 
 
 func _ring_texture() -> ImageTexture:
@@ -307,6 +431,7 @@ func _build(layers: int) -> void:
 	var height := layers * 8.0
 	center = Vector3(width / 2.0, height / 2.0 - 40.0, 0.0)
 	radius = 0.65 * max(width, height)
+	set_view("home")
 	var mm := _multimesh(n_cells)
 	for i in n_cells:
 		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY,
@@ -365,6 +490,10 @@ func _paint() -> void:
 			Vector3(neuron_of[i] * xs, layer_of[i] * 8.0, 0.5)))
 	_update_text()
 	strip.queue_redraw()
+	if graph:
+		graph.frame = frame
+		graph.queue_redraw()
+		jewel.frame = frame
 
 
 func _hex(c: Color) -> String:
@@ -454,17 +583,94 @@ func _process(delta: float) -> void:
 			accum = 0.0
 			frame = (frame + 1) % n_frames
 			_paint()
-	# A slow sway in front of the field rather than a full orbit: from behind, the
-	# billboards are the same picture mirrored, and edge-on the field vanishes.
-	orbit += delta * 0.15
-	var a := PI / 2.0 + 0.35 * sin(orbit)
-	cam.position = center + Vector3(cos(a) * radius, 0.3 * radius, sin(a) * radius)
-	cam.look_at(center, Vector3.UP)
+	# The sway is a slow swing in front of the field, not a full orbit: from
+	# behind, the billboards are the same picture mirrored. Moving the view stops it.
+	if sway_on:
+		orbit += delta * 0.15
+	var y := yaw + (0.35 * sin(orbit) if sway_on else 0.0)
+	var dir := Vector3(sin(y) * cos(pitch), -sin(pitch), cos(y) * cos(pitch))
+	cam.position = target + dir * dist
+	cam.look_at(target, Vector3.UP if absf(pitch) < 1.5 else Vector3.FORWARD)
+	if cam.projection == Camera3D.PROJECTION_ORTHOGONAL:
+		cam.size = dist * 1.1
+	if gizmo:
+		gizmo.set_camera(cam.global_transform.basis, cam.projection == Camera3D.PROJECTION_ORTHOGONAL, sway_on)
+
+
+## Preset views (the gizmo's axis balls, numpad keys): front, back, left, right, top, bottom, home.
+func set_view(name: String) -> void:
+	var views := {"front": [0.0, 0.0], "back": [PI, 0.0], "right": [PI / 2, 0.0], "left": [-PI / 2, 0.0],
+		"top": [0.0, -1.55], "bottom": [0.0, 1.55], "home": [0.0, -0.29]}
+	if not views.has(name):
+		return
+	yaw = views[name][0]
+	pitch = views[name][1]
+	if name == "home":
+		target = center
+		dist = radius * 1.05
+		orbit = 0.0
+	else:
+		_user_moved()
+
+
+func _user_moved() -> void:
+	sway_on = false
+	orbit = 0.0
+
+
+func _zoom(steps: float) -> void:
+	dist = clampf(dist * pow(0.88, steps), 20.0, 5000.0)
+
+
+func _pan(rel: Vector2) -> void:
+	_user_moved()
+	var b := cam.global_transform.basis
+	var k := dist / 600.0
+	target += (-b.x * rel.x + b.y * rel.y) * k
+
+
+func _toggle_projection() -> void:
+	cam.projection = Camera3D.PROJECTION_PERSPECTIVE if cam.projection == Camera3D.PROJECTION_ORTHOGONAL \
+		else Camera3D.PROJECTION_ORTHOGONAL
 
 
 func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventMouseButton:
+		if e.button_index == MOUSE_BUTTON_WHEEL_UP and e.pressed:
+			_zoom(1.0)
+		elif e.button_index == MOUSE_BUTTON_WHEEL_DOWN and e.pressed:
+			_zoom(-1.0)
+		elif e.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE]:
+			dragging = 0
+			if e.pressed:
+				dragging = 2 if e.button_index == MOUSE_BUTTON_MIDDLE or e.shift_pressed else 1
+		return
+	if e is InputEventMouseMotion and dragging > 0:
+		if dragging == 1:
+			_user_moved()
+			yaw -= e.relative.x * 0.006
+			pitch = clampf(pitch - e.relative.y * 0.006, -1.55, 1.55)
+		else:
+			_pan(e.relative)
+		return
 	if e is InputEventKey and e.pressed:
 		match e.keycode:
+			KEY_KP_1:
+				set_view("back" if e.ctrl_pressed else "front")
+			KEY_KP_3:
+				set_view("left" if e.ctrl_pressed else "right")
+			KEY_KP_7:
+				set_view("bottom" if e.ctrl_pressed else "top")
+			KEY_KP_5:
+				_toggle_projection()
+			KEY_HOME, KEY_KP_PERIOD:
+				set_view("home")
+			KEY_KP_ADD, KEY_EQUAL:
+				_zoom(1.0)
+			KEY_KP_SUBTRACT, KEY_MINUS:
+				_zoom(-1.0)
+			KEY_S:
+				_toggle_sway()
 			KEY_SPACE:
 				playing = not playing
 			KEY_LEFT:

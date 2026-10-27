@@ -49,7 +49,8 @@ def _godot():
 
 
 @pytest.mark.skipif(_godot() is None, reason="no Godot 4 binary ($NS_GODOT, godot4 or godot)")
-@pytest.mark.parametrize("script", ["studio.gd", "main.gd", "app.gd"])
+@pytest.mark.parametrize("script", ["studio.gd", "main.gd", "app.gd", "widgets/widget.gd", "widgets/jewel.gd",
+                                    "widgets/emotion_graph.gd", "widgets/nav_gizmo.gd", "widgets/chat_box.gd"])
 def test_godot_scripts_parse(script):
     r = subprocess.run([_godot(), "--headless", "--path", str(ROOT / "viz" / "godot"), "--check-only",
                         "--script", f"res://{script}"], capture_output=True, text=True, timeout=120)

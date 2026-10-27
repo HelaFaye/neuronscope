@@ -55,6 +55,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import ns_security as sec  # noqa: E402
 from records import Session  # noqa: E402
 from timeline import THEMES, add_flag_args, classify_frames, load_trace, resolve_mask  # noqa
+import widgets  # noqa: E402
 
 PAYLOAD = {}
 
@@ -226,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/trace":
             return self._send(200, PAYLOAD["blob"], "application/octet-stream")
         if self.path == "/api/theme":
-            return self._send(200, json.dumps(PAYLOAD["theme"]),
+            return self._send(200, json.dumps(widgets.with_widgets(PAYLOAD["theme"])),
                               "application/json")
         self._send(404, json.dumps({"error": "not found"}), "application/json")
 
@@ -249,6 +250,8 @@ font:13px ui-sans-serif,system-ui,sans-serif;overflow:hidden}
 background:linear-gradient(transparent,#05050af2 22%)}
 #row{display:flex;gap:12px;align-items:center}
 #spark{flex:1;height:46px;cursor:pointer;display:block;min-width:0}
+#jewel{width:64px;height:64px;flex:none;margin:-10px 0}
+#spark.off{visibility:hidden}
 #tok{font-family:ui-monospace,monospace;min-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #text{margin-top:6px;max-height:22vh;overflow-y:auto;line-height:1.75;font-size:13.5px;white-space:pre-wrap;word-break:break-word}
 #text span{cursor:pointer;border-radius:3px;padding:1px 0}
@@ -263,9 +266,10 @@ button:hover{background:#16161e}
 <button data-v="front" title="1">Front</button><button data-v="side" title="2">Side</button><button data-v="top" title="3">Top</button>
 <button data-v="reset" title="R">Reset</button><button id="orbit" title="O: slow automatic orbit">Orbit</button>
 <button id="follow" title="F: glide to the flagged neurons on flagged tokens">Follow flags</button></div>
-<div id="panel"><div id="row"><button id="play">Pause</button><canvas id="spark"></canvas><div id="tok"></div></div>
+<div id="panel"><div id="row"><button id="play">Pause</button><canvas id="spark"></canvas><canvas id="jewel" hidden></canvas><div id="tok"></div></div>
 <div id="ef" style="margin-top:4px;font-size:12.5px;color:#8a8a92;min-height:1em"></div>
 <div id="text"></div></div>
+<script>/*NS_WIDGETS*/</script>
 <script type="importmap">
 {"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
 "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
@@ -417,7 +421,7 @@ function drawSpark(){
   const w = r.width, h = r.height, x = i => (T>1 ? i/(T-1) : 0)*w, y = p => h-2-(h-4)*p;
   sctx.clearRect(0,0,w,h); sctx.fillStyle='#16161e'; sctx.fillRect(0,0,w,h);
   if(!prob && meta.emotions){            // a decoding-lab recording: emotion lanes instead of risk
-    const E = meta.emotions, pal = ['#FF4D1A','#3D8BFF','#1D9E75','#E7B65C','#B07CFF','#c9c9d2'];
+    const E = meta.emotions, pal = EPAL;
     const mx = Math.max(3, ...E.z.flat().map(Math.abs)), ye = v => h/2 - (h/2-3)*v/mx;
     sctx.strokeStyle='#2a2a34'; sctx.beginPath(); sctx.moveTo(0,h/2); sctx.lineTo(w,h/2); sctx.stroke();
     E.names.forEach((n,k)=>{ sctx.strokeStyle=pal[k%6]; sctx.lineWidth=1.4; sctx.beginPath();
@@ -443,8 +447,17 @@ const modeNote = meta.mode==='review' ? `${esc(meta.question||'')} · cells: ${e
 const cellsNote = meta.mode!=='review' && meta.cells_note && meta.cells_note.startsWith('none') ? `<br><span class="note">${esc(meta.cells_note)}: risky tokens are shown, H-neuron cells are not</span>` : '';
 const orderNote = meta.order==='weight' ? `x: neurons ordered by classifier weight, H-neurons at the left · y: layer` : `x: neuron index · y: layer`;
 
+// the emotion jewel (viz/widgets.py) at the right of the strip; click it to hide or show the lanes
+const EPAL = ['#FF4D1A','#3D8BFF','#1D9E75','#E7B65C','#B07CFF','#c9c9d2'];
+let jewel = null;
+if(meta.emotions){ const jc = document.getElementById('jewel'); jc.hidden = false;
+  if(NSWidgets.store.get('graph_hidden', false)) spark.classList.add('off');
+  jewel = NSWidgets.create('jewel', jc, {settings: (theme.widgets||{}).jewel, onToggle(){
+    spark.classList.toggle('off'); NSWidgets.store.set('graph_hidden', spark.classList.contains('off')); }}); }
+
 let lastCur = null;
 function update(){
+  if(jewel) jewel.set(NSWidgets.emotionsAt(meta.emotions, t, EPAL));
   paint(field, t, 1.0, 0);
   for(let k=0;k<trailN;k++) paint(trails[k], Math.max(0,t-(k+1)), 0.45, -(k+1)*6);
   paintFlags(t);
@@ -513,6 +526,7 @@ addEventListener('resize', ()=>{
   renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight); drawSpark();
 });
 </script>"""
+PAGE = PAGE.replace("/*NS_WIDGETS*/", widgets.WIDGETS_JS)
 
 
 def main():

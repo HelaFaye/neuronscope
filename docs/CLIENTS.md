@@ -64,7 +64,8 @@ messages work as on the web pages: "Setup → Build llama.cpp" opens the build
 job, "Jobs → Evaluate" opens TestQA filled in for a model, and a checked
 reply's *open in 3D* switches to the 3D tab. The 3D tab:
 - plays a checked reply token by token, or a review's periods frame by frame;
-- plays a decoding-lab recording with its emotion lanes and the features at each token;
+- plays a decoding-lab recording with its emotion lanes, the emotion jewel and the features at each token;
+- keeps its controls on screen however you move the camera: orbit, pan, zoom, preset views and the sway toggle ([WIDGETS.md](WIDGETS.md));
 - **Layers** limits the view to a range of layers;
 - **Screenshot** or F12 saves a PNG under the app's user folder;
 - keys: Space play/pause, ←/→ step, N next flagged token.

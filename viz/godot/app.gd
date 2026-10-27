@@ -979,7 +979,7 @@ func _build_3d() -> void:
 	ui.shot = _note()
 	side.add_child(_row([_btn("Play/pause", _toggle_play), _btn("Screenshot", _shot)]))
 	side.add_child(ui.shot)
-	side.add_child(_note("Space play/pause · ←/→ step · N next flagged · F12 screenshot"))
+	side.add_child(_note("Space play/pause · ←/→ step · N next flagged · F12 screenshot · drag orbit, Shift+drag pan, wheel zoom · numpad 1/3/7 views, 5 ortho, Home frame, S sway · click the jewel to hide the emotion graph ([url=web:/settings#widgets]widget settings[/url])"))
 	var vc := SubViewportContainer.new()
 	vc.stretch = true
 	vc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -991,6 +991,20 @@ func _build_3d() -> void:
 	viz = VizScene.instantiate()
 	viz.standalone = false
 	sv.add_child(viz)
+	# the 3D view's search line asks the model through Studio (">question"), with the reply as context
+	viz.search.can_chat = true
+	viz.search.ask.connect(_ask_from_3d)
+
+
+func _ask_from_3d(q: String) -> void:
+	var reply := "".join(viz.meta.get("labels", []))
+	var msgs := [{"role": "system", "content": "The user is looking at this reply in a 3D view of the model's activations:\n" + reply.left(6000)},
+		{"role": "user", "content": q}]
+	studio.post_json("/v1/chat/completions", {"messages": msgs, "stream": false, "max_tokens": 300}, func(code, d):
+		if code != 200:
+			viz.search.show_answer("error: " + str(d.get("error", code)))
+			return
+		viz.search.show_answer(str(d.choices[0].message.get("content", ""))))
 
 
 func _on_layers(_v: float) -> void:
