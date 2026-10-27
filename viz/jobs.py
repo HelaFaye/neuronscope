@@ -679,8 +679,12 @@ SAFE = re.compile(r"^[^\x00-\x1f]*$")
 EXTRA = None      # callable -> more specs (Studio: job kinds from enabled plugins)
 
 
+HIDDEN = None          # (kind, spec) -> True for jobs of a removed add-on (viz/addons.py); set by Studio
+
+
 def all_specs() -> dict:
-    return {**SPECS, **(EXTRA() if EXTRA else {})}
+    specs = {**SPECS, **(EXTRA() if EXTRA else {})}
+    return {k: v for k, v in specs.items() if not (HIDDEN and HIDDEN(k, v))}
 
 
 # ---- every option a job's script has, read from its own --help (the form's fields are the common ones)

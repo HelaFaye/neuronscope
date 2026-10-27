@@ -144,3 +144,10 @@ prints one JSON object of outputs. An output it leaves out is skipped, so a
 node can route; printing `{"error": "..."}` fails the node. The node type
 appears as `plugin:<plugin>:<type>` while the plugin is on.
 
+## Packaging and tabs
+
+`python viz/addons.py pack <folder>` makes an installable `.zip`, and
+`python viz/addons.py index <dist>` makes a repository index
+([ADDONS.md](ADDONS.md)). A plugin with a `page` can also declare
+`"tab": {"label": "ComfyUI", "tip": "..."}` to get a sidebar tab while it is on.
+

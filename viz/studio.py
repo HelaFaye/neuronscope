@@ -1476,6 +1476,31 @@ def plugins():
 ns_jobs.EXTRA = lambda: plugins().job_specs()
 
 
+def addon_builtins():
+    """Built-in add-ons (viz/addons.py): which parts of Studio the owner removed."""
+    import addons
+
+    def save(v):
+        STATE["addons_off"] = list(v)
+        save_studio_config({"addons_off": list(v)})
+    return addons.Builtins(lambda: STATE.get("addons_off") or [], save)
+
+
+def addon_packages():
+    import addons
+    home = os.path.dirname(os.path.expanduser(STATE.get("config_path") or "~/.neuronscope/config.json"))
+    pm = plugins()
+    install_dir = pm.dirs[0] if pm.dirs else os.path.join(home, "plugins")
+
+    def save(v):
+        STATE["addon_repos"] = list(v)
+        save_studio_config({"addon_repos": list(v)})
+    return addons.Packages(pm, install_dir, lambda: STATE.get("addon_repos") or [], save)
+
+
+ns_jobs.HIDDEN = lambda kind, spec: addon_builtins().job_hidden(kind, spec)
+
+
 def mcp_hub():
     hub = STATE.get("mcp")
     if hub is None and (STATE.get("mcp_config") or plugins().mcp_servers()):
@@ -4058,6 +4083,81 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(502, {"error": str(e)})
         return self._json(404, {"error": "not found"})
 
+    # ---------------------------------------------------------- add-ons (addons.py)
+
+    def _addon_removed(self) -> bool:
+        """A request to a part of Studio whose add-on was removed: say so, and how to get it back."""
+        name = addon_builtins().blocks(self.path)
+        if not name:
+            return False
+        import addons
+        msg = f"The {addons.BUILTIN[name]['title']} add-on is removed. Reinstall it under Add-ons (/addons)."
+        if self.path.startswith("/api/"):
+            self._json(404, {"error": msg, "addon": name})
+        else:
+            self._html(f"<!doctype html><meta charset=utf-8><title>Removed</title><body style='font:15px system-ui;"
+                       f"padding:2rem'><p>{msg}</p><p><a href='/addons'>Add-ons</a></p>")
+        return True
+
+    def _addons(self, req):
+        import addons
+        b, pk = addon_builtins(), addon_packages()
+        path = urllib.parse.urlsplit(self.path).path
+        try:
+            if req is None:
+                if path == "/addons":
+                    import addons_page
+                    return self._html(addons_page.PAGE)
+                if path == "/api/addons":
+                    pk_rows = plugins().summary()
+                    inst = str(pk.dir.resolve())
+                    for r in pk_rows:
+                        r["removable"] = str(Path(r["folder"]).resolve().parent) == inst
+                        r["tab"] = ((next((x for x in plugins().scan() if x["name"] == r["name"]), {}).get("manifest") or {})
+                                    .get("tab"))
+                    return self._json(200, {"builtin": b.list(), "packages": pk_rows, "repos": pk.repos(),
+                                            "install_dir": inst})
+                if path == "/api/addons/catalog":
+                    return self._json(200, {"addons": pk.catalog()})
+                if path == "/api/addons/nav":
+                    tabs = []
+                    for p in plugins().enabled():
+                        t = p["manifest"].get("tab")
+                        if isinstance(t, dict) and p["manifest"].get("page"):
+                            tabs.append({"href": f"/plugins/{p['name']}/", "label": str(t.get("label") or p["name"])[:24],
+                                         "tip": str(t.get("tip") or p["manifest"].get("description") or "")[:160]})
+                    return self._json(200, {"off": b.nav_off(), "tabs": tabs})
+                return self._json(404, {"error": "not found"})
+            if path == "/api/addons/builtin":
+                b.set(str(req.get("name")), bool(req.get("installed")))
+                return self._json(200, {"builtin": b.list()})
+            if path == "/api/addons/install":
+                out = pk.install_from_repo(str(req.get("name") or ""), req.get("repo"))
+                STATE.pop("mcp", None)
+                return self._json(200, out)
+            if path == "/api/addons/uninstall":
+                pk.uninstall(str(req.get("name") or ""))
+                return self._json(200, {"ok": True})
+            if path == "/api/addons/repos":
+                return self._json(200, {"repos": pk.set_repos(req.get("repos") or [])})
+        except (addons.AddonError, ValueError) as e:
+            return self._json(400, {"error": str(e)[:500]})
+        except OSError as e:
+            return self._json(502, {"error": f"{type(e).__name__}: {e}"[:500]})
+        return self._json(404, {"error": "not found"})
+
+    def _addon_upload(self):
+        """A package file (.zip) as the request body."""
+        import addons
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > addons.MAX_PACKAGE:
+            return self._json(413, {"error": "send a .zip of at most 200 MB"})
+        data = self.rfile.read(n)
+        try:
+            return self._json(200, addon_packages().install_bytes(data))
+        except (addons.AddonError, ValueError) as e:
+            return self._json(400, {"error": str(e)[:500]})
+
     # ---------------------------------------------------------- node graphs (graph_engine.py)
 
     def _graph_env(self, req):
@@ -4726,7 +4826,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
     PAGES = {"/", "/setup", "/settings", "/lab", "/review", "/projects", "/workers", "/jobs", "/connect", "/remote",
-             "/link", "/system", "/features", "/graphs"}
+             "/link", "/system", "/features", "/graphs", "/addons"}
 
     def do_GET(self):
         self._route = None
@@ -4735,6 +4835,8 @@ class Handler(BaseHTTPRequestHandler):
             self.path = base.rstrip("/")
         elif base == "/" and self.path != "/":
             self.path = "/"
+        if self._addon_removed():
+            return
         if self.path.startswith(("/api/remote/next", "/api/remote/file/")):
             return self._remote_public("GET")
         if self.path.split("?")[0] == "/pair":
@@ -4923,6 +5025,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._owner_only():
                 return
             return self._graphs(None)
+        if self.path == "/addons" or self.path.startswith("/api/addons"):
+            if not self._owner_only():
+                return
+            return self._addons(None)
         if self.path.startswith("/api/jobs") or self.path == "/jobs":
             if self._role != "owner":
                 return self._json(403, {"error": "jobs need the owner"})
@@ -5106,6 +5212,8 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
 
     def do_POST(self):
         self._route = None
+        if self._addon_removed():
+            return
         if self.path == "/api/login":
             req = self._read()
             if STATE["token"] and not THROTTLE.blocked(self.client_address[0]) and hmac.compare_digest(
@@ -5212,6 +5320,13 @@ border-radius:6px;border:1px solid #6f93ff;background:#6f93ff;color:#0b0b0a;curs
                 if not self._owner_only():
                     return
                 return self._graphs(self._read())
+
+            if self.path.startswith("/api/addons"):
+                if not self._owner_only():
+                    return
+                if self.path == "/api/addons/upload":
+                    return self._addon_upload()
+                return self._addons(self._read())
 
             if self.path.startswith("/api/automation/"):
                 if not self._owner_only():
@@ -6758,6 +6873,8 @@ def main(argv=None):
             setattr(a, d, ws[d])
     STATE["workspace_name"], STATE["workspace"] = ws["name"], ws
     STATE["subject_models"] = dict(cfg.get("subject_models") or {})
+    STATE["addons_off"] = list(cfg.get("addons_off") or [])
+    STATE["addon_repos"] = list(cfg.get("addon_repos") or [])
     STATE["studio_theme"] = cfg.get("theme") if cfg.get("theme") in studio_themes() else "midnight"
     STATE["viz_theme"] = (studio_themes().get(STATE["studio_theme"]) or {}).get("viz") or "dark"
     try:

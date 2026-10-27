@@ -52,7 +52,7 @@ function nsThemeName(){ try{ return localStorage.getItem('ns-theme')||'midnight'
 async function nsCycleTheme(){ const j=await (await fetch('/api/themes')).json(); const names=Object.keys(j.themes);
   const cur=nsThemeName(); const nx=names[(names.indexOf(cur)+1)%names.length]; nsApplyTheme(nx,j.themes[nx]); return nx; }
 // ---- the sidebar on every page: what Studio does, in the order people use it (LM Studio-style)
-const NS_ICON={chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
+const NS_ICON={puzzle:'<path d="M9 4h3a2 2 0 1 1 4 0h3v4a2 2 0 1 1 0 4v4h-4a2 2 0 1 0-4 0H8v-4a2 2 0 1 1 0-4z"/>',chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
   search:'<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',doc:'<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>',
   plug:'<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/>',play:'<path d="M7 4l13 8-13 8z"/>',
   tasks:'<path d="M10 6h10M10 12h10M10 18h10M4 6l1.2 1.2L7.5 5M4 12l1.2 1.2L7.5 11M4 18l1.2 1.2L7.5 17"/>',
@@ -93,9 +93,26 @@ const NS_NAV=[
     {href:'/remote',label:'Remote hosts',tip:'Models on other computers (NeuronScope Remote)'},
     {href:'/link',label:'Devices',tip:'Pair devices; link other Studios'}]},
   {sep:1,bottom:1},
+  {href:'/addons',label:'Add-ons',icon:'puzzle',tip:'Install, remove and update add-ons; ComfyUI and other packages',bottom:1},
   {href:'/system',label:'System',icon:'pulse',tip:'What is running, restart any part, monitor the hardware, automation rules',bottom:1},
   {href:'/setup',label:'Setup',icon:'wrench',tip:'Paths, building llama.cpp, hardware, health check',bottom:1},
   {href:'/settings',label:'Settings',icon:'gear',tip:'Themes, workspaces, models per subject, tool approval, plugins',bottom:1}];
+// Add-ons change the sidebar: a removed add-on's pages go, an add-on's own tab comes (viz/addons.py).
+// The last answer is kept, so the sidebar draws at once, and redrawn if it changed.
+const NS_NAV_BASE=JSON.parse(JSON.stringify(NS_NAV));
+function nsNavApply(cfg){ NS_NAV.splice(0,NS_NAV.length,...JSON.parse(JSON.stringify(NS_NAV_BASE))); if(!cfg) return;
+  const off=new Set(cfg.off||[]);
+  for(let i=NS_NAV.length-1;i>=0;i--){ const it=NS_NAV[i];
+    if(it.kids){ it.kids=it.kids.filter(k=>!off.has(k.href)); if(!it.kids.length) NS_NAV.splice(i,1); }
+    else if(it.href&&off.has(it.href)) NS_NAV.splice(i,1); }
+  if((cfg.tabs||[]).length){ const at=NS_NAV.findIndex(x=>x.sep&&x.bottom);
+    NS_NAV.splice(at<0?NS_NAV.length:at,0,{label:'Add-ons',icon:'puzzle',tip:'Tabs added by add-ons',kids:cfg.tabs.map(t=>({href:t.href,label:t.label,tip:t.tip||''}))}); } }
+(function(){ let c=null; try{ c=JSON.parse(localStorage.getItem('ns-addon-nav')||'null'); }catch(e){} nsNavApply(c);
+  if(/^\/(pair|login)/.test(location.pathname)||window.self!==window.top) return;
+  fetch('/api/addons/nav').then(r=>r.ok?r.json():null).then(j=>{ if(!j) return; const s=JSON.stringify(j);
+    let old=null; try{ old=localStorage.getItem('ns-addon-nav'); localStorage.setItem('ns-addon-nav',s); }catch(e){}
+    if(s!==old){ nsNavApply(j); ['ns-rail','ns-bar','ns-more','ns-fly','ns-sub'].forEach(id=>{ const e=document.getElementById(id); if(e) e.remove(); });
+      if(document.body&&document.body.classList.contains('ns-railed')) nsRail(); } }).catch(()=>{}); })();
 function nsSvg(n){ return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NS_ICON[n]||''}</svg>`; }
 function nsNavActive(it){ if(it.kids) return it.kids.some(nsNavActive); const here=location.pathname.replace(/\/+$/,'')||'/';
   if(it.tab) return here==='/'&&(window.NS_TAB||'chats')===it.tab;

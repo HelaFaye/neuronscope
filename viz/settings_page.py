@@ -137,7 +137,7 @@ dialog.dlg::backdrop{background:rgba(0,0,0,.5)}dialog.dlg form{padding:1rem 1.1r
 <select id="tann" style="width:auto"><option value="{}">no annotations</option><option value='{"readOnlyHint":true}'>read-only</option><option value='{"readOnlyHint":false,"destructiveHint":false}'>writes</option><option value='{"readOnlyHint":false,"destructiveHint":true}'>destructive</option><option value='{"readOnlyHint":true,"openWorldHint":true}'>read-only, open world</option></select><button id="ttest">Test</button></div>
 <div id="tout" class="note"></div>
 <h3>Connected tools</h3><div id="tlist" class="note"></div></section>
-<section class="card" id="plugins"><h2>Plugins</h2>
+<section class="card" id="plugins"><h2>Plugins</h2><div class="note">Install packages from a file or a repository, and remove parts of Studio you do not use, under <a href="/addons">Add-ons</a>.</div>
 <div class="note">A plugin is a folder with a <code>plugin.json</code>. It can add jobs, checks under chat replies, a page of its own and MCP tools. <b>Plugins run code on this computer</b>, so none is used until you turn it on. If a plugin's files change after that, it turns itself off until you look at it again. See docs/PLUGINS.md to write one.</div>
 <div id="plDirs" class="note"></div><div style="overflow-x:auto"><table id="plList"></table></div><div id="plMsg" class="note"></div></section>
 
