@@ -43,3 +43,16 @@ def test_context_usage_by_part(studio_srv):
     assert parts["messages"] == 8                  # "user: one two three four" + "assistant: five six"
     _, home = call(studio_srv, "/")
     assert 'id="ctxStrip"' in home and 'id="side"' in home
+
+
+def test_sidebar_groups():
+    js = ui_links.js()
+    groups = {g: re.findall(r"label:'([^']+)'", body)
+              for g, body in re.findall(r"\{label:'([^']+)',icon:'\w+',tip:'[^']*'(?:,mobile:1)?,kids:\[(.*?)\]\}", js, re.S)}
+    assert groups == {"Models": ["My Models", "Discover"], "Tasks": ["Jobs", "Projects", "Workers"],
+                      "Studio": ["Features", "Review", "Lab"], "Connect": ["Apps", "Remote hosts", "Devices"]}
+    for fn in ("nsSub", "nsGroupHref", "ns-fly"):                   # sibling tabs, last-used page, flyout
+        assert fn in js
+    tour = re.findall(r"\{path:'([^']+)'", js)
+    hrefs = {h.split("#")[0] or "/" for h in re.findall(r"href:'([^']+)'", js)}
+    assert set(tour) <= hrefs                                         # the tour only stops on real pages

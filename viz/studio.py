@@ -5500,8 +5500,8 @@ $('#go').onclick=async()=>{ const r=await fetch('/api/pair/claim',{method:'POST'
 </script>"""
 
 LINK_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Studio Link</title>""" + _PAIR_STYLE + r"""
-<header><h1>Studio · Link</h1><a href="/">← Studio</a></header>
+<title>Studio Devices</title>""" + _PAIR_STYLE + r"""
+<header><h1>Studio · Devices</h1><a href="/">← Studio</a></header>
 <main>
 <div class="card"><h2>Pair a device with this Studio</h2>
  <div class="note">Creates a one-time link (<span id="codettl">5 minutes</span>). Open it on a phone or laptop, or paste it into another Studio below. Each device gets its own token, revocable here; the master token is never shared. The link carries this server's certificate fingerprint, so the other side pins it instead of trusting any certificate.</div>
@@ -5512,7 +5512,7 @@ LINK_PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" conte
  <div id="pairout" style="margin-top:.6rem"></div></div>
 <div class="card"><h2>Paired devices</h2><div id="devs" class="note">loading…</div></div>
 <div class="card"><h2>Use another machine's models here</h2>
- <div class="note">On the other machine's Studio, open Link → Create pairing link, and paste it here. Its models then appear in this Studio's model picker and its <code>/v1</code> API as <code>name:model</code>; requests are served by that machine.</div>
+ <div class="note">On the other machine's Studio, open Connect → Devices → Create pairing link, and paste it here. Its models then appear in this Studio's model picker and its <code>/v1</code> API as <code>name:model</code>; requests are served by that machine.</div>
  <div class="row"><div><label>Pairing link from the other Studio</label><input id="lnk" placeholder="https://host:7870/pair#c=…&fp=…"></div>
  <div style="max-width:200px"><label>Name here</label><input id="lname" placeholder="gpu-box"></div><button class="pri" id="add">Link</button></div>
  <div id="addmsg" class="note" style="margin-top:.4rem"></div>

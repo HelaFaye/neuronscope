@@ -300,7 +300,7 @@ python viz/studio.py ... --no-persistent-pairing --pair-durations 1h,8h,1d --pai
 `POST /api/devices/update` takes the same plus the device `id`.
 
 **Use another machine's models.** On the GPU box's Studio create a pairing
-link, and paste it into this Studio's Link page with a name (say `gpu`). Its
+link, and paste it into this Studio's Connect → Devices page with a name (say `gpu`). Its
 models appear in the picker and in `/v1/models` as `gpu:<model id>`; requests
 for them, from the chat or from any OpenAI client pointed at this Studio, are
 forwarded to that machine with this Studio's device token, streamed back, and

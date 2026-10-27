@@ -33,7 +33,7 @@ work in another.
 | an agent app uses another computer's LLMs | the agent app | the host | MCP: `neuronscope_remote bridge <host>` on the app's computer | CONNECT.md, *MCP, step by step* B |
 | Studio sends project tasks to an endpoint | Studio | the endpoint's computer | OpenAI API at the endpoint's `/v1` | Workers page |
 | Studio's chat calls tools | Studio | wherever each tool server runs | MCP, from `mcp.json` and plugins | Settings, Plugins |
-| two Studios share models | the Studio that links | the linked Studio | Studio's API, with a device token | Link page |
+| two Studios share models | the Studio that links | the linked Studio | Studio's API, with a device token | Connect → Devices |
 | an MCP client drives file transfers on another computer | Studio, or any MCP client | the computer running `ns_transfer_mcp.py --http` | MCP at its `/mcp`, bearer token | TRANSFER.md, *Over the network* |
 
 ## Ports

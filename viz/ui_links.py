@@ -68,35 +68,50 @@ const NS_ICON={chat:'<path d="M4 5h16v11H9l-5 4z"/>',box:'<path d="M12 3l8 4.5v9
   pulse:'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
   find:'<circle cx="10" cy="10" r="6"/><path d="M19 19l-4.5-4.5M7.5 10h5"/>',
   spark:'<circle cx="12" cy="12" r="2.2"/><circle cx="5" cy="6" r="1.6"/><circle cx="19" cy="6" r="1.6"/><circle cx="5" cy="18" r="1.6"/><circle cx="19" cy="18" r="1.6"/><path d="M6.3 7l3.9 3.6M17.7 7l-3.9 3.6M6.3 17l3.9-3.6M17.7 17l-3.9-3.6"/>'};
-// tab: the Studio-page tab the item opens. mobile: also on the phone bar.
+// tab: the Studio-page tab the item opens. mobile: also on the phone bar. kids: a group; its pages share a
+// row of tabs at the top, and the group's icon opens the page last used in it.
 const NS_NAV=[
   {href:'/#chats',tab:'chats',label:'Chat',icon:'chat',tip:'Chat with your models',mobile:1},
-  {href:'/#models',tab:'local',label:'My Models',icon:'box',tip:'Models on this computer: load, settings, measured accuracy',mobile:1},
-  {href:'/#hub',tab:'hub',label:'Discover',icon:'search',tip:'Find and download GGUF models from Hugging Face',mobile:1},
+  {label:'Models',icon:'box',tip:'Your models, and new ones to download',mobile:1,kids:[
+    {href:'/#models',tab:'local',label:'My Models',tip:'Models on this computer: load, settings, measured accuracy'},
+    {href:'/#hub',tab:'hub',label:'Discover',tip:'Find and download GGUF models from Hugging Face'}]},
   {href:'/#docs',tab:'docs',label:'Docs',icon:'doc',tip:'Document collections replies can cite'},
   {href:'/#tools',tab:'tools',label:'Tools',icon:'plug',tip:'MCP servers whose tools models may call'},
   {sep:1},
-  {href:'/jobs',label:'Jobs',icon:'play',tip:'Evaluation, retraining and benchmark jobs',mobile:1},
-  {href:'/projects',label:'Projects',icon:'tasks',tip:'Split a project into tasks for worker models'},
-  {href:'/workers',label:'Workers',icon:'cpu',tip:'Where tasks run; GPU temperatures'},
-  {href:'/lab',label:'Lab',icon:'flask',tip:'Labs, live and 3D views'},
-  {href:'/review',label:'Review',icon:'grid',tip:'How neurons behave across tests, by subject and over time'},
-  {href:'/features',label:'Features',icon:'spark',tip:'Feature dictionaries, what a reply was made of, circuits, emotion vectors, steering'},
+  {label:'Tasks',icon:'tasks',tip:'Jobs, projects split into tasks, and the workers that run them',mobile:1,kids:[
+    {href:'/jobs',label:'Jobs',tip:'Evaluation, retraining, benchmark and analysis jobs'},
+    {href:'/projects',label:'Projects',tip:'Split a project into tasks for worker models'},
+    {href:'/workers',label:'Workers',tip:'Where tasks run; GPU temperatures'}]},
+  {label:'Studio',icon:'spark',tip:'Studio tools: features and emotions, neuron review, labs and 3D views',kids:[
+    {href:'/features',label:'Features',tip:'Feature dictionaries, what a reply was made of, circuits, emotion vectors, steering'},
+    {href:'/review',label:'Review',tip:'How neurons behave across tests, by subject and over time'},
+    {href:'/lab',label:'Lab',tip:'Labs, live and 3D views'}]},
   {sep:1},
-  {href:'/remote',label:'Remote',icon:'globe',tip:'Models on other computers (NeuronScope Remote)'},
-  {href:'/link',label:'Devices',icon:'link',tip:'Pair devices; link other Studios'},
-  {href:'/connect',label:'Connect',icon:'share',tip:'Use these models and tools from Cline, Claude and other apps'},
+  {label:'Connect',icon:'share',tip:'Other apps, other computers and your devices',kids:[
+    {href:'/connect',label:'Apps',tip:'Use these models and tools from Cline, Claude and other apps'},
+    {href:'/remote',label:'Remote hosts',tip:'Models on other computers (NeuronScope Remote)'},
+    {href:'/link',label:'Devices',tip:'Pair devices; link other Studios'}]},
   {sep:1,bottom:1},
   {href:'/system',label:'System',icon:'pulse',tip:'What is running, restart any part, monitor the hardware, automation rules',bottom:1},
   {href:'/setup',label:'Setup',icon:'wrench',tip:'Paths, building llama.cpp, hardware, health check',bottom:1},
   {href:'/settings',label:'Settings',icon:'gear',tip:'Themes, workspaces, models per subject, tool approval, plugins',bottom:1}];
 function nsSvg(n){ return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NS_ICON[n]||''}</svg>`; }
-function nsNavActive(it){ const here=location.pathname.replace(/\/+$/,'')||'/';
+function nsNavActive(it){ if(it.kids) return it.kids.some(nsNavActive); const here=location.pathname.replace(/\/+$/,'')||'/';
   if(it.tab) return here==='/'&&(window.NS_TAB||'chats')===it.tab;
   return here===it.href||here.startsWith(it.href+'/'); }
+// the page a group's icon opens: the one last used in it, else its first
+function nsGroupHref(g){ let h=null; try{ h=localStorage.getItem('ns-nav-'+g.label); }catch(e){} return g.kids.some(k=>k.href===h)?h:g.kids[0].href; }
+function nsSub(){ let bar=document.getElementById('ns-sub'); const g=NS_NAV.find(it=>it.kids&&nsNavActive(it));
+  if(!g){ if(bar) bar.remove(); return; }
+  const cur=g.kids.find(nsNavActive); try{ localStorage.setItem('ns-nav-'+g.label,cur.href); }catch(e){}
+  if(!bar){ bar=document.createElement('nav'); bar.id='ns-sub'; document.body.prepend(bar); }
+  bar.setAttribute('aria-label',g.label);
+  bar.innerHTML=`<span class="g">${nsSvg(g.icon)}${nsEsc(g.label)}</span>`+g.kids.map(k=>`<a href="${k.href}" title="${nsEsc(k.tip)}" class="${k===cur?'on':''}" ${k===cur?'aria-current="page"':''}>${nsEsc(k.label)}</a>`).join('');
+  const r=document.getElementById('ns-rail'); if(r) r.querySelectorAll('a.grp').forEach(a=>{ const it=NS_NAV[+a.dataset.nav]; a.href=nsGroupHref(it); }); }
 function nsRailDraw(){ const r=document.getElementById('ns-rail'); if(!r) return;
   r.querySelectorAll('[data-nav]').forEach(a=>{ const it=NS_NAV[+a.dataset.nav]; const on=nsNavActive(it); a.classList.toggle('on',on); if(on) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current'); });
-  const b=document.getElementById('ns-bar'); if(b) b.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('on',nsNavActive(NS_NAV[+a.dataset.nav]))); }
+  const b=document.getElementById('ns-bar'); if(b) b.querySelectorAll('[data-nav]').forEach(a=>a.classList.toggle('on',nsNavActive(NS_NAV[+a.dataset.nav])));
+  nsSub(); }
 function nsRail(){ if(window.self!==window.top||document.getElementById('ns-rail')||/^\/(pair|login)/.test(location.pathname)) return;
   const st=document.createElement('style'); st.textContent=`
 #ns-rail{position:fixed;left:0;top:0;bottom:0;width:76px;z-index:8000;background:var(--panel,#1d1d1b);border-right:1px solid var(--line,#33332f);display:flex;flex-direction:column;align-items:stretch;padding:.35rem .3rem;gap:0;overflow-y:auto;font:500 10.5px/1.15 ui-sans-serif,system-ui}
@@ -113,6 +128,16 @@ function nsRail(){ if(window.self!==window.top||document.getElementById('ns-rail
 body.ns-railed{padding-left:76px}
 body.ns-railed>header>a{display:none}
 body.ns-railed aside>.tabs{display:none}
+#ns-rail a.grp{position:relative}#ns-rail a.grp::after{content:'';position:absolute;right:5px;top:50%;margin-top:-9px;border:3.5px solid transparent;border-left-color:currentColor;opacity:.55}
+#ns-fly{position:fixed;left:78px;z-index:8100;min-width:12rem;background:var(--panel,#1d1d1b);border:1px solid var(--line,#33332f);border-radius:10px;padding:.35rem;box-shadow:0 8px 28px rgba(0,0,0,.35);font:13px/1.35 ui-sans-serif,system-ui}
+#ns-fly[hidden]{display:none}#ns-fly .h{font:600 11px ui-sans-serif,system-ui;color:var(--mut,#9a9a94);text-transform:uppercase;letter-spacing:.04em;padding:.25rem .5rem}
+#ns-fly a{display:block;padding:.38rem .55rem;border-radius:6px;color:var(--fg,#ececea);text-decoration:none}#ns-fly a small{display:block;color:var(--mut,#9a9a94);font-size:11.5px}
+#ns-fly a:hover,#ns-fly a:focus-visible{background:var(--code,#262624);outline:none}#ns-fly a.on{background:color-mix(in srgb,var(--acc,#6f93ff) 18%,transparent)}
+#ns-sub{display:flex;align-items:center;gap:.15rem;padding:0 12px;border-bottom:1px solid var(--line,#33332f);background:var(--panel,#1d1d1b);font:500 13px ui-sans-serif,system-ui;overflow-x:auto;flex:none;min-height:38px}
+#ns-sub .g{display:flex;align-items:center;gap:.35rem;color:var(--mut,#9a9a94);margin-right:.6rem;font-size:12px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}#ns-sub .g svg{width:16px;height:16px}
+#ns-sub a{padding:.55rem .75rem;color:var(--mut,#9a9a94);text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
+#ns-sub a:hover{color:var(--fg,#ececea)}#ns-sub a.on{color:var(--fg,#ececea);border-bottom-color:var(--acc,#6f93ff)}
+#ns-more .gh{grid-column:1/-1;font:600 10.5px ui-sans-serif,system-ui;color:var(--mut,#9a9a94);text-transform:uppercase;letter-spacing:.04em;padding:.3rem .3rem 0}
 #ns-bar{display:none}
 @media(max-width:700px){#ns-rail{display:none}body.ns-railed{padding-left:0;padding-bottom:58px}
   #ns-bar{display:flex;position:fixed;left:0;right:0;bottom:0;height:58px;z-index:8000;background:var(--panel,#1d1d1b);border-top:1px solid var(--line,#33332f);font:500 10.5px/1.1 ui-sans-serif,system-ui;padding:0 .2rem}
@@ -120,7 +145,7 @@ body.ns-railed aside>.tabs{display:none}
   #ns-more{position:fixed;left:8px;right:8px;bottom:66px;z-index:9100;background:var(--panel,#1d1d1b);border:1px solid var(--line,#33332f);border-radius:12px;padding:.4rem;display:grid;grid-template-columns:repeat(4,1fr);gap:.2rem;box-shadow:0 8px 30px rgba(0,0,0,.4);font:500 11px/1.15 ui-sans-serif,system-ui}
   #ns-more[hidden]{display:none}}`;
   document.head.appendChild(st);
-  const item=(it,i)=>`<a class="it" href="${it.href}" data-nav="${i}" title="${nsEsc(it.tip)}">${nsSvg(it.icon)}<span>${nsEsc(it.label)}</span></a>`;
+  const item=(it,i)=>`<a class="it${it.kids?' grp':''}" href="${it.kids?nsGroupHref(it):it.href}" data-nav="${i}" title="${nsEsc(it.tip)}"${it.kids?' aria-haspopup="true"':''}>${nsSvg(it.icon)}<span>${nsEsc(it.label)}</span></a>`;
   let top='',bot='';
   NS_NAV.forEach((it,i)=>{ const h=it.sep?'<hr>':item(it,i); if(it.bottom) bot+=h; else top+=h; });
   const r=document.createElement('nav'); r.id='ns-rail'; r.setAttribute('aria-label','Studio');
@@ -128,13 +153,28 @@ body.ns-railed aside>.tabs{display:none}
   const bar=document.createElement('nav'); bar.id='ns-bar'; bar.setAttribute('aria-label','Studio');
   bar.innerHTML=NS_NAV.map((it,i)=>it.mobile?item(it,i):'').join('')+`<a class="it" href="#" data-more="1" aria-haspopup="true">${nsSvg('more')}<span>More</span></a>`;
   const more=document.createElement('div'); more.id='ns-more'; more.hidden=true;
-  more.innerHTML=NS_NAV.map((it,i)=>it.sep||it.mobile?'':item(it,i)).join('');
+  const kid=(k,i,j)=>`<a class="it" href="${k.href}" data-nav="${i}" data-kid="${j}" title="${nsEsc(k.tip)}">${nsSvg(NS_NAV[i].icon)}<span>${nsEsc(k.label)}</span></a>`;
+  // single pages first (Docs, Tools, System, Setup, Settings), then each group under its name
+  more.innerHTML=NS_NAV.map((it,i)=>it.sep||it.kids||it.mobile?'':item(it,i)).join('')+
+    NS_NAV.map((it,i)=>it.kids?`<div class="gh">${nsEsc(it.label)}</div>`+it.kids.map((k,j)=>kid(k,i,j)).join(''):'').join('');
   document.body.prepend(r); document.body.append(bar,more); document.body.classList.add('ns-railed');
   bar.querySelector('[data-more]').onclick=e=>{ e.preventDefault(); more.hidden=!more.hidden; };
   r.querySelector('[data-find]').onclick=e=>{ e.preventDefault(); nsFind(); };
   more.insertAdjacentHTML('afterbegin',`<a class="it" href="#" data-find="1">${nsSvg('find')}<span>Search</span></a>`);
   more.querySelector('[data-find]').onclick=e=>{ e.preventDefault(); nsFind(); };
   more.onclick=()=>more.hidden=true;
+  // a group's pages in a flyout beside the rail, on hover or keyboard focus
+  const fly=document.createElement('div'); fly.id='ns-fly'; fly.hidden=true; fly.setAttribute('role','menu'); document.body.append(fly);
+  let shut=null; const close=()=>{ shut=setTimeout(()=>fly.hidden=true,180); };
+  const open=a=>{ clearTimeout(shut); const g=NS_NAV[+a.dataset.nav]; const rc=a.getBoundingClientRect();
+    fly.innerHTML=`<div class="h">${nsEsc(g.label)}</div>`+g.kids.map(k=>`<a role="menuitem" href="${k.href}" class="${nsNavActive(k)?'on':''}">${nsEsc(k.label)}<small>${nsEsc(k.tip)}</small></a>`).join('');
+    fly.hidden=false; fly.style.top=Math.max(6,Math.min(rc.top-6,innerHeight-fly.offsetHeight-6))+'px'; };
+  r.querySelectorAll('a.grp').forEach(a=>{ a.addEventListener('mouseenter',()=>open(a)); a.addEventListener('mouseleave',close);
+    a.addEventListener('focus',()=>open(a)); a.addEventListener('blur',close);
+    a.addEventListener('keydown',e=>{ if(e.key==='ArrowRight'||e.key==='ArrowDown'){ e.preventDefault(); open(a); fly.querySelector('a')?.focus(); } }); });
+  fly.addEventListener('mouseenter',()=>clearTimeout(shut)); fly.addEventListener('mouseleave',close);
+  fly.addEventListener('focusin',()=>clearTimeout(shut)); fly.addEventListener('focusout',close);
+  fly.addEventListener('keydown',e=>{ if(e.key==='Escape'){ fly.hidden=true; } });
   addEventListener('hashchange',nsRailDraw); document.addEventListener('ns-tab',e=>{ window.NS_TAB=e.detail; nsRailDraw(); });
   nsRailDraw(); }
 (function(){ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',nsRail); else nsRail(); })();
@@ -178,7 +218,7 @@ const NS_SECTIONS=[
   ['Steer with features and emotions','/features#steer','Features'],['Train a dictionary or transcoder','/jobs#kind=feat_train','Features']];
 let NS_FIND_EXTRA=null;
 async function nsFindIndex(){ const out=NS_SECTIONS.map(([t,h,d])=>({t,h,d}));
-  NS_NAV.forEach(it=>{ if(it.href) out.push({t:it.label,h:it.href,d:it.tip}); });
+  NS_NAV.forEach(it=>{ if(it.href) out.push({t:it.label,h:it.href,d:it.tip}); (it.kids||[]).forEach(k=>out.push({t:k.label,h:k.href,d:it.label+': '+k.tip})); });
   if(!NS_FIND_EXTRA){ NS_FIND_EXTRA=[];
     try{ const sp=await (await fetch('/api/jobs/specs')).json(); for(const [k,s] of Object.entries(sp)) NS_FIND_EXTRA.push({t:s.title,h:'/jobs#'+k,d:'Job · '+(s.group||'')+' · '+(s.help||'')}); }catch(e){}
     try{ const hp=await (await fetch('/api/help/index')).json(); for(const x of hp.pages||[]) NS_FIND_EXTRA.push({t:x.title,h:'/help/'+x.name,d:'Help'}); }catch(e){} }
@@ -345,12 +385,13 @@ function nsEnhancePickers(root){ (root||document).querySelectorAll('input[data-p
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start(); })();
 // ---- the tour: optional, offered once, restartable from the ? button on every page
 const NS_TOUR=[
- {path:'/', sel:'header', title:'Welcome to NeuronScope Studio', body:'Studio runs your local models, lets you chat with them, and shows what happens inside them: which neurons fire, and how likely a reply is to be a confident guess. Two minutes, ten stops. Skip any time.'},
- {path:'/', sel:'#ns-rail', title:'The sidebar', body:'Everything Studio does is one click away here, on every page. My Models lists the GGUF models in your folders: pick one to load it, see its measured accuracy and set its options. Discover finds and downloads more. Then Docs and Tools; then Jobs, Projects, Workers, Lab and Review; then other computers and apps. Setup and Settings sit at the bottom.'},
+ {path:'/', sel:'header', title:'Welcome to NeuronScope Studio', body:'Studio runs your local models, lets you chat with them, and shows what happens inside them: which neurons fire, and how likely a reply is to be a confident guess. Two minutes, eleven stops. Skip any time.'},
+ {path:'/', sel:'#ns-rail', title:'The sidebar', body:'Everything Studio does is one click away here, on every page, in a few groups. Models: the GGUF files in your folders (load one, see its measured accuracy, set its options) and Discover to download more. Tasks: jobs, projects and the workers that run them. Studio: the analysis tools (features and emotions, neuron review, labs). Connect: other apps, other computers, your devices. Hover a group to see its pages; inside one, tabs at the top switch between them.'},
  {path:'/', sel:'#in', title:'Chat', body:'Ask anything. The model picker below chooses which model answers; auto picks the one with the best measured record for the question.'},
  {path:'/', sel:'label:has(#autoCheck),label:has(#confOn)', title:'How sure was it?', body:'With confidence on, Studio marks the words the model was unsure about. check replies scores each reply with the model\'s hallucination classifier and opens a 3D view of its neurons.'},
  {path:'/setup', sel:'#status-card', title:'Setup', body:'What is ready and the one thing to do next. Build llama.cpp here with one button, add model folders, and run the health check when something seems off.'},
  {path:'/jobs', sel:'#kind', title:'Jobs', body:'Longer work runs here: TestQA to measure models, retraining on what they get wrong, benchmarks, the logit lens and the decoding lab. Each job has a form; its log shows live.'},
+ {path:'/features', sel:'#ftabs', title:'Features', body:'What a model represents, as features instead of neurons: train or import a dictionary, read any reply token by token, trace which features produced an output, explore emotion vectors, and steer with both. Start here walks through it.'},
  {path:'/review', sel:'#heat', title:'Neuron review', body:'Every checked reply leaves its activations here. Colour neurons by how they relate to right and wrong answers, per subject, over time.'},
  {path:'/projects', sel:'main', title:'Projects', body:'Paste a project\'s notes; the director splits it into tasks by skill. You approve the plan, worker models do the tasks, you review the results.'},
  {path:'/workers', sel:'#workers', title:'Workers', body:'Where those tasks run: models on this computer, servers you started elsewhere, and other computers running NeuronScope Remote. Pause, limit, route subjects, and watch GPU temperatures.'},

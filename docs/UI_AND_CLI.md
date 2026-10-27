@@ -7,14 +7,19 @@ shell and for automation; and the third column is what an AI agent (Cline,
 Claude Desktop) can do through NeuronScope's MCP server ([CONNECT.md](CONNECT.md)).
 
 Every page has the same sidebar on the left (a bar along the bottom on a
-phone, with the rest under **More**):
+phone, with the rest under **More**). Related pages share a group: hover a
+group to see its pages, and inside one, tabs along the top switch between
+them. A group's icon opens the page you last used in it.
 
 | Sidebar | What it is |
 |---|---|
-| Chat, My Models, Discover, Docs, Tools | Studio's main page: chats; the models in your folders (load, settings, measured accuracy); finding and downloading models from Hugging Face; document collections; MCP tool servers |
-| Jobs, Projects, Workers, Lab, Review, Features | longer runs; tasks for worker models and where they run; labs and 3D views; neuron behaviour over time; feature dictionaries, circuits, emotion vectors and steering |
-| Remote, Devices, Connect | models on other computers; pairing devices and linking Studios; using Studio from other apps |
-| Setup, Settings | paths, llama.cpp, hardware and health check; themes, workspaces, models per subject, tool approval, plugins |
+| **Chat** | chats with your models |
+| **Models**: My Models, Discover | the models in your folders (load, settings, measured accuracy); finding and downloading models from Hugging Face |
+| **Docs**, **Tools** | document collections replies can cite; MCP tool servers |
+| **Tasks**: Jobs, Projects, Workers | longer runs; projects split into tasks for worker models; where those tasks run |
+| **Studio**: Features, Review, Lab | the analysis tools: feature dictionaries, circuits, emotion vectors and steering; neuron behaviour over time; labs and 3D views |
+| **Connect**: Apps, Remote hosts, Devices | using Studio from other apps; models on other computers; pairing devices and linking Studios |
+| **System**, **Setup**, **Settings** | what runs and restarting it, monitoring, automation; paths, llama.cpp, hardware and health check; themes, workspaces, models per subject, tool approval, plugins |
 
 Wherever a file or folder is asked for, **Browse…** opens a picker on the
 computer Studio runs on, and lists of folders are edited one row at a time.
@@ -62,7 +67,7 @@ deliberately not on the Setup page: set it in `config.json` or with flags
 | Check a reply for hallucination risk, 3D view of it | chat → **check** | `POST /api/trace` | `check_reply` |
 | Chat with documents (RAG) | Studio → **Docs** | `python scripts/rag.py` | — |
 | MCP tools inside chat | Studio → **Tools** | `~/.neuronscope/mcp.json`, `python scripts/mcp_client.py` | — |
-| Other devices and linked machines | Studio → **Link** | `/api/pair/*`, `/api/links/*` | — |
+| Other devices and linked machines | **Connect → Devices** | `/api/pair/*`, `/api/links/*` | — |
 | Computers running LM Studio, Ollama or llama.cpp without NeuronScope (remote hosts): pair, models, load/unload, send and install models | **Remote** | the agent: `neuronscope-remote` ([REMOTE.md](REMOTE.md)); `/api/remote/*` | `remote_hosts`, `remote_call` |
 | Cline, Claude Desktop, OpenAI apps | **Connect** | `python scripts/ns_connect.py` | — |
 

@@ -64,7 +64,7 @@ details>summary{cursor:pointer;font-size:12.5px;color:var(--mut)}
 <header><h1>Studio · Features</h1><span id="labpill" class="pill off" title="The decoding lab holds the model for reading replies, graphs and steering">lab: checking…</span>
 <span class="r"><label for="labUrl">Lab address<span class="i" title="The decoding lab (Jobs → Decoding lab) answers on this computer only. Studio passes your requests to it.">i</span></label>
 <input id="labUrl" style="width:13rem" aria-label="Decoding lab address"><button id="labStart" title="Start the decoding lab with a model">Start lab…</button></span></header>
-<nav class="tabs" role="tablist">
+<nav class="tabs" id="ftabs" role="tablist">
 <button data-t="start" role="tab">Start here</button><button data-t="dicts" role="tab">Dictionaries</button>
 <button data-t="read" role="tab">Read a reply</button><button data-t="circuits" role="tab">Circuits</button>
 <button data-t="emotions" role="tab">Emotions</button><button data-t="steer" role="tab">Steer</button></nav>

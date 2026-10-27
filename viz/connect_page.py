@@ -2,7 +2,7 @@
 clients, built from scripts/ns_connect.py so the page and the CLI agree."""
 
 PAGE = r"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Studio Connect</title><script>try{const d=document.documentElement,t=localStorage.getItem('ns-theme')||'dark';d.dataset.theme=localStorage.getItem('ns-theme-base')||(t==='light'?'light':'dark');const v=JSON.parse(localStorage.getItem('ns-theme-vars')||'{}');for(const k in v)d.style.setProperty('--'+k,v[k])}catch{document.documentElement.dataset.theme='dark'}</script>
+<title>Studio Connect Apps</title><script>try{const d=document.documentElement,t=localStorage.getItem('ns-theme')||'dark';d.dataset.theme=localStorage.getItem('ns-theme-base')||(t==='light'?'light':'dark');const v=JSON.parse(localStorage.getItem('ns-theme-vars')||'{}');for(const k in v)d.style.setProperty('--'+k,v[k])}catch{document.documentElement.dataset.theme='dark'}</script>
 <style>
 :root{--bg:#fafaf9;--panel:#fff;--fg:#1c1c1a;--mut:#6b6b66;--line:#e4e4df;--acc:#2d5bd7;--accfg:#fff;--ok:#1f8a4c;--no:#c0392b;--code:#f3f3f0}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#151514;--panel:#1d1d1b;--fg:#ececea;--mut:#9a9a94;--line:#33332f;--acc:#6f93ff;--accfg:#0b0b0a;--ok:#4cc27e;--no:#ff7a6b;--code:#262624}}
@@ -29,7 +29,7 @@ ol{margin:.3rem 0 .3rem 1.2rem;padding:0}
 .ctabs button.on{border-color:var(--acc);color:var(--acc)}#ccHttp,#ccStdio{white-space:pre-wrap;word-break:break-all}ol.steps{margin:.4rem 0 .4rem 1.1rem;padding:0}ol.steps li{margin:.2rem 0}
 .tok{background:color-mix(in srgb,var(--ok) 15%,transparent);border:1px solid var(--ok);border-radius:6px;padding:.6rem;margin-top:.5rem;word-break:break-all}
 </style>
-<header><h1>Studio · Connect</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
+<header><h1>Studio · Connect apps</h1><a href="/">← Studio</a><a href="/setup">Setup</a><a href="/settings">Settings</a><a href="/lab">Lab</a><a href="/review">Review</a><a href="/projects">Projects</a><a href="/workers">Workers</a><a href="/jobs">Jobs</a><a href="/connect">Connect</a></header>
 <main>
 <section class="card"><h2>Who controls whom</h2>
 <div class="roles"><div class="role"><b>Your agent app: CONTROLLER</b><div class="note">Cline, Claude Desktop, Cursor, a script. It decides what to ask, and calls Studio (as the MCP client, or through the OpenAI API).</div></div>
